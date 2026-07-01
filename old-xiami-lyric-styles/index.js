@@ -198,22 +198,6 @@ const syncHostLayout = (entry, snapshot) => {
   const hasCurrent = Number.isFinite(idx) && idx >= 0;
   const rows = entry.host.scroller.querySelectorAll("[data-echo-lyric-row]");
 
-  const prevIdx = entry._prevEffectIdx;
-  if (hasCurrent && prevIdx !== undefined && prevIdx !== idx) {
-    const oldRow = entry.host.scroller.querySelector(
-      `[data-echo-lyric-index="${prevIdx}"]`,
-    );
-    const oldLine = oldRow?.querySelector("[data-echo-lyric-line]");
-    if (oldLine) {
-      oldLine.style.transition = "all 0s";
-      if (entry._clearSnapFrame) cancelAnimationFrame(entry._clearSnapFrame);
-      entry._clearSnapFrame = requestAnimationFrame(() => {
-        oldLine.style.transition = "";
-        entry._clearSnapFrame = 0;
-      });
-    }
-  }
-
   const effectIdx = hasCurrent ? idx : (entry._prevEffectIdx ?? idx);
   entry._prevEffectIdx = effectIdx;
   const hasEffect = Number.isFinite(effectIdx) && effectIdx >= 0;
@@ -291,7 +275,6 @@ const mountClassicEffect = (host) => {
     springScroll: new SpringValue(host.scroller?.scrollTop ?? 0),
     scrollActive: false,
     _prevEffectIdx: undefined,
-    _clearSnapFrame: 0,
   };
 
   const scroller = host.scroller;
@@ -744,9 +727,6 @@ export function deactivate() {
   if (globalFrameId) window.cancelAnimationFrame(globalFrameId);
   globalFrameId = 0;
   globalLastFrameTime = 0;
-  for (const entry of mountedHosts) {
-    if (entry._clearSnapFrame) window.cancelAnimationFrame(entry._clearSnapFrame);
-  }
   effectDispose?.();
   settingsDispose?.();
   settingsStyleDispose?.();
