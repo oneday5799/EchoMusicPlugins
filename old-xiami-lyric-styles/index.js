@@ -198,7 +198,31 @@ const syncHostLayout = (entry, snapshot) => {
   const hasCurrent = Number.isFinite(idx) && idx >= 0;
   const rows = entry.host.scroller.querySelectorAll("[data-echo-lyric-row]");
 
-  const effectIdx = hasCurrent ? idx : (entry._prevEffectIdx ?? idx);
+  // Guard against single-frame backward flicker in the snapshot index.
+  // When the index drops by exactly 1 and then immediately returns to the
+  // previous value on the next frame, we skip the drop to avoid a visual
+  // glitch where the current-line effect flashes on the wrong line.
+  // A legitimate seek/backward jump will persist for multiple frames and
+  // pass through naturally.
+  let effectIdx = hasCurrent ? idx : (entry._prevEffectIdx ?? idx);
+  const prev = entry._prevEffectIdx;
+  if (
+    hasCurrent &&
+    prev !== undefined &&
+    effectIdx < prev &&
+    prev - effectIdx <= 1
+  ) {
+    if (entry._flickerGuard) {
+      // Second consecutive backward frame → allow the jump (it's real)
+      entry._flickerGuard = false;
+    } else {
+      // First backward frame → skip, mark guard
+      entry._flickerGuard = true;
+      effectIdx = prev;
+    }
+  } else {
+    entry._flickerGuard = false;
+  }
   entry._prevEffectIdx = effectIdx;
   const hasEffect = Number.isFinite(effectIdx) && effectIdx >= 0;
 
@@ -275,6 +299,7 @@ const mountClassicEffect = (host) => {
     springScroll: new SpringValue(host.scroller?.scrollTop ?? 0),
     scrollActive: false,
     _prevEffectIdx: undefined,
+    _flickerGuard: false,
   };
 
   const scroller = host.scroller;
