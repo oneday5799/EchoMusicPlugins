@@ -588,7 +588,7 @@ const createSettingsComponent = (ctx) =>
         Object.assign(draft, normalizeSettings(DEFAULT_SETTINGS));
       };
 
-      const slider = (label, key, min, max, hint) =>
+      const slider = (label, key, min, max, hint, scale = 1) =>
         h("div", { class: "echo-classic-settings-row" }, [
           h("div", { class: "echo-classic-settings-line" }, [
             h("span", { class: "echo-classic-settings-title" }, label),
@@ -599,11 +599,11 @@ const createSettingsComponent = (ctx) =>
             ),
           ]),
           h(Slider, {
-            modelValue: draft[key],
+            modelValue: Math.round(draft[key] * scale),
             min,
             max,
             step: 1,
-            "onUpdate:modelValue": (value) => setDraftValue(key, Number(value)),
+            "onUpdate:modelValue": (value) => setDraftValue(key, Number(value) / scale),
           }),
           hint ? h("div", { class: "echo-classic-settings-hint" }, hint) : null,
         ]);
@@ -670,11 +670,11 @@ const createSettingsComponent = (ctx) =>
                 setDraftValue("textAlign", String(value)),
             }),
           ]),
-          slider("当前行放大", "currentScale", 100, 150, "100 为原始大小，150 为放大 1.5 倍。"),
+          slider("当前行放大", "currentScale", 100, 150, "100 为原始大小，150 为放大 1.5 倍。", 100),
           slider("辉光强度", "currentGlow", 0, 80, "当前歌词行的文字发光。"),
-          slider("其他行透明度", "idleOpacity", 20, 80, "非当前行的最低不透明度。"),
+          slider("其他行透明度", "idleOpacity", 20, 80, "非当前行的最低不透明度。", 100),
           slider("滚动过渡", "scrollDuration", 100, 1200, "歌词切换时的过渡动画时长。"),
-          slider("行间距", "lineHeight", 15, 35, "歌词行之间的间距。"),
+          slider("行间距", "lineHeight", 15, 35, "歌词行之间的间距。", 10),
           draft.textAlign === "left"
             ? slider("歌词边距", "lyricPadding", 0, 288, "左对齐时歌词与左侧的间距。")
             : null,
