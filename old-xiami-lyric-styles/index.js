@@ -167,8 +167,6 @@ const applyHostSettings = (entry) => {
 };
 
 // ── Per-row CSS variable diffing ──
-// Only writes when the value actually changed to avoid triggering
-// unnecessary style recalculations on every frame.
 
 const ROW_PROPS = ["--echo-classic-row-scale", "--echo-classic-row-opacity", "--echo-classic-row-blur", "--echo-classic-row-x", "--echo-classic-row-distance", "--echo-classic-row-is-current"];
 
@@ -213,10 +211,8 @@ const syncHostLayout = (entry, snapshot) => {
     prev - effectIdx <= 1
   ) {
     if (entry._flickerGuard) {
-      // Second consecutive backward frame → allow the jump (it's real)
       entry._flickerGuard = false;
     } else {
-      // First backward frame → skip, mark guard
       entry._flickerGuard = true;
       effectIdx = prev;
     }
@@ -226,15 +222,22 @@ const syncHostLayout = (entry, snapshot) => {
   entry._prevEffectIdx = effectIdx;
   const hasEffect = Number.isFinite(effectIdx) && effectIdx >= 0;
 
+  // Respect reduced motion: skip scale/blur effects when the user prefers it
+  const reducedMotion = snapshot.reducedMotion;
+
   rows.forEach((row) => {
     const ri = Number(row.getAttribute("data-echo-lyric-index") || -1);
     const distance = hasEffect ? ri - effectIdx : 0;
     const abs = Math.abs(distance);
     const isCurrent = ri === effectIdx;
 
-    const scale = isCurrent ? s.currentScale : Math.max(0.88, 1 - abs * 0.04);
+    const scale = reducedMotion
+      ? 1
+      : isCurrent
+        ? s.currentScale
+        : Math.max(0.88, 1 - abs * 0.04);
     const opacity = isCurrent ? 1 : Math.max(s.idleOpacity, 1 - abs * 0.22);
-    const blur = isCurrent ? 0 : Math.min(abs * 0.6, 2.4);
+    const blur = reducedMotion ? 0 : (isCurrent ? 0 : Math.min(abs * 0.6, 2.4));
 
     syncRowProps(row, scale, opacity, blur, distance, isCurrent);
   });
@@ -313,10 +316,9 @@ const mountClassicEffect = (host) => {
     scroller.addEventListener("wheel", onWheel, { passive: true });
   }
 
-  // Intercept host auto-scroll with spring physics
   entry.scrollDispose = host.setAutoScrollHandler((request) => {
     if (!state?.settings?.enabled) return false;
-    const { targetTop, smooth, snapshot } = request;
+    const { targetTop, smooth } = request;
     const clamped = Math.max(0, Math.min(targetTop, scroller.scrollHeight - scroller.clientHeight));
 
     if (!smooth || Math.abs(clamped - scroller.scrollTop) < 1) {
@@ -356,6 +358,26 @@ const mountClassicEffect = (host) => {
     r.removeAttribute("data-classic-lyric-marker");
     r.removeAttribute("data-classic-lyric-text-align");
     r.removeAttribute("data-classic-glow-active");
+    // Clean up CSS variables set on root
+    for (const prop of [
+      "--echo-classic-current-scale",
+      "--echo-classic-glow-size",
+      "--echo-classic-idle-opacity",
+      "--echo-classic-scroll-duration",
+      "--echo-classic-line-height",
+      "--echo-classic-text-align",
+      "--echo-classic-transform-origin",
+      "--echo-classic-scroller-padding-x",
+    ]) {
+      r.style.removeProperty(prop);
+    }
+    // Clean up per-row caches
+    for (const row of entry.host.scroller.querySelectorAll("[data-echo-lyric-row]")) {
+      delete row._classicCache;
+      for (const prop of ROW_PROPS) {
+        row.style.removeProperty(prop);
+      }
+    }
   };
 };
 
@@ -500,19 +522,6 @@ const EFFECT_CSS = `
 @keyframes echo-classic-marker-bar {
   0%, 100% { opacity: 1; transform: scaleY(1); }
   50% { opacity: 0.5; transform: scaleY(0.7); }
-}
-
-/* Idle lines fade */
-.echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-line].is-idle {
-  transform:
-    translate3d(var(--echo-classic-row-x, 0px), 0, 0)
-    scale(var(--echo-classic-row-scale, 0.96));
-}
-
-.echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-line].is-current {
-  transform:
-    translate3d(var(--echo-classic-row-x, 0px), 0, 0)
-    scale(var(--echo-classic-row-scale, 1.15));
 }
 
 /* Collapsed mode: keep it subtle */
@@ -742,6 +751,7 @@ export async function activate(ctx) {
     title: "旧版虾米歌词风格",
     scope: "page",
     layer: "style",
+    order: 90,
     className: "echo-classic-lyrics",
     css: EFFECT_CSS,
     mount: mountClassicEffect,
