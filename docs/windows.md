@@ -81,7 +81,7 @@ export function deactivate(ctx) {
 
 ## 窗口入口
 
-窗口脚本可以导出 `activateWindow(ctx)`、`activate(ctx)` 或默认函数。入口上下文独立于主插件上下文，只提供窗口渲染所需的 Vue、容器、私有存储、CSS 注入、Now Playing、字体、音频频谱、受控文件、本地进程和当前窗口控制 API。
+窗口脚本可以导出 `activateWindow(ctx)`、`activate(ctx)` 或默认函数。入口上下文独立于主插件上下文，只提供窗口渲染所需的 Vue、容器、私有存储、CSS 注入、Now Playing、字体、音频频谱、受控文件、本地进程、本地 Web 服务和当前窗口控制 API。
 
 ```js
 export function activateWindow(ctx) {
@@ -220,6 +220,8 @@ async function togglePin(ctx, settings) {
 - `getBounds(windowId)`
 - `setIgnoreMouseEvents(windowId, ignore)`
 - `showOnTop(windowId, options?)`
+
+窗口入口中的 `ctx.webServer` 与主插件入口一致，可用 `listen(handler, options?)` 创建仅监听 `127.0.0.1` 的本地 HTTP 服务。需要在 manifest 中声明 `capabilities.webServer: true`；服务会在插件窗口销毁、插件禁用/卸载或应用退出时自动关闭。
 
 `ctx.windows.showOnTop(windowId, options?)` 与窗口入口的 `ctx.window.showOnTop()` 行为一致，只是按 windowId 指定目标插件窗口；`options.focus` 默认 `true`。
 

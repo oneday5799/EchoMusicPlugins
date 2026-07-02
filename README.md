@@ -159,7 +159,8 @@ pnpm exec electron . --safe-mode
     "localFiles": false,
     "lyricEffects": false,
     "lyrics": false,
-    "process": false
+    "process": false,
+    "webServer": false
   },
   "requires": {
     "echoMusicVersion": ">=2.2.6-beta.9"
@@ -172,7 +173,7 @@ pnpm exec electron . --safe-mode
 
 `runtime.miniPlayer` 可选。设为 `true` 后，EchoMusic 会在 mini 播放器窗口中单独加载该插件。mini 是独立窗口，只需要影响主窗口的插件不应开启该项；如果插件同时影响主窗口和 mini 窗口，需要把两边看成两个独立运行时，它们不共享 JS 内存。
 
-`runtime.desktopLyric` 可选。设为 `true` 后，EchoMusic 会在桌面歌词窗口中单独加载该插件。桌面歌词同样是独立窗口，只需要影响主窗口或 mini 窗口的插件不应开启该项。
+`runtime.desktopLyric` 可选。设为 `true` 后，EchoMusic 会在桌面歌词窗口中单独加载该插件。桌面歌词同样是独立窗口，只需要影响主窗口或 mini 窗口的插件不应开启该项。需要改变原桌面歌词窗口的布局、动效或窗口尺寸时，应同时使用 `ctx.lyricEffects.register({ scope: "desktop", ... })` 和 `ctx.desktopLyric`。
 
 `capabilities.audioSource` 可选。插件如需通过 `ctx.player.audioSource.register()` 接管特定歌曲的播放 URL 解析，必须显式设为 `true`。适合 WebDAV、本地媒体库、私有网盘或其他自定义来源的歌曲。
 
@@ -182,11 +183,13 @@ pnpm exec electron . --safe-mode
 
 `capabilities.localFiles` 可选。插件如需通过 `ctx.fs.listFiles()` 扫描本地音乐目录，通过 `ctx.fs.readTextFile()` / `ctx.fs.readFileBytes()` 读取用户本地文件内容，或通过 `ctx.fs.writeFile()` 写入插件目录内文件，必须显式设为 `true`。适合本地播放、本地媒体库、CUE/M3U/LRC 解析、插件生成缓存图片或图标等场景。播放音频文件本身应使用 `ctx.fs.getFileUrl()` 转成 URL 后交给播放器，不要通过 IPC 读取整首音频。
 
-`capabilities.lyricEffects` 可选。插件如需通过 `ctx.lyricEffects.register()` 调整页面歌词排版、动效或挂载歌词装饰层，必须显式设为 `true`。适合水波歌词、KTV 字幕模板、当前行辉光、歌词背景水印等视觉插件。该能力只影响页面歌词显示，不提供歌词内容解析；提供歌词内容请使用 `capabilities.lyrics`。
+`capabilities.lyricEffects` 可选。插件如需通过 `ctx.lyricEffects.register()` 调整页面歌词或桌面歌词排版、动效或挂载歌词装饰层，必须显式设为 `true`。适合水波歌词、KTV 字幕模板、当前行辉光、歌词背景水印、竖排桌面歌词等视觉插件。该能力只影响歌词显示，不提供歌词内容解析；提供歌词内容请使用 `capabilities.lyrics`。
 
 `capabilities.lyrics` 可选。插件如需通过 `ctx.lyrics.registerResolver()` 为特定歌曲提供歌词内容，必须显式设为 `true`。适合 WebDAV 旁挂 `.lrc`、本地媒体库内嵌歌词或私有歌词服务。
 
 `capabilities.process` 可选。插件如需通过 `ctx.process.launch()` 启动插件目录内的本地辅助程序，必须显式设为 `true`。未声明时主程序会拒绝启动进程。该能力只表示插件可以请求启动自己目录内的可执行文件，不表示启动后的程序运行在沙箱内。
+
+`capabilities.webServer` 可选。插件如需通过 `ctx.webServer.listen()` 创建可被其他本机软件访问的 HTTP 页面或接口，必须显式设为 `true`。服务默认只监听 `127.0.0.1`，适合 Wallpaper Engine、OBS、本地脚本或其他桌面软件读取 EchoMusic 当前状态、歌词页面、可视化页面等场景。插件禁用、卸载、安全模式、运行上下文销毁或应用退出时，宿主会自动释放端口。
 
 `requires.echoMusicVersion` 可选，表示插件要求的 EchoMusic 主程序版本范围，使用 semver range。常见写法是 `>=2.2.6`；如果插件明确不支持下一个大版本，也可以写 `>=2.2.6 <3`。如果只写 `2.2.6`，EchoMusic 会按 `>=2.2.6` 处理。版本范围写错会被标记为 manifest 无效；范围有效但当前主程序不满足时，插件管理页会提示“版本不兼容”并阻止启用。
 
@@ -303,7 +306,7 @@ export default {
 | `ctx.playlist`                                                        | 播放队列便捷 API：读取当前队列/队列歌曲、替换队列、追加歌曲、播放歌曲、加入下一首（插队）、排队候播（顺序追加到下一首播放队列末尾）、清空、移除、重排和切换活动队列                                                                                                                                                                                                                                                                                             |
 | `ctx.lyric` / `ctx.settings`                                          | 歌词 store 与设置 store 的快捷引用，等价于 `ctx.stores.lyric` / `ctx.stores.settings`                                                                                                                                                                                                                                                                                                                         |
 | `ctx.lyrics`                                                          | 歌词稳定 API：`registerResolver(options)` 注册自定义歌词解析器（要求 `capabilities.lyrics: true`）、`getSnapshot()`、`onSnapshot(handler)`、`command(command)`                                                                                                                                                                                                                                                |
-| `ctx.lyricEffects`                                                    | 页面歌词动效 API：`register(options)` 注册歌词视觉效果（要求 `capabilities.lyricEffects: true`），支持注入 CSS class、挂载 overlay 装饰层、订阅歌词播放快照                                                                                                                                                                                                                                                    |
+| `ctx.lyricEffects`                                                    | 歌词动效 API：`register(options)` 注册页面歌词或桌面歌词视觉效果（要求 `capabilities.lyricEffects: true`），支持注入 CSS class、挂载 overlay 装饰层、订阅歌词播放快照                                                                                                                                                                                                                                        |
 | `ctx.appearance`                                                      | 外观快照 API：`getSnapshot()` / `onSnapshot(handler)`，读取深浅色、主题色和字体信息                                                                                                                                                                                                                                                                                                                           |
 | `ctx.fonts`                                                           | 系统字体 API：`getAll()` 获取字体名列表、`getOptions(options?)` 获取可直接传给宿主 `Select` 的选项、`buildFamily(fontName)` 构建 CSS `font-family` 字符串                                                                                                                                                                                                                                                     |
 | `ctx.kugou`                                                           | 调用 EchoMusic 内置酷狗业务接口，要求 manifest 声明 `capabilities.kugouApi: true`；鉴权信息由宿主自动注入                                                                                                                                                                                                                                                                                                     |
@@ -324,6 +327,7 @@ export default {
 | `ctx.appIcons.restoreDefaultWindowIcon()`                             | 立即恢复运行中窗口的图标为默认（所有平台，立即生效）                                                                                                                                                                                                                                                                                                                                                          |
 | `ctx.process.launch(options)`                                         | 启动插件目录内的本地辅助程序，要求 manifest 声明 `capabilities.process: true`                                                                                                                                                                                                                                                                                                                                 |
 | `ctx.process.terminate(pid)`                                          | 终止当前插件通过 `ctx.process.launch()` 启动的进程                                                                                                                                                                                                                                                                                                                                                            |
+| `ctx.webServer`                                                       | 本地 HTTP 服务 API：`listen(handler, options?)`、`status()`、`close()`、`onRequest(handler)`，要求 manifest 声明 `capabilities.webServer: true`；默认监听 `127.0.0.1`，可供访问                                                                                                                                                                                              |
 | `ctx.theme.surface.set(options)`                                      | 请求宿主调整主界面表面透明度和模糊效果，适合背景图、沉浸皮肤等插件                                                                                                                                                                                                                                                                                                                                            |
 | `ctx.theme.surface.clear()`                                           | 清理当前插件提交的表面效果                                                                                                                                                                                                                                                                                                                                                                                    |
 | `ctx.theme.pageTransition.set(options)`                               | 请求宿主调整页面切换动效，适合页面动效和无障碍偏好插件                                                                                                                                                                                                                                                                                                                                                        |
@@ -331,6 +335,7 @@ export default {
 | `ctx.theme.accentGradient.set(options)`                               | 请求宿主调整顶部主题色渐变氛围层（横跨侧栏与内容顶部的色带），支持颜色、角度、高度、透明度与暗色独立覆盖 |
 | `ctx.theme.accentGradient.clear()`                                    | 清理当前插件提交的顶部渐变配置 |
 | `ctx.nowPlaying`                                                      | 当前播放/歌词/外观快照 API，可读取快照、订阅变化、发送播放与歌词命令                                                                                                                                                                                                                                                                                                                                          |
+| `ctx.desktopLyric`                                                    | 桌面歌词 API：`getSnapshot()`、`getWindow()`、`show()`、`hide()`、`updateSettings(partial)`、`updateWindow(bounds)`；可调整原桌面歌词窗口设置和受控窗口尺寸                                                                                                                                                                                                                                                     |
 | `ctx.scroll`                                                          | 页面滚动容器 API：`queryContainers()`、`getCurrentContainer()`、`getState(el)`、`scrollToTop(el?)`、`scrollToBottom(el?)`、`observeContainers(handler)`；用于滚动增强插件，避免依赖宿主内部 DOM 类名                                                                                                                                                                                                            |
 | `ctx.windows`                                                         | 控制当前插件在 manifest 中声明的独立窗口：`show()`、`hide()`、`close()`、`move()`、`getBounds()`、`setIgnoreMouseEvents()` 等；`show()` 可临时覆盖 `alwaysOnTop` 和 `allowOutsideWorkArea`                                                                                                                                                                                                                     |
 | `ctx.toast`                                                           | 应用内提示：`info()`、`success()`、`warning()`、`danger()`                                                                                                                                                                                                                                                                                                                                                    |
@@ -654,6 +659,171 @@ export async function deactivate(ctx) {
 ```
 
 该能力只是限制”从哪里启动”和”由谁确认”。启动后的程序拥有当前系统用户权限，可能访问本地文件、网络和系统资源；请只在确实需要原生能力且用户能够理解风险时使用。
+
+### 本地 Web 服务
+
+插件可以用 `ctx.webServer.listen(handler, options?)` 创建本机 HTTP 服务，把插件生成的页面或接口暴露给其他软件访问。使用前必须在 `manifest.json` 中声明：
+
+```json
+{
+  "capabilities": {
+    "webServer": true
+  }
+}
+```
+
+最小示例：
+
+```js
+export async function activate(ctx) {
+  const result = await ctx.webServer.listen(() => ({
+    headers: { "content-type": "text/html; charset=utf-8" },
+    body: "<!doctype html><title>EchoMusic</title><h1>Hello EchoMusic</h1>",
+  }));
+
+  if (!result.ok) {
+    ctx.toast.warning(result.error);
+    return;
+  }
+
+  ctx.toast.success(`本地页面已启动：${result.url}`);
+  console.log("复制这个地址给 Wallpaper Engine / OBS / 浏览器：", result.url);
+}
+```
+
+`listen()` 默认使用随机可用端口并绑定 `127.0.0.1`，返回：
+
+```js
+{
+  ok: true,
+  pluginId: "my-plugin",
+  host: "127.0.0.1",
+  port: 53217,
+  origin: "http://127.0.0.1:53217",
+  url: "http://127.0.0.1:53217/",
+  startedAt: 1710000000000
+}
+```
+
+也可以指定端口：
+
+```js
+await ctx.webServer.listen(handler, { port: 38123 });
+```
+
+`handler(request)` 收到的请求对象：
+
+| 字段 | 说明 |
+| --- | --- |
+| `requestId` | 本次请求 id，普通插件通常不需要关心 |
+| `method` | HTTP 方法，如 `"GET"` / `"POST"` |
+| `url` | 路径和 query，如 `"/lyrics?theme=dark"` |
+| `path` | URL pathname，如 `"/lyrics"` |
+| `query` | query 对象；重复参数会变成字符串数组 |
+| `headers` | 请求头对象 |
+| `body` | 请求体 `ArrayBuffer` |
+| `remoteAddress` | 远端地址，通常是本机地址 |
+
+返回值可以是字符串、普通 JSON、二进制，或完整响应对象：
+
+```js
+ctx.webServer.listen(async (request) => {
+  if (request.path === "/api/now-playing") {
+    const snapshot = await ctx.nowPlaying.getSnapshot();
+    return {
+      headers: { "content-type": "application/json; charset=utf-8" },
+      body: {
+        title: snapshot.playback?.title || "",
+        artist: snapshot.playback?.artist || "",
+        lyric: snapshot.lyric?.lines?.[snapshot.lyric.currentIndex]?.text || "",
+      },
+    };
+  }
+
+  return {
+    status: 404,
+    body: "Not Found",
+  };
+});
+```
+
+给 Wallpaper Engine 做歌词/状态页面时，可以直接返回 HTML，并让页面用同源接口轮询：
+
+```js
+export async function activate(ctx) {
+  const html = `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body {
+        margin: 0;
+        height: 100vh;
+        display: grid;
+        place-items: center;
+        background: transparent;
+        color: white;
+        font: 600 42px system-ui, sans-serif;
+        text-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+      }
+      small {
+        display: block;
+        margin-top: 12px;
+        font-size: 18px;
+        opacity: 0.72;
+        text-align: center;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div id="lyric">EchoMusic</div>
+      <small id="track"></small>
+    </main>
+    <script>
+      async function tick() {
+        const data = await fetch("/api/now-playing").then((r) => r.json());
+        document.getElementById("lyric").textContent = data.lyric || data.title || "EchoMusic";
+        document.getElementById("track").textContent = [data.title, data.artist].filter(Boolean).join(" - ");
+      }
+      tick();
+      setInterval(tick, 1000);
+    </script>
+  </body>
+</html>`;
+
+  const result = await ctx.webServer.listen(async (request) => {
+    if (request.path === "/api/now-playing") {
+      const snapshot = await ctx.nowPlaying.getSnapshot();
+      return {
+        headers: { "content-type": "application/json; charset=utf-8" },
+        body: {
+          title: snapshot.playback?.title || "",
+          artist: snapshot.playback?.artist || "",
+          lyric: snapshot.lyric?.lines?.[snapshot.lyric.currentIndex]?.text || "",
+        },
+      };
+    }
+
+    return {
+      headers: { "content-type": "text/html; charset=utf-8" },
+      body: html,
+    };
+  });
+
+  if (result.ok) ctx.toast.success(`Wallpaper 页面：${result.url}`);
+}
+```
+
+生命周期与限制：
+
+- 服务只监听 `127.0.0.1`，不会暴露到局域网；`host: "localhost"` 也会归一化为 `127.0.0.1`。
+- 同一插件同一时间只有一个服务；再次 `listen()` 会替换请求处理器，必要时重启端口。
+- 插件禁用、卸载、安全模式、运行上下文销毁或 EchoMusic 退出时会自动关闭服务；也可手动调用 `ctx.webServer.close()`。
+- `ctx.webServer.status()` 可查看当前服务是否运行、端口和未完成请求数。
+- 单次请求体最大 2 MB，单次响应体最大 8 MB，请求处理超时约 15 秒。
+- `handler` 抛错时宿主会记录插件运行异常并返回 500，不会拖垮播放器主流程。
+- `ctx.webServer` 也会出现在插件浮窗上下文中，适合由浮窗里的开关控制服务启停。
 
 ### 注册快捷键
 
@@ -1487,9 +1657,9 @@ export function activate(ctx) {
 
 `ctx.theme.accentGradient.set(...)` 返回提前清理函数，插件禁用时宿主也会自动清理。多个插件同时提交时，后提交的插件对同一字段优先生效。使用自定义壁纸（半透明表面）模式时，宿主会自动隐藏该渐变层。
 
-## 页面歌词动效接入
+## 歌词动效接入
 
-插件可以用 `ctx.lyricEffects.register(...)` 调整主窗口页面歌词的视觉表现。宿主仍负责歌词解析、逐字高亮、滚动和播放时钟；插件只提交样式、装饰层或轻量 DOM 更新。这样适合做水波歌词、字幕模板、当前行辉光、错位排版、歌词装饰线等效果。
+插件可以用 `ctx.lyricEffects.register(...)` 调整主窗口页面歌词或原桌面歌词窗口的视觉表现。宿主仍负责歌词解析、逐字高亮、滚动和播放时钟；插件只提交样式、装饰层或轻量 DOM 更新。这样适合做水波歌词、字幕模板、当前行辉光、错位排版、歌词装饰线、竖排桌面歌词等效果。
 
 使用前在 manifest 中声明：
 
@@ -1545,7 +1715,7 @@ export function activate(ctx) {
 | ----------- | -------------------------------------------------------------------- |
 | `id`        | 当前插件内的动效 id，默认 `default`。同插件同 id 会覆盖旧动效。       |
 | `title`     | 动效名称，用于错误来源和调试信息。                                   |
-| `scope`     | 作用范围，当前支持 `"page"`，表示主窗口页面歌词。                    |
+| `scope`     | 作用范围，支持 `"page"` 和 `"desktop"`，也可传数组同时作用于多个歌词 host。 |
 | `layer`     | `"style"` 或 `"decorator"`。需要 overlay、SVG、Canvas 时用 `decorator`。 |
 | `order`     | 多个动效并存时的排序，数字越小越早应用。                             |
 | `className` | 添加到歌词 host 根节点的 class，可传多个空格分隔的类名。             |
@@ -1569,7 +1739,9 @@ export function activate(ctx) {
 | 选择器/变量                                      | 说明                                 |
 | ------------------------------------------------ | ------------------------------------ |
 | `[data-echo-lyric-host="page"]`                  | 页面歌词 host 根节点。               |
+| `[data-echo-lyric-host="desktop"]`               | 桌面歌词 host 根节点。               |
 | `[data-echo-lyric-scroller="page"]`              | 歌词滚动容器。                       |
+| `[data-echo-lyric-scroller="desktop"]`           | 桌面歌词滚动/切换容器。              |
 | `[data-echo-lyric-row]`                          | 歌词行外层，带 `data-echo-lyric-index/current/distance/abs-distance/scroll-distance`。 |
 | `[data-echo-lyric-line]`                         | 歌词文本容器，带当前行和滚动高亮状态。 |
 | `[data-echo-lyric-primary]`                      | 主歌词文本。                         |
@@ -1586,6 +1758,58 @@ export function activate(ctx) {
 - 用 `className` 限定 CSS 作用域，例如 `.my-water-lyrics [data-echo-lyric-line]`，避免影响其它页面。
 - 优先叠加样式和装饰层，不要替换宿主歌词滚动容器；完整替换渲染器会更脆弱。
 - 尊重 `snapshot.reducedMotion` 或根节点 `data-echo-lyric-reduced-motion="true"`，降低或关闭高频动画。
+- 桌面歌词插件如需在桌面歌词独立窗口运行，需要在 manifest 中设置 `runtime.desktopLyric: true`。只在主窗口注册 `scope: "desktop"` 不会影响已经打开的桌面歌词窗口。
+
+### 桌面歌词窗口 API
+
+`ctx.desktopLyric` 可调整原桌面歌词窗口，而不是新开插件浮窗：
+
+```js
+export function activate(ctx) {
+  if (!ctx.desktopLyric) return;
+
+  let previousSettings = null;
+  let previousWindow = null;
+
+  Promise.all([
+    ctx.desktopLyric.getSnapshot(),
+    ctx.desktopLyric.getWindow(),
+  ]).then(([snapshot, bounds]) => {
+    previousSettings = snapshot.settings;
+    previousWindow = bounds;
+    ctx.desktopLyric.updateSettings({ layout: "vertical" });
+    ctx.desktopLyric.updateWindow({ width: 220, height: 760 });
+  });
+
+  ctx.lyricEffects.register({
+    id: "vertical-desktop",
+    title: "竖排桌面歌词",
+    scope: "desktop",
+    className: "vertical-desktop-lyric",
+    css: `
+.vertical-desktop-lyric[data-echo-lyric-host="desktop"] {
+  padding: 14px;
+}
+
+.vertical-desktop-lyric [data-echo-lyric-scroller="desktop"] {
+  writing-mode: vertical-rl;
+}
+
+.vertical-desktop-lyric [data-echo-lyric-row] {
+  width: auto;
+  height: 100%;
+}
+    `,
+  });
+
+  ctx.dispose(() => {
+    if (previousSettings) ctx.desktopLyric.updateSettings({ layout: previousSettings.layout });
+    if (previousWindow) ctx.desktopLyric.updateWindow(previousWindow);
+  });
+}
+```
+
+`ctx.desktopLyric.updateSettings(partial)` 接收桌面歌词设置片段，目前可用 `layout: "horizontal" | "vertical"` 切换宿主原生横排/竖排渲染。`ctx.desktopLyric.getWindow()` 返回当前桌面歌词窗口边界；`ctx.desktopLyric.updateWindow(bounds)` 接收 `{ x?, y?, width?, height? }`，主进程只做基础有效值和显示器工作区边界约束，然后持久化窗口位置与尺寸。窗口设置会持久化，插件停用时如需恢复用户原布局，应像示例一样在 `ctx.dispose()` 中还原。
 - 如果接管自动滚动，只处理播放自动跟随场景；用户滚轮浏览时应交还宿主默认滚动。
 - `mount()` 中创建的 DOM、RAF、事件监听和订阅都要返回清理函数；宿主会在插件停用和歌词页卸载时调用。
 - 如果动效需要用户配置，使用 `ctx.storage` 保存普通对象，并通过插件设置面板调整 CSS 变量或内部状态。

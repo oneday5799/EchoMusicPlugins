@@ -241,10 +241,11 @@
     {
       "id": "xiaotoolkit",
       "name": "小功能",
-      "description": "热门排序 + 隐藏歌单 + 歌词隐藏控制栏 + 隐藏听歌识曲 + 顶部插件按钮 + 桌面特效",
-      "author": "张三",
-      "path": "xiaotoolkit",
-      "homepage": "https://github.com/hoowhoami/EchoMusicPlugins/tree/main/xiaotoolkit",
+      "description": "热门排序 + 隐藏歌单 + 歌词隐藏控制栏和工具栏 + 隐藏听歌识曲 + 顶部插件按钮 + 桌面特效",
+      "author": "Max8808",
+      "path": "",
+      "repo": "https://github.com/Max8808/xiaotoolkit",
+      "homepage": "https://github.com/Max8808/xiaotoolkit",
       "tags": [
         "toolkit",
         "sort",
