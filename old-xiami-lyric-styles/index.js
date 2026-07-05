@@ -392,7 +392,7 @@ const EFFECT_CSS = `
 }
 
 .echo-classic-lyrics[data-classic-lyric-enabled="true"] .lyric-scroller {
-  overflow: hidden;
+  overflow: auto;
   padding-left: var(--echo-classic-scroller-padding-x, 0px);
   padding-right: var(--echo-classic-scroller-padding-x, 0px);
   mask-image: linear-gradient(180deg, transparent 0%, black 8%, black 92%, transparent 100%);
