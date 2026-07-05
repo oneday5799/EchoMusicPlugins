@@ -160,6 +160,7 @@ pnpm exec electron . --safe-mode
     "lyricEffects": false,
     "lyrics": false,
     "process": false,
+    "sqlite": false,
     "webServer": false
   },
   "requires": {
@@ -188,6 +189,8 @@ pnpm exec electron . --safe-mode
 `capabilities.lyrics` 可选。插件如需通过 `ctx.lyrics.registerResolver()` 为特定歌曲提供歌词内容，必须显式设为 `true`。适合 WebDAV 旁挂 `.lrc`、本地媒体库内嵌歌词或私有歌词服务。
 
 `capabilities.process` 可选。插件如需通过 `ctx.process.launch()` 启动插件目录内的本地辅助程序，必须显式设为 `true`。未声明时主程序会拒绝启动进程。该能力只表示插件可以请求启动自己目录内的可执行文件，不表示启动后的程序运行在沙箱内。
+
+`capabilities.sqlite` 可选。插件如需通过 `ctx.sqlite` 使用 SQLite 私有数据库，必须显式设为 `true`。数据库由宿主创建在 EchoMusic 用户数据目录下，并按插件 id 隔离；插件只能访问自己的命名数据库，不能传入任意本地路径。
 
 `capabilities.webServer` 可选。插件如需通过 `ctx.webServer.listen()` 创建可被其他本机软件访问的 HTTP 页面或接口，必须显式设为 `true`。服务默认只监听 `127.0.0.1`，适合 Wallpaper Engine、OBS、本地脚本或其他桌面软件读取 EchoMusic 当前状态、歌词页面、可视化页面等场景。插件禁用、卸载、安全模式、运行上下文销毁或应用退出时，宿主会自动释放端口。
 
@@ -327,6 +330,7 @@ export default {
 | `ctx.appIcons.restoreDefaultWindowIcon()`                             | 立即恢复运行中窗口的图标为默认（所有平台，立即生效）                                                                                                                                                                                                                                                                                                                                                          |
 | `ctx.process.launch(options)`                                         | 启动插件目录内的本地辅助程序，要求 manifest 声明 `capabilities.process: true`                                                                                                                                                                                                                                                                                                                                 |
 | `ctx.process.terminate(pid)`                                          | 终止当前插件通过 `ctx.process.launch()` 启动的进程                                                                                                                                                                                                                                                                                                                                                            |
+| `ctx.sqlite`                                                          | 插件私有 SQLite API：`open(options?)`、`listDatabases()`、`deleteDatabase(name?)`，打开后可用 `db.exec/run/get/all/transaction/close`，要求 manifest 声明 `capabilities.sqlite: true`                                                                                                                                                                                                                          |
 | `ctx.webServer`                                                       | 本地 HTTP 服务 API：`listen(handler, options?)`、`status()`、`close()`、`onRequest(handler)`，要求 manifest 声明 `capabilities.webServer: true`；默认监听 `127.0.0.1`，可供访问                                                                                                                                                                                              |
 | `ctx.theme.surface.set(options)`                                      | 请求宿主调整主界面表面透明度和模糊效果，适合背景图、沉浸皮肤等插件                                                                                                                                                                                                                                                                                                                                            |
 | `ctx.theme.surface.clear()`                                           | 清理当前插件提交的表面效果                                                                                                                                                                                                                                                                                                                                                                                    |
@@ -659,6 +663,132 @@ export async function deactivate(ctx) {
 ```
 
 该能力只是限制”从哪里启动”和”由谁确认”。启动后的程序拥有当前系统用户权限，可能访问本地文件、网络和系统资源；请只在确实需要原生能力且用户能够理解风险时使用。
+
+### SQLite 私有数据库
+
+插件可以用 `ctx.sqlite` 打开宿主托管的 SQLite 数据库。使用前必须在 `manifest.json` 中声明：
+
+```json
+{
+  "capabilities": {
+    "sqlite": true
+  }
+}
+```
+
+数据库按插件 id 隔离，默认库名是 `main`。插件只能通过库名访问自己的私有数据库，不能传入本机路径：
+
+```js
+export async function activate(ctx) {
+  const db = await ctx.sqlite.open({
+    name: "library",
+    migrations: [
+      {
+        version: 1,
+        sql: `
+          CREATE TABLE IF NOT EXISTS notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            song_id TEXT NOT NULL,
+            text TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_notes_song_id ON notes(song_id);
+        `,
+      },
+    ],
+  });
+
+  if (!db.ok) {
+    ctx.toast.warning(db.error);
+    return;
+  }
+
+  await db.run(
+    "INSERT INTO notes (song_id, text, created_at) VALUES (?, ?, ?)",
+    [ctx.player.currentTrackId.value || "", "喜欢这一段", Date.now()],
+  );
+
+  const latest = await db.get(
+    "SELECT id, text, created_at FROM notes WHERE song_id = ? ORDER BY id DESC",
+    [ctx.player.currentTrackId.value || ""],
+  );
+  if (latest.ok && latest.row) console.log(latest.row);
+
+  ctx.dispose(() => {
+    void db.close();
+  });
+}
+```
+
+打开数据库：
+
+```js
+const db = await ctx.sqlite.open({
+  name: "main",
+  migrations: [
+    { version: 1, sql: "CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, value TEXT)" },
+    { version: 2, sql: "ALTER TABLE cache ADD COLUMN updated_at INTEGER DEFAULT 0" },
+  ],
+  busyTimeoutMs: 3000,
+});
+```
+
+`open(options?)` 返回 `{ ok, pluginId, databaseId, name, version }`，并在成功结果上附加数据库方法：
+
+| 方法 | 说明 |
+| --- | --- |
+| `db.exec(sql)` | 执行一段 SQL，适合建表、建索引、批量 schema 变更 |
+| `db.run(sql, params?)` | 执行写入语句，返回 `{ changes, lastInsertRowid }` |
+| `db.get(sql, params?)` | 查询第一行，返回 `{ ok: true, row }`，没有结果时 `row` 为 `null` |
+| `db.all(sql, params?, options?)` | 查询多行，`options.limit` 默认 1000，最大 5000 |
+| `db.transaction(statements)` | 在事务中顺序执行多条写入语句 |
+| `db.close()` | 关闭当前数据库连接 |
+
+事务示例：
+
+```js
+await db.transaction([
+  { sql: "INSERT INTO cache (key, value, updated_at) VALUES (?, ?, ?)", params: ["a", "1", Date.now()] },
+  { sql: "INSERT INTO cache (key, value, updated_at) VALUES (?, ?, ?)", params: ["b", "2", Date.now()] },
+]);
+```
+
+二进制 BLOB：
+
+```js
+await db.exec("CREATE TABLE IF NOT EXISTS covers (id TEXT PRIMARY KEY, data BLOB)");
+
+// 写入 hex 或 base64 均可；宿主会按 SQLite BLOB 绑定参数。
+await db.run("INSERT OR REPLACE INTO covers (id, data) VALUES (?, ?)", [
+  "album-cover",
+  { type: "base64", data: "iVBORw0KGgo=" },
+]);
+
+const row = await db.get("SELECT data FROM covers WHERE id = ?", ["album-cover"]);
+if (row.ok && row.row?.data?.type === "hex") {
+  console.log(row.row.data.data); // 查询 BLOB 时统一返回 hex 字符串
+}
+```
+
+管理数据库：
+
+```js
+const list = await ctx.sqlite.listDatabases();
+if (list.ok) console.table(list.databases);
+
+await ctx.sqlite.deleteDatabase("library");
+```
+
+限制与生命周期：
+
+- 数据库文件存放在 EchoMusic 用户数据目录的插件私有区，插件无法访问其他插件或主程序数据库。
+- 数据库名默认 `main`，只能包含字母、数字、点、下划线和短横线，且必须以字母或数字开头。
+- 参数只支持数组形式的 `string`、`number`、`boolean`、`null`、`{ type: "hex", data }` 和 `{ type: "base64", data }`；二进制参数会作为 SQLite BLOB 写入。
+- 查询结果中的 BLOB 会返回 `{ type: "hex", data }`，`data` 为小写 hex 字符串。
+- 宿主会拦截 `ATTACH`、`DETACH`、`VACUUM INTO`、`load_extension()`、`PRAGMA database_list` 等可能越界或泄露路径的语句。
+- 单条 SQL 最长约 256 KB；单次查询最多 5000 行，结果 JSON 最大约 8 MB；单个事务最多 500 条语句。
+- 插件禁用、安全模式、运行上下文销毁或 EchoMusic 退出时会自动关闭连接；插件卸载时会删除该插件的 SQLite 私有目录。
+- `ctx.sqlite` 也会出现在插件浮窗上下文中，适合浮窗直接读取或写入当前插件的配置、缓存和历史数据。
 
 ### 本地 Web 服务
 

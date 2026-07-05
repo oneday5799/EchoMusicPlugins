@@ -223,6 +223,8 @@ async function togglePin(ctx, settings) {
 
 窗口入口中的 `ctx.webServer` 与主插件入口一致，可用 `listen(handler, options?)` 创建仅监听 `127.0.0.1` 的本地 HTTP 服务。需要在 manifest 中声明 `capabilities.webServer: true`；服务会在插件窗口销毁、插件禁用/卸载或应用退出时自动关闭。
 
+窗口入口中的 `ctx.sqlite` 与主插件入口一致，可用 `open(options?)` 打开当前插件的私有 SQLite 数据库，并使用 `db.exec/run/get/all/transaction/close` 操作数据。使用前仍需在 manifest 中声明 `capabilities.sqlite: true`；数据库按插件 id 隔离，窗口销毁、插件禁用/卸载或安全模式开启时会由宿主关闭连接。
+
 `ctx.windows.showOnTop(windowId, options?)` 与窗口入口的 `ctx.window.showOnTop()` 行为一致，只是按 windowId 指定目标插件窗口；`options.focus` 默认 `true`。
 
 主入口也可以通过 `ctx.windows.show(windowId, { alwaysOnTop })` 临时切换置顶状态；窗口入口内更推荐使用 `ctx.window.setAlwaysOnTop()`。
