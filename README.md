@@ -156,6 +156,7 @@ pnpm exec electron . --safe-mode
     "audioSource": false,
     "audioSpectrum": false,
     "kugouApi": false,
+    "kugouVerification": false,
     "localFiles": false,
     "lyricEffects": false,
     "lyrics": false,
@@ -179,6 +180,8 @@ pnpm exec electron . --safe-mode
 `capabilities.audioSource` 可选。插件如需通过 `ctx.player.audioSource.register()` 接管特定歌曲的播放 URL 解析，必须显式设为 `true`。适合 WebDAV、本地媒体库、私有网盘或其他自定义来源的歌曲。
 
 `capabilities.kugouApi` 可选。插件如需通过 `ctx.kugou` 调用 EchoMusic 内置的酷狗音乐、歌词、写真和推荐接口，必须显式设为 `true`。插件只传业务参数，不需要也不能传入 token、dfid、mid 等鉴权信息；宿主会使用当前 EchoMusic 登录态和设备态完成请求。
+
+`capabilities.kugouVerification` 可选。插件如需把酷狗接口返回的 `ssaCode` / `eventId` 交给 EchoMusic 完成安全验证，必须显式设为 `true`。插件只发起验证请求，不需要传 `v_type`，也不直接处理验证码提交、登录确认或 `sid` / `edt` 生成；宿主会通过 `/get/verify/info` 读取验证类型，并复用主程序验证弹窗，验证通过后插件应自行重试原业务请求。
 
 `capabilities.audioSpectrum` 可选。插件如需通过 `ctx.audio.spectrum` 读取或订阅音频频谱数据，必须显式设为 `true`。该能力会启动系统音频捕获订阅，请只在可视化或音频分析插件中声明。
 
@@ -313,6 +316,7 @@ export default {
 | `ctx.appearance`                                                      | 外观快照 API：`getSnapshot()` / `onSnapshot(handler)`，读取深浅色、主题色和字体信息                                                                                                                                                                                                                                                                                                                           |
 | `ctx.fonts`                                                           | 系统字体 API：`getAll()` 获取字体名列表、`getOptions(options?)` 获取可直接传给宿主 `Select` 的选项、`buildFamily(fontName)` 构建 CSS `font-family` 字符串                                                                                                                                                                                                                                                     |
 | `ctx.kugou`                                                           | 调用 EchoMusic 内置酷狗业务接口，要求 manifest 声明 `capabilities.kugouApi: true`；鉴权信息由宿主自动注入                                                                                                                                                                                                                                                                                                     |
+| `ctx.kugouVerification.request(challenge)`                            | 请求宿主完成酷狗安全验证，`challenge` 可传 `ssaCode` / `eventId` 字符串，或 `{ eventId }` / `{ ssaCode }`；插件不需要传 `v_type`，宿主会按 `eventId` 读取验证信息；返回 `{ ok: true, eventId }` 或 `{ ok: false, error, canceled? }`，要求 manifest 声明 `capabilities.kugouVerification: true`                                                                                                                                    |
 | `ctx.storage`                                                         | 插件私有 KV 存储，按插件 id 自动隔离                                                                                                                                                                                                                                                                                                                                                                          |
 | `ctx.dialog.selectDirectory(options?)`                                | 打开系统文件夹选择对话框，返回 `{ canceled, paths }`                                                                                                                                                                                                                                                                                                                                                          |
 | `ctx.dialog.selectFiles(options?)`                                    | 打开系统文件选择对话框，支持 `multiple` 和 `filters`                                                                                                                                                                                                                                                                                                                                                          |
@@ -361,6 +365,33 @@ export default {
 | `ctx.icons`                                                           | 宿主图标库（Iconify 格式）                                                                                                                                                                                                                                                                                                                                                                                    |
 | `ctx.commands.execute(id, ...args)`                                   | 执行已注册的插件命令                                                                                                                                                                                                                                                                                                                                                                                          |
 | `ctx.dispose(fn)`                                                     | 注册资源清理回调，禁用时自动调用                                                                                                                                                                                                                                                                                                                                                                              |
+
+### 酷狗安全验证
+
+当插件调用酷狗相关接口并遇到安全验证时，业务响应通常会携带 `ssaCode`，或响应头里有 `ssa-code`。插件不应自己拼验证码页面，也不应直接处理用户 token、设备参数或行为数据；推荐把事件标识交给宿主验证，验证通过后重试原请求。
+
+```js
+async function requestWithVerification(ctx, requestOnce) {
+  const body = await requestOnce();
+  const eventId = body?.ssaCode || body?.eventId || "";
+  const errorCode = Number(body?.error_code || 0);
+  const failed = Number(body?.status || 0) === 0;
+
+  if (!eventId || (errorCode !== 20028 && !failed)) {
+    return body;
+  }
+
+  const verified = await ctx.kugouVerification.request(eventId);
+  if (!verified.ok) {
+    if (!verified.canceled) ctx.toast.warning(verified.error || "安全验证失败");
+    return body;
+  }
+
+  return requestOnce();
+}
+```
+
+`ctx.kugouVerification.request()` 会打开 EchoMusic 主程序的安全验证流程。插件只需要传事件标识；宿主会先用 `eventId` 拉取验证信息，从中获取 `v_type`、`txappid` 等字段，再复用现有的图形验证码、短信验证码和登录确认处理。多个插件或多个请求遇到同一个 `eventId` 时，宿主会复用同一个验证 Promise；不同事件会排队弹出。
 
 ### 播放事件
 
