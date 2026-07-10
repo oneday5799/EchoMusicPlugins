@@ -33,55 +33,6 @@ html,body{width:100%;height:100%;overflow:hidden;background:#09090b;color:#f4f4f
   75%{transform:scale(1.32) translate(1%,1%) rotate(0.5deg)}
   100%{transform:scale(1.3) translate(0%,0%) rotate(0deg)}
 }
-.fluid-bg-layer.active{opacity:1}
-.fluid-bg-layer::before{
-  position:absolute;inset:0;z-index:1;pointer-events:none;content:'';
-  background:rgba(0,0,0,0.24);
-}
-.fluid-bg-layer::after{
-  position:absolute;inset:0;z-index:1;pointer-events:none;content:'';
-  backdrop-filter:blur(64px);
-}
-.fluid-img{
-  position:absolute;
-  width:150%;height:150%;
-  top:-25%;left:-25%;
-  background-size:cover;background-position:center;
-  filter:blur(80px) saturate(1.6) brightness(0.25);
-  will-change:transform;
-}
-.fluid-img-1{animation:fd1 16s ease-in-out infinite}
-.fluid-img-2{animation:fd2 20s ease-in-out infinite;animation-delay:-4s}
-.fluid-img-3{animation:fd3 24s ease-in-out infinite;animation-delay:-8s}
-.fluid-img-4{animation:fd4 18s ease-in-out infinite;animation-delay:-12s}
-@keyframes fd1{
-  0%{transform:translate(0%,0%) rotate(0deg) scale(1)}
-  25%{transform:translate(8%,-6%) rotate(5deg) scale(1.08)}
-  50%{transform:translate(-5%,8%) rotate(-3deg) scale(0.95)}
-  75%{transform:translate(6%,4%) rotate(2deg) scale(1.04)}
-  100%{transform:translate(0%,0%) rotate(0deg) scale(1)}
-}
-@keyframes fd2{
-  0%{transform:translate(0%,0%) rotate(0deg) scale(1.02)}
-  25%{transform:translate(-7%,5%) rotate(-4deg) scale(0.96)}
-  50%{transform:translate(6%,-7%) rotate(3deg) scale(1.06)}
-  75%{transform:translate(-4%,-3%) rotate(-2deg) scale(0.98)}
-  100%{transform:translate(0%,0%) rotate(0deg) scale(1.02)}
-}
-@keyframes fd3{
-  0%{transform:translate(0%,0%) rotate(0deg) scale(0.98)}
-  25%{transform:translate(5%,6%) rotate(3deg) scale(1.05)}
-  50%{transform:translate(-8%,-4%) rotate(-5deg) scale(0.93)}
-  75%{transform:translate(3%,-6%) rotate(2deg) scale(1.03)}
-  100%{transform:translate(0%,0%) rotate(0deg) scale(0.98)}
-}
-@keyframes fd4{
-  0%{transform:translate(0%,0%) rotate(0deg) scale(1.01)}
-  25%{transform:translate(-6%,-5%) rotate(-3deg) scale(1.07)}
-  50%{transform:translate(7%,3%) rotate(4deg) scale(0.94)}
-  75%{transform:translate(-3%,7%) rotate(-2deg) scale(1.02)}
-  100%{transform:translate(0%,0%) rotate(0deg) scale(1.01)}
-}
 .vignette{position:absolute;inset:0;pointer-events:none;background:radial-gradient(circle,transparent 40%,rgba(0,0,0,0.6) 100%)}
 
 /* ===== 歌词层 ===== */
@@ -426,16 +377,6 @@ html,body{width:100%;height:100%;overflow:hidden;background:#09090b;color:#f4f4f
 .close-overlay-btn:hover{background:rgba(255,255,255,0.12);color:#fff;border-color:rgba(255,255,255,0.2)}
 .close-overlay-btn svg{width:16px;height:16px;display:block;stroke:currentColor;fill:none}
 
-/* ===== 关闭按钮 (左上角) ===== */
-.icon-btn{
-  position:absolute;top:16px;left:16px;z-index:20;
-  background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);
-  color:rgba(255,255,255,0.4);width:32px;height:32px;border-radius:50%;
-  cursor:pointer;display:flex;align-items:center;justify-content:center;
-  transition:all 0.2s ease;backdrop-filter:blur(8px);
-}
-.icon-btn:hover{background:rgba(255,255,255,0.1);color:#fff}
-
 /* ===== 队列面板 ===== */
 .queue-panel{
   position:absolute;right:0;top:0;bottom:0;width:320px;z-index:15;
@@ -601,16 +542,6 @@ html,body{width:100%;height:100%;overflow:hidden;background:#09090b;color:#f4f4f
 }
 .sm-anim-option.selected .sm-anim-dot{background:#fff}
 /* 背景设置 */
-.sm-bg-btns{display:flex;gap:8px}
-.sm-bg-btn{
-  flex:1;height:32px;border-radius:8px;border:1px solid rgba(255,255,255,0.1);
-  background:transparent;color:rgba(255,255,255,0.4);font-size:11px;
-  cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px;
-  transition:all 0.2s ease;
-}
-.sm-bg-btn:hover{border-color:rgba(255,255,255,0.2);color:rgba(255,255,255,0.7)}
-.sm-bg-btn.active{background:rgba(255,255,255,0.1);border-color:rgba(255,255,255,0.2);color:#fff}
-.sm-bg-dot{width:6px;height:6px;border-radius:50%;background:currentColor;opacity:0.6}
 /* 关闭按钮 */
 .sm-close{
   position:absolute;bottom:-22px;right:-22px;z-index:30;
@@ -665,6 +596,3 @@ html,body{width:100%;height:100%;overflow:hidden;background:#09090b;color:#f4f4f
 }
 .settings-btn:hover{background:#fff;transform:scale(1.05)}
 .settings-btn svg{width:22px;height:22px;display:block;stroke:currentColor;fill:none;stroke-width:2.5}
-
-/* ===== 时间显示居中 ===== */
-.time-center{position:absolute;bottom:68px;left:50%;transform:translateX(-50%);font-size:13px;font-variant-numeric:tabular-nums;opacity:0.4;z-index:10}

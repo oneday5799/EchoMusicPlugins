@@ -63,16 +63,6 @@
   -webkit-mask-image:linear-gradient(to bottom,transparent 0%,black 11%,black 88%,transparent 100%);
   mask-image:linear-gradient(to bottom,transparent 0%,black 11%,black 88%,transparent 100%);
 }
-.monet-line{
-  position:absolute;left:0;right:0;top:0;
-  padding:0 0.5rem;text-align:left;
-}
-.monet-text{
-  display:block;white-space:pre-wrap;word-break:break-word;
-}
-.monet-char{
-  display:inline;
-}
 .monet-secondary{
   font-size:clamp(0.94rem,1.2vw,1.14rem);
   color:rgba(255,255,255,0.5);font-weight:500;
