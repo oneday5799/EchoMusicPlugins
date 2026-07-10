@@ -713,7 +713,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#09090b;color:#f4f4f
 .monet-bg{
   position:absolute;inset:0;z-index:0;overflow:hidden;pointer-events:none;
   background-size:cover;background-position:center;
-  filter:blur(24px) brightness(0.3) saturate(1.3);
+  filter:blur(6px) brightness(0.3) saturate(1.3);
   transform:scale(1.15);
   opacity:0;transition:opacity 0.8s ease;
 }
@@ -1391,9 +1391,14 @@ function renderLyricLine(){
       var artistStr=bs.artist||'';
       var artists=bs.artists||[];
       if(!artistStr&&artists.length)artistStr=artists.map(function(a){return a.name||a}).join(' / ');
+      // 去掉 "歌手 - 歌名" 中的歌手前缀
+      var rawTitle=bs.title||bs.name||'';
+      if(artistStr&&rawTitle.indexOf(artistStr)===0){
+        rawTitle=rawTitle.substring(artistStr.length).replace(/^\s*[-–—]\s*/,'');
+      }
       window.ModeMonet.syncState({
         artist:artistStr,
-        title:bs.title||bs.name||'',
+        title:rawTitle,
         album:bs.album||'',
         coverUrl:bs.cover||bs.coverUrl||'',
         lines:S.lyricLines.map(function(l){
@@ -1868,8 +1873,14 @@ window.addEventListener('message',function(ev){
       // 同步歌曲信息到莫奈模式
       window._monetBridgeState=window._monetBridgeState||{};
       if(S.track){
-        window._monetBridgeState.artist=S.track.artist||'';
-        window._monetBridgeState.title=S.track.title||S.track.name||'';
+        var mArtist=S.track.artist||'';
+        var mTitle=S.track.title||S.track.name||'';
+        // 去掉 "歌手 - 歌名" 中的歌手前缀
+        if(mArtist&&mTitle.indexOf(mArtist)===0){
+          mTitle=mTitle.substring(mArtist.length).replace(/^\s*[-–—]\s*/,'');
+        }
+        window._monetBridgeState.artist=mArtist;
+        window._monetBridgeState.title=mTitle;
         window._monetBridgeState.album=S.track.album||'';
         window._monetBridgeState.coverUrl=S.track.cover||S.track.coverUrl||'';
       }
