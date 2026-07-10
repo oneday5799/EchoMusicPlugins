@@ -1,0 +1,13 @@
+/* ===== 流光模式专用样式 ===== */
+.liuguang-wrap{
+  display:inline-flex!important;flex-direction:row!important;flex-wrap:nowrap!important;align-items:center;justify-content:center;
+  width:auto;max-width:80vw;min-height:300px;
+  perspective:1000px;position:relative;
+}
+.liuguang-group{
+  display:inline-flex!important;flex-direction:row!important;flex-wrap:nowrap!important;align-items:center;
+  margin:0 0.15em;
+}
+.liuguang-group .word-deco{display:none}
+.liuguang-group{font-size:90px!important}
+.liuguang-wrap{flex-wrap:wrap!important}

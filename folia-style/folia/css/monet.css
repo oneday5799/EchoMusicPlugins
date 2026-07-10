@@ -1,0 +1,155 @@
+/* ===== 莫奈模式 ===== */
+.monet-bg{
+  position:absolute;inset:0;z-index:0;overflow:hidden;pointer-events:none;
+  background-size:cover;background-position:center;
+  filter:blur(6px) brightness(0.3) saturate(1.3);
+  transform:scale(1.15);
+  opacity:0;transition:opacity 0.8s ease;
+}
+.monet-bg.active{opacity:1}
+/* 金色调叠加层 */
+.monet-golden-overlay{
+  position:absolute;inset:0;z-index:1;pointer-events:none;
+  background:
+    linear-gradient(135deg,rgba(234,179,8,0.15),rgba(23,17,8,0.5) 50%,rgba(234,179,8,0.1)),
+    radial-gradient(circle at 18% 34%,rgba(234,179,8,0.2),transparent 40%);
+}
+/* 可读性渐变 - 左亮右暗 */
+.monet-readability{
+  position:absolute;inset:0;z-index:2;pointer-events:none;
+  background:linear-gradient(90deg,rgba(23,17,8,0.08) 0%,rgba(23,17,8,0.2) 30%,rgba(23,17,8,0.5) 65%,rgba(23,17,8,0.75) 100%);
+}
+.monet-layout{
+  position:relative;z-index:10;width:100%;height:100%;
+  display:flex;flex-direction:row;align-items:center;
+  overflow:hidden;
+}
+.monet-left{
+  flex:1;min-width:0;display:flex;flex-direction:column;align-items:flex-start;justify-content:center;
+  padding:5vh 6vw;
+  pointer-events:none;
+}
+.monet-right{
+  flex:0 0 clamp(264px,33.6vw,516px);min-width:0;
+  display:flex;align-items:center;justify-content:flex-end;
+  padding:0 6vw 0 2rem;
+  pointer-events:none;
+}
+.monet-artist{
+  font-size:clamp(1rem,1.8vw,1.8rem);font-style:italic;
+  color:rgba(255,255,255,0.96);letter-spacing:0;
+  margin-bottom:0.4rem;
+}
+.monet-divider{
+  width:1px;height:3.5rem;border-radius:999px;
+  background:linear-gradient(180deg,rgba(255,255,255,0.72),transparent);
+  margin-bottom:0.4rem;transform-origin:top;
+}
+.monet-title{
+  font-size:clamp(1.45rem,3.3vw,2.8rem);font-weight:600;
+  color:rgba(255,255,255,0.95);line-height:1.06;letter-spacing:0;
+  text-shadow:0 14px 36px rgba(0,0,0,0.28);
+}
+.monet-album{
+  font-size:0.8rem;text-transform:uppercase;
+  color:rgba(255,255,255,0.5);letter-spacing:0;
+  margin-top:0.2rem;
+}
+.monet-rail{
+  position:relative;
+  width:100%;height:clamp(260px,42vh,400px);max-width:720px;
+  margin-top:1rem;overflow:hidden;text-align:left;
+  align-self:flex-start;
+  -webkit-mask-image:linear-gradient(to bottom,transparent 0%,black 11%,black 88%,transparent 100%);
+  mask-image:linear-gradient(to bottom,transparent 0%,black 11%,black 88%,transparent 100%);
+}
+.monet-line{
+  position:absolute;left:0;right:0;top:0;
+  padding:0 0.5rem;text-align:left;
+}
+.monet-text{
+  display:block;white-space:pre-wrap;word-break:break-word;
+}
+.monet-char{
+  display:inline;
+}
+.monet-secondary{
+  font-size:clamp(0.94rem,1.2vw,1.14rem);
+  color:rgba(255,255,255,0.5);font-weight:500;
+  margin-top:4px;
+  opacity:0;transform:translateY(8px);
+  animation:monet-slideUp 0.28s ease 0.1s forwards;
+}
+.monet-badge{
+  margin-top:auto;padding-top:1rem;
+}
+.monet-badge::before{
+  content:'';display:inline-block;width:10px;height:10px;border-radius:50%;
+  background:#eab308;margin-right:12px;vertical-align:middle;
+}
+.monet-badge::after{
+  content:'GOLDEN HOUR BUILT-IN';
+  font-size:0.7rem;text-transform:uppercase;letter-spacing:0.05em;
+  color:rgba(255,255,255,0.9);vertical-align:middle;
+}
+.monet-portrait{
+  width:clamp(240px,28.8vw,432px);aspect-ratio:1;
+  border-radius:2rem;overflow:hidden;
+  box-shadow:0 36px 80px rgba(0,0,0,0.45),0 20px 42px rgba(234,179,8,0.22),0 0 0 1px rgba(255,255,255,0.06);
+  background:rgba(255,255,255,0.08);
+}
+.monet-portrait img{
+  width:100%;height:100%;object-fit:cover;
+  transition:opacity 1s ease;
+}
+.monet-audio{
+  position:absolute;bottom:0;left:0;z-index:20;
+  width:min(450px,55vw);height:40px;
+  pointer-events:none;
+}
+.monet-particles{
+  position:absolute;inset:0;z-index:5;pointer-events:none;overflow:hidden;
+}
+.monet-particle{
+  position:absolute;width:46px;height:46px;
+  opacity:0.06;
+}
+.monet-particle::before{
+  content:'';display:block;width:100%;height:100%;
+  background:rgba(252,211,77,0.55);
+  clip-path:polygon(50% 0%,65% 20%,70% 50%,65% 80%,50% 100%,35% 80%,30% 50%,35% 20%);
+  animation:monet-float var(--dur,24s) ease-in-out var(--delay,0s) infinite alternate;
+}
+.monet-particle:nth-child(1){left:12%;top:15%;--dur:22s;--delay:0s}
+.monet-particle:nth-child(2){left:65%;top:20%;--dur:28s;--delay:2s}
+.monet-particle:nth-child(3){left:80%;top:55%;--dur:26s;--delay:4s}
+.monet-particle:nth-child(4){left:25%;top:70%;--dur:30s;--delay:1s}
+.monet-particle:nth-child(5){left:50%;top:40%;--dur:24s;--delay:3s}
+.monet-particle:nth-child(6){left:10%;top:80%;--dur:20s;--delay:5s}
+.monet-particle:nth-child(7){left:75%;top:10%;--dur:32s;--delay:1.5s}
+
+@keyframes monet-slideLeft{
+  from{opacity:0;transform:translateX(-30px) translateY(-10px)}
+  to{opacity:1;transform:translateX(0) translateY(0)}
+}
+@keyframes monet-expandLine{
+  from{opacity:0;transform:scaleY(0)}
+  to{opacity:1;transform:scaleY(1)}
+}
+@keyframes monet-slideUp{
+  from{opacity:0;transform:translateY(20px)}
+  to{opacity:1;transform:translateY(0)}
+}
+@keyframes monet-popIn{
+  from{opacity:0;transform:scale(0.9) translateY(10px)}
+  to{opacity:1;transform:scale(1) translateY(0)}
+}
+@keyframes monet-slideInRight{
+  from{opacity:0;transform:translateX(50px) scale(0.95) rotate(1deg)}
+  to{opacity:1;transform:translateX(0) scale(1) rotate(0)}
+}
+@keyframes monet-float{
+  0%{transform:translateY(-20px) translateX(0) rotate(0deg)}
+  50%{transform:translateY(30px) translateX(15px) rotate(60deg)}
+  100%{transform:translateY(-10px) translateX(-10px) rotate(120deg)}
+}
