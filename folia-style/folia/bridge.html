@@ -741,7 +741,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#09090b;color:#f4f4f
   pointer-events:none;
 }
 .monet-right{
-  flex:0 0 clamp(220px,28vw,430px);min-width:0;
+  flex:0 0 clamp(264px,33.6vw,516px);min-width:0;
   display:flex;align-items:center;justify-content:flex-end;
   padding:0 6vw 0 2rem;
   pointer-events:none;
@@ -768,8 +768,9 @@ html,body{width:100%;height:100%;overflow:hidden;background:#09090b;color:#f4f4f
 }
 .monet-rail{
   position:relative;
-  height:clamp(260px,42vh,400px);max-width:720px;
+  width:100%;height:clamp(260px,42vh,400px);max-width:720px;
   margin-top:1rem;overflow:hidden;text-align:left;
+  align-self:flex-start;
   -webkit-mask-image:linear-gradient(to bottom,transparent 0%,black 11%,black 88%,transparent 100%);
   mask-image:linear-gradient(to bottom,transparent 0%,black 11%,black 88%,transparent 100%);
 }
@@ -803,7 +804,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#09090b;color:#f4f4f
   color:rgba(255,255,255,0.9);vertical-align:middle;
 }
 .monet-portrait{
-  width:clamp(200px,24vw,360px);aspect-ratio:1;
+  width:clamp(240px,28.8vw,432px);aspect-ratio:1;
   border-radius:2rem;overflow:hidden;
   box-shadow:0 36px 80px rgba(0,0,0,0.45),0 20px 42px rgba(234,179,8,0.22),0 0 0 1px rgba(255,255,255,0.06);
   background:rgba(255,255,255,0.08);
@@ -966,7 +967,6 @@ html,body{width:100%;height:100%;overflow:hidden;background:#09090b;color:#f4f4f
               <div class="sm-anim-option" data-val="fuming"><span class="sm-anim-dot"></span>浮名</div>
               <div class="sm-anim-option" data-val="qingsu"><span class="sm-anim-dot"></span>倾诉</div>
               <div class="sm-anim-option" data-val="monet"><span class="sm-anim-dot"></span>莫奈</div>
-              <div class="sm-anim-option" data-val="qunchang"><span class="sm-anim-dot"></span>群唱</div>
             </div>
           </div>
           <div class="sm-anim-wrap">
@@ -1095,7 +1095,6 @@ html,body{width:100%;height:100%;overflow:hidden;background:#09090b;color:#f4f4f
 <script src="modes/xinxiang.js"></script>
 <script src="modes/qingsu.js"></script>
 <script src="modes/monet.js"></script>
-<script src="modes/qunchang.js"></script>
 <script>
 (function(){
 'use strict';
@@ -1522,8 +1521,7 @@ function createNewLine(line,idx,lines,hidden){
     'liuguang':window.ModeLiuguang,
     'xinxiang':window.ModeXinxiang,
     'qingsu':window.ModeQingsu,
-    'monet':window.ModeMonet,
-    'qunchang':window.ModeQunchang
+    'monet':window.ModeMonet
   };
   var modeObj=modeMap[currentAnimMode];
   if(modeObj){
