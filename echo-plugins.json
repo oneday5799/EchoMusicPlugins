@@ -302,6 +302,20 @@
         "floating-window",
         "appearance"
       ]
+    },
+    {
+      "id": "folia-style",
+      "name": "Folia 歌词 beta",
+      "description": "基于 Folia 的歌词可视化插件。",
+      "author": "Oneday5799",
+      "path": "folia-style",
+      "repo": "https://github.com/oneday5799/EchoMusicPlugins",
+      "homepage": "https://github.com/oneday5799/EchoMusicPlugins/tree/main/folia-style",
+      "tags": [
+        "player",
+        "lyrics",
+        "lyric-effects"
+      ]
     }
   ]
 }
