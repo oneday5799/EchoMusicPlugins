@@ -513,6 +513,19 @@ html,body{width:100%;height:100%;overflow:hidden;background:#09090b;color:#f4f4f
 }
 .sm-seg-btn:hover{border-color:rgba(255,255,255,0.2);color:rgba(255,255,255,0.7)}
 .sm-seg-btn.active{background:rgba(255,255,255,0.1);border-color:rgba(255,255,255,0.2);color:#fff}
+/* 歌词时间矫正控件 */
+.sm-mini-btn{
+  width:30px;height:30px;border-radius:8px;
+  border:1px solid rgba(255,255,255,0.1);
+  background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.85);
+  font-size:18px;line-height:1;cursor:pointer;transition:all 0.2s ease;
+}
+.sm-mini-btn:hover:not(:disabled){border-color:rgba(255,255,255,0.25);background:rgba(255,255,255,0.12)}
+.sm-mini-btn:disabled{opacity:0.3;cursor:not-allowed}
+.lyric-offset-value{
+  min-width:48px;text-align:center;font-size:13px;
+  font-variant-numeric:tabular-nums;color:rgba(255,255,255,0.85);
+}
 /* 动画模式下拉菜单 */
 .sm-anim-wrap{position:relative}
 .sm-anim-popup{

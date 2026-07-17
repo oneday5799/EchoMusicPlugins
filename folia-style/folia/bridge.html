@@ -136,6 +136,15 @@
           </button>
         </div>
       </div>
+      <!-- 歌词时间矫正 -->
+      <div class="sm-row">
+        <span class="sm-row-label">歌词时间矫正<br><small style="opacity:.6;margin-left:6px">+ 提前 / - 延后</small></span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <button class="sm-mini-btn" id="lyric-offset-minus" type="button" title="歌词延后 0.1 秒">−</button>
+          <span class="lyric-offset-value" id="lyric-offset-value">0.0s</span>
+          <button class="sm-mini-btn" id="lyric-offset-plus" type="button" title="歌词提前 0.1 秒">+</button>
+        </div>
+      </div>
     </div>
     <!-- 播放列表子页面 -->
     <div class="sm-queue" id="sm-queue">
@@ -254,6 +263,26 @@ var S={
   coverBlur:Boolean(localStorage.getItem('folia-coverBlur')==='1'),
   rhythm:Boolean(localStorage.getItem('folia-rhythm')==='1')
 };
+
+// 歌词时间矫正（秒），正值让歌词提前，负值延后。
+// 只平移"歌词时间轴"，绝不修改真实播放进度（进度条/时间数字不受影响）。
+var lyricTimeOffset=Number(localStorage.getItem('folia-timeOffset'))||0;
+function clampRange(v,a,b){return Math.max(a,Math.min(b,v))}
+// 归一化歌词时间矫正：限制在正负 10 秒并吸附到 0.1 秒
+function normalizeLyricTimeOffset(v){
+  var n=Number(v);
+  if(!isFinite(n))n=0;
+  return Math.round(clampRange(n,-10,10)*10)/10;
+}
+// 返回只用于歌词显示的矫正后播放时间(ms)，不影响真实播放进度
+function effectiveLyricTimeMs(){
+  return getLocalTimeMs()+normalizeLyricTimeOffset(lyricTimeOffset)*1000;
+}
+// 格式化为 +1.2s / -0.5s / 0.0s
+function formatLyricTimeOffset(v){
+  var s=normalizeLyricTimeOffset(v);
+  return (s>0?'+':(s<0?'-':''))+Math.abs(s).toFixed(1)+'s';
+}
 
 // 本地时间外推: 在两次宿主 position 消息之间自行推进时间
 var lastPositionMs=0;       // 宿主发来的时间戳
@@ -422,7 +451,7 @@ function schedulePreExit(){
   var lineDuration=parseFloat(currentLineEl.dataset.duration||2000);
   var exitInfo=getExitModeAndDur(lineDuration);
   var exitStartMs=lineEnd-exitInfo.dur;
-  var currentTimeMs=getLocalTimeMs();
+  var currentTimeMs=effectiveLyricTimeMs();
   var delayMs=exitStartMs-currentTimeMs;
   if(delayMs<=0){
     startLineExit(currentLineEl);
@@ -605,7 +634,7 @@ function updateWordStates(){
   if(currentLineEl.classList.contains('lyric-exiting'))return;
   var groups=currentLineEl.querySelectorAll('.word-group');
   if(!groups.length)return;
-  var t=getLocalTimeMs();
+  var t=effectiveLyricTimeMs();
   var isXinxiang=currentAnimMode==='xinxiang';
   var U=window.ModeUtils;
 
@@ -981,7 +1010,7 @@ window.addEventListener('message',function(ev){
         schedulePreExit();
       }
       // 用外推时间检查行切换
-      var localT=getLocalTimeMs();
+      var localT=effectiveLyricTimeMs();
       var newIdx=-1;
       for(var i=S.lyricLines.length-1;i>=0;i--){
         if(localT>=S.lyricLines[i].time_ms){newIdx=i;break}
@@ -1322,6 +1351,33 @@ function updateSettingsVolume(){
   document.getElementById('sm-volume-fill').style.width=vol+'%';
   document.getElementById('sm-volume-thumb').style.left=vol+'%';
 }
+// ===== 歌词时间矫正控件 =====
+function updateLyricOffsetControls(){
+  var v=normalizeLyricTimeOffset(lyricTimeOffset);
+  var val=document.getElementById('lyric-offset-value');
+  var minus=document.getElementById('lyric-offset-minus');
+  var plus=document.getElementById('lyric-offset-plus');
+  if(val)val.textContent=formatLyricTimeOffset(v);
+  if(minus)minus.disabled=v<=-10;
+  if(plus)plus.disabled=v>=10;
+}
+function setLyricTimeOffset(v){
+  lyricTimeOffset=normalizeLyricTimeOffset(v);
+  try{localStorage.setItem('folia-timeOffset',String(lyricTimeOffset))}catch(e){}
+  updateLyricOffsetControls();
+  // 立即重算当前歌词行/逐字，无需等下一帧
+  if(S.lyricLines.length){
+    var lyricT=effectiveLyricTimeMs();
+    var newIdx=-1;
+    for(var i=S.lyricLines.length-1;i>=0;i--){
+      if(lyricT>=S.lyricLines[i].time_ms){newIdx=i;break}
+    }
+    if(newIdx!==S.lyricIndex){S.lyricIndex=newIdx;renderLyricLine();}
+    if(currentLineEl)updateWordStates();
+  }
+}
+document.getElementById('lyric-offset-minus').onclick=function(){setLyricTimeOffset(lyricTimeOffset-0.1)};
+document.getElementById('lyric-offset-plus').onclick=function(){setLyricTimeOffset(lyricTimeOffset+0.1)};
 var volTrack=document.getElementById('sm-volume-track');
 var volDragging=false;
 function volSeek(e){
@@ -1487,26 +1543,27 @@ function tick(now){
   // 用外推时间更新歌词和逐字状态
   if(S.isPlaying&&S.lyricLines.length){
     var localT=getLocalTimeMs();
-    // 更新进度条
+    // 更新进度条（使用真实播放时间，不受歌词时间矫正影响）
     var pct=S.durationMs>0?(localT/S.durationMs)*100:0;
     document.getElementById('progress-fill').style.width=pct+'%';
     document.getElementById('time-current').textContent=formatTime(localT);
-    // 检查行切换
+    // 检查行切换（使用矫正后的歌词时间）
+    var lyricT=effectiveLyricTimeMs();
     var newIdx=-1;
     for(var i=S.lyricLines.length-1;i>=0;i--){
-      if(localT>=S.lyricLines[i].time_ms){newIdx=i;break}
+      if(lyricT>=S.lyricLines[i].time_ms){newIdx=i;break}
     }
     if(newIdx!==S.lyricIndex){
       S.lyricIndex=newIdx;
       renderLyricLine();
     }
-    // 更新逐字状态
+    // 更新逐字状态（使用矫正后的歌词时间）
     updateWordStates();
-    // 倾诉模式逐字更新
+    // 倾诉模式逐字更新（使用矫正后的歌词时间）
     if(currentAnimMode==='qingsu'&&currentLineEl&&window.ModeQingsu){
-      try{window.ModeQingsu.updateStates(currentLineEl,getLocalTimeMs())}catch(qe){}
+      try{window.ModeQingsu.updateStates(currentLineEl,effectiveLyricTimeMs())}catch(qe){}
     }
-    // 莫奈模式更新
+    // 莫奈模式更新（可视化，使用真实时间）
     if(currentAnimMode==='monet'&&window.ModeMonet){
       try{window.ModeMonet.update(localT)}catch(qe){}
     }
@@ -1525,6 +1582,8 @@ if(S.coverBlur||S.rhythm){
   updateCoverBlurBtn();
   updateBgLayer();
 }
+// 同步歌词时间矫正控件初始显示
+updateLyricOffsetControls();
 requestAnimationFrame(tick);
 parent.postMessage({source:'echo-folia-child',type:'echo-folia:ready'},'*');
 
