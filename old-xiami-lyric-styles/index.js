@@ -235,11 +235,15 @@ const syncHostLayout = (entry, snapshot) => {
 
     syncRowProps(row, scale, opacity, blur, distance, isCurrent);
 
-    // 在 LINE 元素上设置 CSS 变量，供辉光/标记等 CSS 选择器使用。
-    // 使用 style.setProperty 而非 setAttribute，Vue 不会覆盖 inline style。
     const line = row.querySelector("[data-echo-lyric-line]");
     if (line) {
+      // CSS 变量控制辉光/模糊/透明度，Vue 不会覆盖 inline style
       line.style.setProperty("--echo-classic-row-is-current", isCurrent ? "1" : "0");
+      // 属性控制标记（marker），因为 CSS 动画会覆盖 opacity 变量
+      const expected = isCurrent ? "true" : "false";
+      if (line.getAttribute("data-classic-is-current") !== expected) {
+        line.setAttribute("data-classic-is-current", expected);
+      }
     }
   });
 };
@@ -443,7 +447,7 @@ const EFFECT_CSS = `
 }
 
 /* Current line marker — left-aligned (absolute, outside text) */
-.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-marker="dot"] [data-echo-lyric-line]::before {
+.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-marker="dot"] [data-echo-lyric-line][data-classic-is-current="true"]::before {
   content: "";
   position: absolute;
   left: -16px;
@@ -457,10 +461,9 @@ const EFFECT_CSS = `
     0 0 6px currentColor,
     0 0 14px currentColor;
   animation: echo-classic-marker-pulse 1.8s ease-in-out infinite;
-  opacity: var(--echo-classic-row-is-current, 0);
 }
 
-.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-marker="bar"] [data-echo-lyric-line]::before {
+.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-marker="bar"] [data-echo-lyric-line][data-classic-is-current="true"]::before {
   content: "";
   position: absolute;
   left: -16px;
@@ -471,7 +474,6 @@ const EFFECT_CSS = `
   background: currentColor;
   box-shadow: 0 0 8px currentColor;
   animation: echo-classic-marker-bar 2.4s ease-in-out infinite;
-  opacity: var(--echo-classic-row-is-current, 0);
 }
 
 /* Current line marker — center-aligned (inline, flows with text) */
@@ -479,7 +481,7 @@ const EFFECT_CSS = `
   content: none !important;
 }
 
-.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-text-align="center"][data-classic-lyric-marker="dot"] [data-echo-lyric-primary]::before {
+.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-text-align="center"][data-classic-lyric-marker="dot"] [data-echo-lyric-line][data-classic-is-current="true"] [data-echo-lyric-primary]::before {
   content: "" !important;
   display: inline-block;
   vertical-align: middle;
@@ -492,14 +494,13 @@ const EFFECT_CSS = `
     0 0 6px currentColor,
     0 0 14px currentColor;
   animation: echo-classic-marker-pulse 1.8s ease-in-out infinite;
-  opacity: var(--echo-classic-row-is-current, 0);
 }
 
 .echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-text-align="center"][data-classic-lyric-marker="bar"] [data-echo-lyric-line]::before {
   content: none !important;
 }
 
-.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-text-align="center"][data-classic-lyric-marker="bar"] [data-echo-lyric-primary]::before {
+.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-text-align="center"][data-classic-lyric-marker="bar"] [data-echo-lyric-line][data-classic-is-current="true"] [data-echo-lyric-primary]::before {
   content: "" !important;
   display: inline-block;
   vertical-align: middle;
@@ -510,7 +511,6 @@ const EFFECT_CSS = `
   background: currentColor;
   box-shadow: 0 0 8px currentColor;
   animation: echo-classic-marker-bar 2.4s ease-in-out infinite;
-  opacity: var(--echo-classic-row-is-current, 0);
 }
 
 @keyframes echo-classic-marker-pulse {
