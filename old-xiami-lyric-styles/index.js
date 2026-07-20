@@ -131,7 +131,7 @@ const normalizeSettings = (value) => {
     currentGlow: clamp(source.currentGlow ?? DEFAULT_SETTINGS.currentGlow, 0, 80),
     idleOpacity: clamp(source.idleOpacity ?? DEFAULT_SETTINGS.idleOpacity, 0.2, 0.8),
     scrollDuration: clamp(source.scrollDuration ?? DEFAULT_SETTINGS.scrollDuration, 100, 1200),
-    lineHeight: clamp(source.lineHeight ?? DEFAULT_SETTINGS.lineHeight, 1.5, 3.5),
+    lineHeight: clamp(source.lineHeight ?? DEFAULT_SETTINGS.lineHeight, 1.5, 5.0),
     showMarker: source.showMarker ?? DEFAULT_SETTINGS.showMarker,
     markerStyle: ["dot", "bar", "none"].includes(source.markerStyle) ? source.markerStyle : DEFAULT_SETTINGS.markerStyle,
     textAlign: ["left", "center"].includes(source.textAlign) ? source.textAlign : DEFAULT_SETTINGS.textAlign,
@@ -404,8 +404,8 @@ const EFFECT_CSS = `
 }
 
 .echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-row] {
-  padding-top: 6px !important;
-  padding-bottom: 6px !important;
+  padding-top: calc(var(--echo-classic-line-height, 2.1) * 3px) !important;
+  padding-bottom: calc(var(--echo-classic-line-height, 2.1) * 3px) !important;
   opacity: var(--echo-classic-row-opacity, 1);
 }
 
@@ -707,7 +707,7 @@ const createSettingsComponent = (ctx) =>
           slider("辉光强度", "currentGlow", 0, 80, "当前歌词行的文字发光。"),
           slider("其他行透明度", "idleOpacity", 20, 80, "非当前行的最低不透明度。", 100),
           slider("滚动过渡", "scrollDuration", 100, 1200, "歌词切换时的过渡动画时长。"),
-          slider("行间距", "lineHeight", 15, 35, "歌词行之间的间距。", 10),
+          slider("行间距", "lineHeight", 15, 50, "歌词行之间的间距。", 10),
           draft.textAlign === "left"
             ? slider("歌词边距", "lyricPadding", 0, 288, "左对齐时歌词与左侧的间距。")
             : null,
