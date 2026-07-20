@@ -244,6 +244,25 @@ const syncHostLayout = (entry, snapshot) => {
       if (line.getAttribute("data-classic-is-current") !== expected) {
         line.setAttribute("data-classic-is-current", expected);
       }
+
+      // 检测当前行是否溢出，启用横向滚动
+      const primary = line.querySelector("[data-echo-lyric-primary]");
+      if (primary) {
+        if (isCurrent && primary.scrollWidth > line.clientWidth + 2) {
+          line.classList.add("is-overflowing");
+          const overflow = primary.scrollWidth - line.clientWidth;
+          // 滚动距离 = 溢出量 + 两侧留白
+          const distance = overflow + 40;
+          // 滚动速度：每秒约 100px，动画时长 = 停留 + 滚动时间
+          const duration = Math.max(3, (distance / 100) + 1.5);
+          line.style.setProperty("--echo-classic-marquee-distance", `${distance}px`);
+          line.style.setProperty("--echo-classic-marquee-duration", `${duration}s`);
+        } else {
+          line.classList.remove("is-overflowing");
+          line.style.removeProperty("--echo-classic-marquee-distance");
+          line.style.removeProperty("--echo-classic-marquee-duration");
+        }
+      }
     }
   });
 };
@@ -381,6 +400,15 @@ const mountClassicEffect = (host) => {
       for (const prop of ROW_PROPS) {
         row.style.removeProperty(prop);
       }
+      // Clean up marquee state
+      const line = row.querySelector("[data-echo-lyric-line]");
+      if (line) {
+        line.classList.remove("is-overflowing");
+        line.removeAttribute("data-classic-is-current");
+        line.style.removeProperty("--echo-classic-row-is-current");
+        line.style.removeProperty("--echo-classic-marquee-distance");
+        line.style.removeProperty("--echo-classic-marquee-duration");
+      }
     }
   };
 };
@@ -424,6 +452,26 @@ const EFFECT_CSS = `
     scale(var(--echo-classic-row-scale, 1)) !important;
   opacity: var(--echo-classic-row-opacity, 1) !important;
   filter: blur(var(--echo-classic-row-blur, 0px));
+}
+
+/* 当前行溢出时启用横向滚动 */
+.echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-line][data-classic-is-current="true"].is-overflowing {
+  overflow: hidden;
+}
+
+.echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-line][data-classic-is-current="true"].is-overflowing [data-echo-lyric-primary] {
+  display: inline-block;
+  animation: echo-classic-marquee var(--echo-classic-marquee-duration, 6s) ease-out forwards;
+  animation-delay: 0.3s;
+}
+
+@keyframes echo-classic-marquee {
+  0% {
+    transform: translateX(0);
+  }
+  30%, 100% {
+    transform: translateX(calc(var(--echo-classic-marquee-distance, 0px) * -1));
+  }
 }
 
 .echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-line] {
