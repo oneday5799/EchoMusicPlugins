@@ -235,15 +235,11 @@ const syncHostLayout = (entry, snapshot) => {
 
     syncRowProps(row, scale, opacity, blur, distance, isCurrent);
 
-    // 使用 data-classic-is-current（插件自有属性）代替 data-echo-lyric-current，
-    // 避免 Vue 模板绑定异步覆盖插件设置的属性。
-    const expected = isCurrent ? "true" : "false";
-    if (row.getAttribute("data-classic-is-current") !== expected) {
-      row.setAttribute("data-classic-is-current", expected);
-    }
+    // 在 LINE 元素上设置 CSS 变量，供辉光/标记等 CSS 选择器使用。
+    // 使用 style.setProperty 而非 setAttribute，Vue 不会覆盖 inline style。
     const line = row.querySelector("[data-echo-lyric-line]");
-    if (line && line.getAttribute("data-classic-is-current") !== expected) {
-      line.setAttribute("data-classic-is-current", expected);
+    if (line) {
+      line.style.setProperty("--echo-classic-row-is-current", isCurrent ? "1" : "0");
     }
   });
 };
@@ -426,8 +422,8 @@ const EFFECT_CSS = `
   filter: blur(var(--echo-classic-row-blur, 0px));
 }
 
-.echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-line][data-classic-is-current="true"] {
-  filter: blur(0px);
+.echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-line] {
+  filter: blur(calc(var(--echo-classic-row-blur, 0px) * (1 - var(--echo-classic-row-is-current, 0))));
 }
 
 .echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-primary] {
@@ -435,25 +431,19 @@ const EFFECT_CSS = `
   transition:
     color var(--echo-classic-scroll-duration) ease,
     text-shadow var(--echo-classic-scroll-duration) ease;
-}
-
-.echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-line][data-classic-is-current="true"] [data-echo-lyric-primary] {
   text-shadow:
-    0 0 var(--echo-classic-glow-size) var(--color-primary, #31cfa1),
-    0 0 calc(var(--echo-classic-glow-size) * 2) var(--color-primary, #31cfa1) !important;
+    0 0 calc(var(--echo-classic-glow-size) * var(--echo-classic-row-is-current, 0)) var(--color-primary, #31cfa1),
+    0 0 calc(var(--echo-classic-glow-size) * 2 * var(--echo-classic-row-is-current, 0)) var(--color-primary, #31cfa1) !important;
 }
 
 .echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-secondary] {
   transition:
     opacity var(--echo-classic-scroll-duration) ease;
-}
-
-.echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-line][data-classic-is-current="true"] [data-echo-lyric-secondary] {
-  opacity: 0.85 !important;
+  opacity: calc(var(--echo-classic-row-opacity, 1) + 0.85 * var(--echo-classic-row-is-current, 0) * (1 - var(--echo-classic-row-opacity, 1))) !important;
 }
 
 /* Current line marker — left-aligned (absolute, outside text) */
-.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-marker="dot"] [data-echo-lyric-line][data-classic-is-current="true"]::before {
+.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-marker="dot"] [data-echo-lyric-line]::before {
   content: "";
   position: absolute;
   left: -16px;
@@ -467,9 +457,10 @@ const EFFECT_CSS = `
     0 0 6px currentColor,
     0 0 14px currentColor;
   animation: echo-classic-marker-pulse 1.8s ease-in-out infinite;
+  opacity: var(--echo-classic-row-is-current, 0);
 }
 
-.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-marker="bar"] [data-echo-lyric-line][data-classic-is-current="true"]::before {
+.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-marker="bar"] [data-echo-lyric-line]::before {
   content: "";
   position: absolute;
   left: -16px;
@@ -480,14 +471,15 @@ const EFFECT_CSS = `
   background: currentColor;
   box-shadow: 0 0 8px currentColor;
   animation: echo-classic-marker-bar 2.4s ease-in-out infinite;
+  opacity: var(--echo-classic-row-is-current, 0);
 }
 
 /* Current line marker — center-aligned (inline, flows with text) */
-.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-text-align="center"][data-classic-lyric-marker="dot"] [data-echo-lyric-line][data-classic-is-current="true"]::before {
+.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-text-align="center"][data-classic-lyric-marker="dot"] [data-echo-lyric-line]::before {
   content: none !important;
 }
 
-.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-text-align="center"][data-classic-lyric-marker="dot"] [data-echo-lyric-line][data-classic-is-current="true"] [data-echo-lyric-primary]::before {
+.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-text-align="center"][data-classic-lyric-marker="dot"] [data-echo-lyric-primary]::before {
   content: "" !important;
   display: inline-block;
   vertical-align: middle;
@@ -500,13 +492,14 @@ const EFFECT_CSS = `
     0 0 6px currentColor,
     0 0 14px currentColor;
   animation: echo-classic-marker-pulse 1.8s ease-in-out infinite;
+  opacity: var(--echo-classic-row-is-current, 0);
 }
 
-.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-text-align="center"][data-classic-lyric-marker="bar"] [data-echo-lyric-line][data-classic-is-current="true"]::before {
+.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-text-align="center"][data-classic-lyric-marker="bar"] [data-echo-lyric-line]::before {
   content: none !important;
 }
 
-.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-text-align="center"][data-classic-lyric-marker="bar"] [data-echo-lyric-line][data-classic-is-current="true"] [data-echo-lyric-primary]::before {
+.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-text-align="center"][data-classic-lyric-marker="bar"] [data-echo-lyric-primary]::before {
   content: "" !important;
   display: inline-block;
   vertical-align: middle;
@@ -517,6 +510,7 @@ const EFFECT_CSS = `
   background: currentColor;
   box-shadow: 0 0 8px currentColor;
   animation: echo-classic-marker-bar 2.4s ease-in-out infinite;
+  opacity: var(--echo-classic-row-is-current, 0);
 }
 
 @keyframes echo-classic-marker-pulse {
