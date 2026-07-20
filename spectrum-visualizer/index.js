@@ -337,7 +337,7 @@ const drawBars = (context, width, height, frame, settings, kind) => {
   context.beginPath();
 
   for (let index = 0; index < count; index += 1) {
-    const value = Math.pow((bins[index] || 0) / 255, 1.35);
+    const value = Math.pow(clamp(bins[index] || 0, 0, 1), 1.35);
     const barHeight = Math.max(2, value * (bottom - top));
     const x = index * slot + gap * 0.5;
     const y = bottom - barHeight;
@@ -491,7 +491,7 @@ function updateSpectrumSubscription() {
         setSpectrumStatus({
           available: true,
           running: true,
-          provider: "system-loopback",
+          provider: "player",
         });
       }
     },

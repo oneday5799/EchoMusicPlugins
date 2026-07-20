@@ -110,8 +110,8 @@
     {
       "id": "Lyrics-bridge",
       "path": "",
-      "repo": "https://github.com/xiaotian2333/Lyrics-bridge",
-      "homepage": "https://github.com/xiaotian2333/Lyrics-bridge",
+      "repo": "https://github.com/EchoMusic-org/Lyrics-bridge",
+      "homepage": "https://github.com/EchoMusic-org/Lyrics-bridge",
       "tags": [
         "WinIsland",
         "lyrics",
@@ -232,8 +232,8 @@
       "description": "仿酷狗唱片播放器",
       "author": "xiaotian2333",
       "path": "",
-      "repo": "https://github.com/xiaotian2333/EchoMusic-Record-player",
-      "homepage": "https://github.com/xiaotian2333/EchoMusic-Record-player",
+      "repo": "https://github.com/EchoMusic-org/Record-player",
+      "homepage": "https://github.com/EchoMusic-org/Record-player",
       "tags": [
         "beautify"
       ]
@@ -260,8 +260,8 @@
       "description": "频道漫游，无限发现音乐",
       "author": "xiaotian2333",
       "path": "",
-      "repo": "https://github.com/xiaotian2333/EchoMusic-channel-wander",
-      "homepage": "https://github.com/xiaotian2333/EchoMusic-channel-wander",
+      "repo": "https://github.com/EchoMusic-org/channel-wander",
+      "homepage": "https://github.com/EchoMusic-org/channel-wander",
       "tags": [
         "wander"
       ]
@@ -272,8 +272,8 @@
       "description": "仿Mineradio歌词页",
       "author": "xiaotian2333",
       "path": "",
-      "repo": "https://github.com/xiaotian2333/EchoMusic-player-frontend",
-      "homepage": "hhttps://github.com/xiaotian2333/EchoMusic-player-frontend",
+      "repo": "https://github.com/EchoMusic-org/player-frontend",
+      "homepage": "https://github.com/EchoMusic-org/player-frontend",
       "tags": [
         "player",
         "lyrics"
