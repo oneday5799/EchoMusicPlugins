@@ -457,6 +457,8 @@ const EFFECT_CSS = `
 /* 当前行溢出时启用横向滚动 */
 .echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-line][data-classic-is-current="true"].is-overflowing {
   overflow: hidden;
+  mask-image: linear-gradient(90deg, transparent 0px, black 16px, black calc(100% - 16px), transparent 100%);
+  -webkit-mask-image: linear-gradient(90deg, transparent 0px, black 16px, black calc(100% - 16px), transparent 100%);
 }
 
 .echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-line][data-classic-is-current="true"].is-overflowing [data-echo-lyric-primary] {
