@@ -196,29 +196,23 @@ const syncHostLayout = (entry, snapshot) => {
   const hasCurrent = Number.isFinite(idx) && idx >= 0;
   const rows = entry.host.scroller.querySelectorAll("[data-echo-lyric-row]");
 
-  // Guard against single-frame backward flicker in the snapshot index.
-  // When the index drops by exactly 1 and then immediately returns to the
-  // previous value on the next frame, we skip the drop to avoid a visual
-  // glitch where the current-line effect flashes on the wrong line.
-  // A legitimate seek/backward jump will persist for multiple frames and
-  // pass through naturally.
   let effectIdx = hasCurrent ? idx : (entry._prevEffectIdx ?? idx);
-  const prev = entry._prevEffectIdx;
+  const prevIdx = entry._prevEffectIdx;
+  let filterApplied = false;
+
+  // 抖动过滤：忽略小幅向后跳跃（≤2 行）。
+  // 宿主的 buildLyricEffectSnapshot 也有类似过滤，但它依赖 0.35 秒的时间阈值，
+  // 当 playerStore.currentTime 因 IPC 缓冲或播放速率变化而抖动时可能失效。
+  // 插件层无条件阻止小幅向后跳跃，防止旧行短暂闪烁当前行效果。
   if (
-    hasCurrent &&
-    prev !== undefined &&
-    effectIdx < prev &&
-    prev - effectIdx <= 1
+    entry._prevEffectIdx !== undefined &&
+    effectIdx < entry._prevEffectIdx &&
+    entry._prevEffectIdx - effectIdx <= 2
   ) {
-    if (entry._flickerGuard) {
-      entry._flickerGuard = false;
-    } else {
-      entry._flickerGuard = true;
-      effectIdx = prev;
-    }
-  } else {
-    entry._flickerGuard = false;
+    effectIdx = entry._prevEffectIdx;
+    filterApplied = true;
   }
+
   entry._prevEffectIdx = effectIdx;
   const hasEffect = Number.isFinite(effectIdx) && effectIdx >= 0;
 
@@ -240,6 +234,17 @@ const syncHostLayout = (entry, snapshot) => {
     const blur = reducedMotion ? 0 : (isCurrent ? 0 : Math.min(abs * 0.6, 2.4));
 
     syncRowProps(row, scale, opacity, blur, distance, isCurrent);
+
+    // 使用 data-classic-is-current（插件自有属性）代替 data-echo-lyric-current，
+    // 避免 Vue 模板绑定异步覆盖插件设置的属性。
+    const expected = isCurrent ? "true" : "false";
+    if (row.getAttribute("data-classic-is-current") !== expected) {
+      row.setAttribute("data-classic-is-current", expected);
+    }
+    const line = row.querySelector("[data-echo-lyric-line]");
+    if (line && line.getAttribute("data-classic-is-current") !== expected) {
+      line.setAttribute("data-classic-is-current", expected);
+    }
   });
 };
 
@@ -302,7 +307,6 @@ const mountClassicEffect = (host) => {
     springScroll: new SpringValue(host.scroller?.scrollTop ?? 0),
     scrollActive: false,
     _prevEffectIdx: undefined,
-    _flickerGuard: false,
   };
 
   const scroller = host.scroller;
@@ -417,11 +421,12 @@ const EFFECT_CSS = `
     filter var(--echo-classic-scroll-duration) ease;
   transform:
     translate3d(var(--echo-classic-row-x, 0px), 0, 0)
-    scale(var(--echo-classic-row-scale, 1));
+    scale(var(--echo-classic-row-scale, 1)) !important;
+  opacity: var(--echo-classic-row-opacity, 1) !important;
   filter: blur(var(--echo-classic-row-blur, 0px));
 }
 
-.echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-line][data-echo-lyric-current="true"] {
+.echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-line][data-classic-is-current="true"] {
   filter: blur(0px);
 }
 
@@ -432,7 +437,7 @@ const EFFECT_CSS = `
     text-shadow var(--echo-classic-scroll-duration) ease;
 }
 
-.echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-line][data-echo-lyric-current="true"] [data-echo-lyric-primary] {
+.echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-line][data-classic-is-current="true"] [data-echo-lyric-primary] {
   text-shadow:
     0 0 var(--echo-classic-glow-size) var(--color-primary, #31cfa1),
     0 0 calc(var(--echo-classic-glow-size) * 2) var(--color-primary, #31cfa1) !important;
@@ -443,12 +448,12 @@ const EFFECT_CSS = `
     opacity var(--echo-classic-scroll-duration) ease;
 }
 
-.echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-line][data-echo-lyric-current="true"] [data-echo-lyric-secondary] {
+.echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-line][data-classic-is-current="true"] [data-echo-lyric-secondary] {
   opacity: 0.85 !important;
 }
 
 /* Current line marker — left-aligned (absolute, outside text) */
-.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-marker="dot"] [data-echo-lyric-line][data-echo-lyric-current="true"]::before {
+.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-marker="dot"] [data-echo-lyric-line][data-classic-is-current="true"]::before {
   content: "";
   position: absolute;
   left: -16px;
@@ -464,7 +469,7 @@ const EFFECT_CSS = `
   animation: echo-classic-marker-pulse 1.8s ease-in-out infinite;
 }
 
-.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-marker="bar"] [data-echo-lyric-line][data-echo-lyric-current="true"]::before {
+.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-marker="bar"] [data-echo-lyric-line][data-classic-is-current="true"]::before {
   content: "";
   position: absolute;
   left: -16px;
@@ -478,11 +483,11 @@ const EFFECT_CSS = `
 }
 
 /* Current line marker — center-aligned (inline, flows with text) */
-.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-text-align="center"][data-classic-lyric-marker="dot"] [data-echo-lyric-line][data-echo-lyric-current="true"]::before {
+.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-text-align="center"][data-classic-lyric-marker="dot"] [data-echo-lyric-line][data-classic-is-current="true"]::before {
   content: none !important;
 }
 
-.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-text-align="center"][data-classic-lyric-marker="dot"] [data-echo-lyric-line][data-echo-lyric-current="true"] [data-echo-lyric-primary]::before {
+.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-text-align="center"][data-classic-lyric-marker="dot"] [data-echo-lyric-line][data-classic-is-current="true"] [data-echo-lyric-primary]::before {
   content: "" !important;
   display: inline-block;
   vertical-align: middle;
@@ -497,11 +502,11 @@ const EFFECT_CSS = `
   animation: echo-classic-marker-pulse 1.8s ease-in-out infinite;
 }
 
-.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-text-align="center"][data-classic-lyric-marker="bar"] [data-echo-lyric-line][data-echo-lyric-current="true"]::before {
+.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-text-align="center"][data-classic-lyric-marker="bar"] [data-echo-lyric-line][data-classic-is-current="true"]::before {
   content: none !important;
 }
 
-.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-text-align="center"][data-classic-lyric-marker="bar"] [data-echo-lyric-line][data-echo-lyric-current="true"] [data-echo-lyric-primary]::before {
+.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-text-align="center"][data-classic-lyric-marker="bar"] [data-echo-lyric-line][data-classic-is-current="true"] [data-echo-lyric-primary]::before {
   content: "" !important;
   display: inline-block;
   vertical-align: middle;
@@ -526,12 +531,12 @@ const EFFECT_CSS = `
 
 /* Collapsed mode: keep it subtle */
 .echo-classic-lyrics[data-classic-lyric-enabled="true"] .lyric-scroller.is-collapsed [data-echo-lyric-line] {
-  transform: none;
+  transform: none !important;
   filter: none;
 }
 
 .echo-classic-lyrics[data-classic-lyric-enabled="false"] [data-echo-lyric-line] {
-  transform: none;
+  transform: none !important;
   filter: none;
 }
 `;
