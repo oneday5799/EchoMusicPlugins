@@ -495,7 +495,12 @@ const EFFECT_CSS = `
 }
 
 /* Current line marker — left-aligned (absolute, outside text) */
-.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-marker="dot"] [data-echo-lyric-line][data-classic-is-current="true"]::before {
+/* 标记放在 row 上避免被 overflow: hidden 裁剪 */
+.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-marker="dot"] [data-echo-lyric-row] {
+  position: relative;
+}
+
+.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-marker="dot"] [data-echo-lyric-row][data-echo-lyric-current="true"]::before {
   content: "";
   position: absolute;
   left: -16px;
@@ -511,7 +516,11 @@ const EFFECT_CSS = `
   animation: echo-classic-marker-pulse 1.8s ease-in-out infinite;
 }
 
-.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-marker="bar"] [data-echo-lyric-line][data-classic-is-current="true"]::before {
+.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-marker="bar"] [data-echo-lyric-row] {
+  position: relative;
+}
+
+.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-marker="bar"] [data-echo-lyric-row][data-echo-lyric-current="true"]::before {
   content: "";
   position: absolute;
   left: -16px;
