@@ -306,7 +306,7 @@ export default {
 | `ctx.vue`                                                             | Vue 运行时，包含 `defineComponent`、`h`、`ref`、`computed`、`watch` 等                                                                                                                                                                                                                                                                                                                                        |
 | `ctx.app` / `ctx.router` / `ctx.pinia`                                | 主应用实例、路由和 Pinia 实例                                                                                                                                                                                                                                                                                                                                                                                 |
 | `ctx.stores.player` / `.playlist` / `.lyric` / `.settings` / `.theme` | 应用核心 store                                                                                                                                                                                                                                                                                                                                                                                                |
-| `ctx.player`                                                          | 播放控制便捷 API：`currentTrack/currentTrackId/currentTime/duration/isPlaying/playbackRate/volume/playMode`（computed）、`play()`、`playTrack()`、`playSong()`、`playNext()`、`playLast()`、`replaceQueueAndPlay()`、`toggle()`、`stop()`、`next()`、`prev()`、`dislikePersonalFm()`、`seek(time)`、`setVolume(vol)`、`setPlaybackRate(rate)`、`setPlayMode(mode)`、`setAudioQuality(quality)`、`setAudioEffect(effect)`、`toggleLyricView(open?)` |
+| `ctx.player`                                                          | 播放控制便捷 API：`currentTrack/currentTrackId/currentTime/duration/isPlaying/isLoading/playbackState/playbackTargetTrackId/playbackRate/volume/playMode`（computed）、`play()`、`playTrack()`、`playSong()`、`playNext()`、`playLast()`、`replaceQueueAndPlay()`、`toggle()`、`stop()`、`next()`、`prev()`、`dislikePersonalFm()`、`seek(time)`、`setVolume(vol)`、`setPlaybackRate(rate)`、`setPlayMode(mode)`、`setAudioQuality(quality)`、`setAudioEffect(effect)`、`toggleLyricView(open?)` |
 | `ctx.player.audioSource.register(options)`                            | 注册自定义音源解析器，要求 manifest 声明 `capabilities.audioSource: true`                                                                                                                                                                                                                                                                                                                                     |
 | `ctx.audio.spectrum`                                                  | 读取或订阅音频频谱：`getStatus()`、`getSnapshot()`、`subscribe(options, handler)`，要求 manifest 声明 `capabilities.audioSpectrum: true`                                                                                                                                                                                                                                                                      |
 | `ctx.playlist`                                                        | 播放队列便捷 API：读取当前队列/队列歌曲、替换队列、追加歌曲、播放歌曲、加入下一首（插队）、排队候播（顺序追加到下一首播放队列末尾）、清空、移除、重排和切换活动队列                                                                                                                                                                                                                                                                                             |
@@ -355,6 +355,7 @@ export default {
 | `ctx.shortcuts.register(accelerator, handler)`                        | 注册自定义快捷键，支持 `'Ctrl+A'`、`'Shift+Right'`、`'CmdOrCtrl+S'` 等标准 Electron 加速器格式；返回清理函数，插件卸载时自动解绑                                                                                                                                                                                                                                                                             |
 | `ctx.events.onTrackChange(handler)`                                   | 监听当前曲目变化                                                                                                                                                                                                                                                                                                                                                                                              |
 | `ctx.events.onPlaybackChange(handler)`                                | 监听播放/暂停状态变化                                                                                                                                                                                                                                                                                                                                                                                         |
+| `ctx.events.onPlaybackStateChange(handler)`                           | 监听播放展示状态变化，handler 收到 `loading` / `playing` / `paused` / `error`                                                                                                                                                                                                                                                                                                                                |
 | `ctx.events.onPlay(handler, options?)` / `onPause` / `onEnded` / `onSeek` / `onError` / `onTimeUpdate` / `on(event, handler)` | 监听播放生命周期事件，handler 收到统一负载 `{ event, track, trackId, currentTime, duration, isPlaying }`；详见下文「播放事件」                                                                                                                                                                                                                                                  |
 | `ctx.dom.query(selector)` / `ctx.dom.queryAll(selector)`              | 查询主界面 DOM                                                                                                                                                                                                                                                                                                                                                                                                |
 | `ctx.dom.observe(selector, handler)`                                  | 监听动态出现的 DOM，禁用插件时自动断开                                                                                                                                                                                                                                                                                                                                                                        |
@@ -412,6 +413,11 @@ ctx.events.onTimeUpdate((payload) => {
   updateProgress(payload.currentTime, payload.duration);
 });
 
+ctx.events.onPlaybackStateChange((state) => {
+  // state: "loading" | "playing" | "paused" | "error"
+  updatePlaybackBadge(state);
+});
+
 // 通用订阅
 ctx.events.on("seek", (payload) => console.log("跳转到", payload.currentTime));
 
@@ -426,6 +432,7 @@ off(); // 主动退订；插件禁用/卸载时也会自动退订
 | `onPause` / `"pause"` | 暂停 |
 | `onEnded` / `"ended"` | 当前曲目**自然播放结束**，手动切歌不触发 |
 | `onTrackChange` / `"trackchange"` | 切歌（覆盖快捷键、媒体控制、mini 播放器等所有路径） |
+| `onPlaybackStateChange` | 播放展示状态变化：`loading` / `playing` / `paused` / `error` |
 | `onSeek` / `"seek"` | 进度跳转 |
 | `onError` / `"error"` | 播放失败，`payload.error` 为错误码 |
 | `onTimeUpdate` / `"timeupdate"` | 进度推进，**节流约 1 秒**一次 |
@@ -439,10 +446,10 @@ off(); // 主动退订；插件禁用/卸载时也会自动退订
 | `trackId` | 当前曲目 id（可能为 `null`） |
 | `currentTime` | 当前进度（秒） |
 | `duration` | 当前曲目时长（秒） |
-| `isPlaying` | 是否正在播放 |
+| `isPlaying` | 是否正在播放；切歌加载期间如果用户意图仍是播放，会保持 `true` |
 | `error` | 仅 `error` 事件存在，错误码 |
 
-每个订阅方法返回退订函数，且会在插件禁用/卸载时自动解绑；单个 handler 抛错不会影响播放器或其它插件。`onPlay(handler, { immediate: true })` 可在订阅时若当前已在播放，立即用当前状态回调一次，便于晚加载的插件同步初始状态（也可随时通过 `ctx.player.isPlaying` / `ctx.player.currentTrack` 同步查询当前状态）。
+每个订阅方法返回退订函数，且会在插件禁用/卸载时自动解绑；单个 handler 抛错不会影响播放器或其它插件。`onPlay(handler, { immediate: true })` 可在订阅时若当前已在播放，立即用当前状态回调一次，便于晚加载的插件同步初始状态（也可随时通过 `ctx.player.isPlaying` / `ctx.player.isLoading` / `ctx.player.playbackState` / `ctx.player.currentTrack` 同步查询当前状态）。
 
 > 说明：真正的播放引擎只在主窗口运行，这些事件在**主窗口运行时**精确触发。mini 播放器、桌面歌词是独立运行时、只镜像状态、不跑引擎，请在这些运行时改用 `ctx.nowPlaying.onSnapshot` 观察跨窗口同步的播放状态。
 
@@ -1103,24 +1110,38 @@ export function activate(ctx) {
 
 ### 响应式访问播放状态
 
-`ctx.player.currentTrack` 和 `ctx.player.isPlaying` 是 Vue `computed`，在 Vue 组件的 `setup` 中直接使用即可自动响应更新：
+`ctx.player.currentTrack`、`ctx.player.isPlaying`、`ctx.player.isLoading`、`ctx.player.playbackState` 和 `ctx.player.playbackTargetTrackId` 是 Vue `computed`，在 Vue 组件的 `setup` 中直接使用即可自动响应更新：
 
 ```js
 const MyWidget = ctx.vue.defineComponent({
   setup() {
     const track = ctx.player.currentTrack;
     const playing = ctx.player.isPlaying;
+    const playbackState = ctx.player.playbackState;
     return () =>
-      ctx.vue.h("span", playing.value ? `♫ ${track.value?.title}` : "已暂停");
+      ctx.vue.h(
+        "span",
+        playbackState.value === "loading"
+          ? "加载中..."
+          : playing.value
+            ? `♫ ${track.value?.title}`
+            : "已暂停",
+      );
   },
 });
 ```
+
+`ctx.player.playbackState` 的取值为 `loading`、`playing`、`paused`、`error`，适合驱动按钮、徽标或悬浮窗 UI；`ctx.player.isPlaying` 表示播放意图或实际播放状态，切歌加载期间如果用户仍在播放，会保持 `true`。插件应通过 `ctx.player` 的方法控制播放，不要直接修改 `ctx.stores.player` 的内部状态。
 
 在非组件上下文中，也可以用 `ctx.vue.watch` 监听：
 
 ```js
 ctx.vue.watch(ctx.player.currentTrack, (track) => {
   console.log("曲目变化:", track?.title);
+});
+
+ctx.events.onPlaybackStateChange((state) => {
+  console.log("播放展示状态:", state);
 });
 ```
 
