@@ -265,21 +265,36 @@ const syncHostLayout = (entry, snapshot) => {
         line.setAttribute("data-classic-is-current", expected);
       }
 
-      // 先处理 overflow（强制回流），再设置辉光，避免回流干扰后续样式更新
+      // 用 inline style 控制溢出裁剪和横向滚动，绕过 CSS 类选择器/属性选择器匹配延迟
       const primary = line.querySelector("[data-echo-lyric-primary]");
       if (primary) {
         const isOverflowing = isCurrent && primary.scrollWidth > line.clientWidth + 2;
         if (isOverflowing) {
-          line.classList.add("is-overflowing");
           const overflow = primary.scrollWidth - line.clientWidth;
           const distance = overflow + 40;
           const duration = Math.max(3, (distance / 100) + 1.5);
+          line.style.setProperty("overflow", "hidden", "important");
+          line.style.setProperty("mask-image",
+            "linear-gradient(90deg, transparent 0px, black 16px, black calc(100% - 16px), transparent 100%)",
+            "important");
+          line.style.setProperty("-webkit-mask-image",
+            "linear-gradient(90deg, transparent 0px, black 16px, black calc(100% - 16px), transparent 100%)",
+            "important");
           line.style.setProperty("--echo-classic-marquee-distance", `${distance}px`);
           line.style.setProperty("--echo-classic-marquee-duration", `${duration}s`);
+          primary.style.setProperty("display", "inline-block", "important");
+          primary.style.setProperty("animation",
+            `echo-classic-marquee ${duration}s ease-out forwards`, "important");
+          primary.style.setProperty("animation-delay", "0.3s", "important");
         } else {
-          line.classList.remove("is-overflowing");
+          line.style.removeProperty("overflow");
+          line.style.removeProperty("mask-image");
+          line.style.removeProperty("-webkit-mask-image");
           line.style.removeProperty("--echo-classic-marquee-distance");
           line.style.removeProperty("--echo-classic-marquee-duration");
+          primary.style.removeProperty("display");
+          primary.style.removeProperty("animation");
+          primary.style.removeProperty("animation-delay");
         }
 
         // 直接设置辉光（text-shadow）到 primary 元素
@@ -432,9 +447,11 @@ const mountClassicEffect = (host) => {
       // Clean up marquee state
       const line = row.querySelector("[data-echo-lyric-line]");
       if (line) {
-        line.classList.remove("is-overflowing");
         line.removeAttribute("data-classic-is-current");
         line.style.removeProperty("--echo-classic-row-is-current");
+        line.style.removeProperty("overflow");
+        line.style.removeProperty("mask-image");
+        line.style.removeProperty("-webkit-mask-image");
         line.style.removeProperty("--echo-classic-marquee-distance");
         line.style.removeProperty("--echo-classic-marquee-duration");
       }
@@ -442,6 +459,9 @@ const mountClassicEffect = (host) => {
       if (primary) {
         primary.style.removeProperty("text-shadow");
         primary.style.removeProperty("will-change");
+        primary.style.removeProperty("display");
+        primary.style.removeProperty("animation");
+        primary.style.removeProperty("animation-delay");
       }
     }
   };
@@ -489,19 +509,7 @@ const EFFECT_CSS = `
   will-change: filter, opacity, mask-image, -webkit-mask-image;
 }
 
-/* 当前行溢出时启用横向滚动 */
-.echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-line][data-classic-is-current="true"].is-overflowing {
-  overflow: hidden;
-  mask-image: linear-gradient(90deg, transparent 0px, black 16px, black calc(100% - 16px), transparent 100%);
-  -webkit-mask-image: linear-gradient(90deg, transparent 0px, black 16px, black calc(100% - 16px), transparent 100%);
-}
-
-.echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-line][data-classic-is-current="true"].is-overflowing [data-echo-lyric-primary] {
-  display: inline-block;
-  animation: echo-classic-marquee var(--echo-classic-marquee-duration, 6s) ease-out forwards;
-  animation-delay: 0.3s;
-}
-
+/* 当前行溢出横向滚动动画（inline style 控制 overflow/mask/display 等） */
 @keyframes echo-classic-marquee {
   0% {
     transform: translateX(0);
