@@ -168,9 +168,9 @@ const applyHostSettings = (entry) => {
 
 // ── Per-row CSS variable diffing ──
 
-const ROW_PROPS = ["--echo-classic-row-scale", "--echo-classic-row-opacity", "--echo-classic-row-blur", "--echo-classic-row-x", "--echo-classic-row-distance", "--echo-classic-row-is-current"];
+const ROW_PROPS = ["--echo-classic-row-scale", "--echo-classic-row-opacity", "--echo-classic-row-blur", "--echo-classic-row-x", "--echo-classic-row-distance"];
 
-const syncRowProps = (row, scale, opacity, blur, distance, isCurrent) => {
+const syncRowProps = (row, scale, opacity, blur, distance) => {
   const cache = row._classicCache || (row._classicCache = {});
   const vals = {
     "--echo-classic-row-scale": scale.toFixed(3),
@@ -178,7 +178,6 @@ const syncRowProps = (row, scale, opacity, blur, distance, isCurrent) => {
     "--echo-classic-row-blur": `${blur.toFixed(1)}px`,
     "--echo-classic-row-x": "0px",
     "--echo-classic-row-distance": String(distance),
-    "--echo-classic-row-is-current": isCurrent ? "1" : "0",
   };
   for (const prop of ROW_PROPS) {
     if (cache[prop] !== vals[prop]) {
@@ -192,45 +191,18 @@ const syncHostLayout = (entry, snapshot) => {
   if (!state) return;
   entry.snapshot = snapshot;
   const s = state.settings;
-  const idx = Number(snapshot.currentIndex);
-  const hasCurrent = Number.isFinite(idx) && idx >= 0;
-  const rows = entry.host.scroller.querySelectorAll("[data-echo-lyric-row]");
-
-  // Guard against single-frame backward flicker in the snapshot index.
-  // When the index drops by exactly 1 and then immediately returns to the
-  // previous value on the next frame, we skip the drop to avoid a visual
-  // glitch where the current-line effect flashes on the wrong line.
-  // A legitimate seek/backward jump will persist for multiple frames and
-  // pass through naturally.
-  let effectIdx = hasCurrent ? idx : (entry._prevEffectIdx ?? idx);
-  const prev = entry._prevEffectIdx;
-  if (
-    hasCurrent &&
-    prev !== undefined &&
-    effectIdx < prev &&
-    prev - effectIdx <= 1
-  ) {
-    if (entry._flickerGuard) {
-      entry._flickerGuard = false;
-    } else {
-      entry._flickerGuard = true;
-      effectIdx = prev;
-    }
-  } else {
-    entry._flickerGuard = false;
-  }
-  entry._prevEffectIdx = effectIdx;
+  const effectIdx = Number(snapshot.currentIndex);
   const hasEffect = Number.isFinite(effectIdx) && effectIdx >= 0;
 
   // Respect reduced motion: skip scale/blur effects when the user prefers it
   const reducedMotion = snapshot.reducedMotion;
+  const rows = entry.host.scroller.querySelectorAll("[data-echo-lyric-row]");
 
   rows.forEach((row) => {
     const ri = Number(row.getAttribute("data-echo-lyric-index") || -1);
     const distance = hasEffect ? ri - effectIdx : 0;
     const abs = Math.abs(distance);
     const isCurrent = ri === effectIdx;
-
     const scale = reducedMotion
       ? 1
       : isCurrent
@@ -239,7 +211,7 @@ const syncHostLayout = (entry, snapshot) => {
     const opacity = isCurrent ? 1 : Math.max(s.idleOpacity, 1 - abs * 0.22);
     const blur = reducedMotion ? 0 : (isCurrent ? 0 : Math.min(abs * 0.6, 2.4));
 
-    syncRowProps(row, scale, opacity, blur, distance, isCurrent);
+    syncRowProps(row, scale, opacity, blur, distance);
   });
 };
 
@@ -301,8 +273,6 @@ const mountClassicEffect = (host) => {
     scrollDispose: null,
     springScroll: new SpringValue(host.scroller?.scrollTop ?? 0),
     scrollActive: false,
-    _prevEffectIdx: undefined,
-    _flickerGuard: false,
   };
 
   const scroller = host.scroller;
