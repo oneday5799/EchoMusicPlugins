@@ -191,8 +191,14 @@ const syncHostLayout = (entry, snapshot) => {
   if (!state) return;
   entry.snapshot = snapshot;
   const s = state.settings;
-  const effectIdx = Number(snapshot.currentIndex);
-  const hasEffect = Number.isFinite(effectIdx) && effectIdx >= 0;
+  let effectIdx = Number(snapshot.currentIndex);
+  let hasEffect = Number.isFinite(effectIdx) && effectIdx >= 0;
+  if (hasEffect) {
+    entry.lastEffectIdx = effectIdx;
+  } else if (entry.lastEffectIdx >= 0) {
+    effectIdx = entry.lastEffectIdx;
+    hasEffect = true;
+  }
 
   // Respect reduced motion: skip scale/blur effects when the user prefers it
   const reducedMotion = snapshot.reducedMotion;
@@ -314,6 +320,7 @@ const mountClassicEffect = (host) => {
     scrollDispose: null,
     springScroll: new SpringValue(host.scroller?.scrollTop ?? 0),
     scrollActive: false,
+    lastEffectIdx: -1,
   };
 
   const scroller = host.scroller;
