@@ -131,7 +131,7 @@ const normalizeSettings = (value) => {
     currentGlow: clamp(source.currentGlow ?? DEFAULT_SETTINGS.currentGlow, 0, 80),
     idleOpacity: clamp(source.idleOpacity ?? DEFAULT_SETTINGS.idleOpacity, 0.2, 0.8),
     scrollDuration: clamp(source.scrollDuration ?? DEFAULT_SETTINGS.scrollDuration, 100, 1200),
-    lineHeight: clamp(source.lineHeight ?? DEFAULT_SETTINGS.lineHeight, 1.5, 3.5),
+    lineHeight: clamp(source.lineHeight ?? DEFAULT_SETTINGS.lineHeight, 1.5, 5.0),
     showMarker: source.showMarker ?? DEFAULT_SETTINGS.showMarker,
     markerStyle: ["dot", "bar", "none"].includes(source.markerStyle) ? source.markerStyle : DEFAULT_SETTINGS.markerStyle,
     textAlign: ["left", "center"].includes(source.textAlign) ? source.textAlign : DEFAULT_SETTINGS.textAlign,
@@ -212,6 +212,47 @@ const syncHostLayout = (entry, snapshot) => {
     const blur = reducedMotion ? 0 : (isCurrent ? 0 : Math.min(abs * 0.6, 2.4));
 
     syncRowProps(row, scale, opacity, blur, distance);
+
+    const line = row.querySelector("[data-echo-lyric-line]");
+    if (line) {
+      const primary = line.querySelector("[data-echo-lyric-primary]");
+      if (primary) {
+        const isOverflowing = isCurrent && primary.scrollWidth > line.clientWidth + 2;
+        if (isOverflowing) {
+          const overflow = primary.scrollWidth - line.clientWidth;
+          const marqueeDistance = overflow + 40;
+          const duration = Math.max(3, (marqueeDistance / 100) + 1.5);
+          line.style.setProperty("overflow", "hidden", "important");
+          line.style.setProperty("mask-image",
+            "linear-gradient(90deg, transparent 0px, black 16px, black calc(100% - 16px), transparent 100%)",
+            "important");
+          line.style.setProperty("-webkit-mask-image",
+            "linear-gradient(90deg, transparent 0px, black 16px, black calc(100% - 16px), transparent 100%)",
+            "important");
+          line.style.setProperty("--echo-classic-marquee-distance", `${marqueeDistance}px`);
+          line.style.setProperty("--echo-classic-marquee-duration", `${duration}s`);
+          primary.style.setProperty("display", "inline-block", "important");
+          primary.style.setProperty("animation",
+            `echo-classic-marquee ${duration}s ease-out forwards`, "important");
+          primary.style.setProperty("animation-delay", "0.3s", "important");
+        } else {
+          line.style.removeProperty("overflow");
+          line.style.removeProperty("mask-image");
+          line.style.removeProperty("-webkit-mask-image");
+          line.style.removeProperty("--echo-classic-marquee-distance");
+          line.style.removeProperty("--echo-classic-marquee-duration");
+          primary.style.removeProperty("display");
+          primary.style.removeProperty("animation");
+          primary.style.removeProperty("animation-delay");
+        }
+
+        primary.style.setProperty("text-shadow",
+          isCurrent
+            ? `0 0 var(--echo-classic-glow-size) var(--color-primary, #31cfa1), 0 0 calc(var(--echo-classic-glow-size) * 2) var(--color-primary, #31cfa1)`
+            : `0 0 0 transparent`,
+          "important");
+      }
+    }
   });
 };
 
@@ -347,6 +388,21 @@ const mountClassicEffect = (host) => {
       for (const prop of ROW_PROPS) {
         row.style.removeProperty(prop);
       }
+      const line = row.querySelector("[data-echo-lyric-line]");
+      if (line) {
+        line.style.removeProperty("overflow");
+        line.style.removeProperty("mask-image");
+        line.style.removeProperty("-webkit-mask-image");
+        line.style.removeProperty("--echo-classic-marquee-distance");
+        line.style.removeProperty("--echo-classic-marquee-duration");
+      }
+      const primary = row.querySelector("[data-echo-lyric-primary]");
+      if (primary) {
+        primary.style.removeProperty("text-shadow");
+        primary.style.removeProperty("display");
+        primary.style.removeProperty("animation");
+        primary.style.removeProperty("animation-delay");
+      }
     }
   };
 };
@@ -370,13 +426,12 @@ const EFFECT_CSS = `
 }
 
 .echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-row] {
-  padding-top: 6px !important;
-  padding-bottom: 6px !important;
+  padding-top: calc(var(--echo-classic-line-height, 2.1) * 3px) !important;
+  padding-bottom: calc(var(--echo-classic-line-height, 2.1) * 3px) !important;
   opacity: var(--echo-classic-row-opacity, 1);
 }
 
 .echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-line] {
-  position: relative;
   flex: 1;
   white-space: nowrap;
   text-align: var(--echo-classic-text-align, center) !important;
@@ -387,21 +442,31 @@ const EFFECT_CSS = `
     filter var(--echo-classic-scroll-duration) ease;
   transform:
     translate3d(var(--echo-classic-row-x, 0px), 0, 0)
-    scale(var(--echo-classic-row-scale, 1));
+    scale(var(--echo-classic-row-scale, 1)) !important;
+  opacity: var(--echo-classic-row-opacity, 1) !important;
   filter: blur(var(--echo-classic-row-blur, 0px));
+  will-change: filter, opacity, mask-image, -webkit-mask-image;
+}
+
+/* 当前行溢出横向滚动动画（inline style 控制 overflow/mask/display 等） */
+@keyframes echo-classic-marquee {
+  0% {
+    transform: translateX(0);
+  }
+  30%, 100% {
+    transform: translateX(calc(var(--echo-classic-marquee-distance, 0px) * -1));
+  }
 }
 
 .echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-line][data-echo-lyric-current="true"] {
-  filter: blur(0px);
+  filter: none;
 }
 
 .echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-primary] {
   text-align: var(--echo-classic-text-align, center) !important;
-  transition:
-    color var(--echo-classic-scroll-duration) ease,
-    text-shadow var(--echo-classic-scroll-duration) ease;
 }
 
+/* 辉光冗余规则：内联样式为主，CSS 规则为兜底 */
 .echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-line][data-echo-lyric-current="true"] [data-echo-lyric-primary] {
   text-shadow:
     0 0 var(--echo-classic-glow-size) var(--color-primary, #31cfa1),
@@ -411,6 +476,7 @@ const EFFECT_CSS = `
 .echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-secondary] {
   transition:
     opacity var(--echo-classic-scroll-duration) ease;
+  opacity: var(--echo-classic-row-opacity, 1) !important;
 }
 
 .echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-line][data-echo-lyric-current="true"] [data-echo-lyric-secondary] {
@@ -418,7 +484,12 @@ const EFFECT_CSS = `
 }
 
 /* Current line marker — left-aligned (absolute, outside text) */
-.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-marker="dot"] [data-echo-lyric-line][data-echo-lyric-current="true"]::before {
+/* 标记放在 row 上避免被 overflow: hidden 裁剪 */
+.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-marker="dot"] [data-echo-lyric-row] {
+  position: relative;
+}
+
+.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-marker="dot"] [data-echo-lyric-row][data-echo-lyric-current="true"]::before {
   content: "";
   position: absolute;
   left: -16px;
@@ -434,7 +505,11 @@ const EFFECT_CSS = `
   animation: echo-classic-marker-pulse 1.8s ease-in-out infinite;
 }
 
-.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-marker="bar"] [data-echo-lyric-line][data-echo-lyric-current="true"]::before {
+.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-marker="bar"] [data-echo-lyric-row] {
+  position: relative;
+}
+
+.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-marker="bar"] [data-echo-lyric-row][data-echo-lyric-current="true"]::before {
   content: "";
   position: absolute;
   left: -16px;
@@ -448,7 +523,7 @@ const EFFECT_CSS = `
 }
 
 /* Current line marker — center-aligned (inline, flows with text) */
-.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-text-align="center"][data-classic-lyric-marker="dot"] [data-echo-lyric-line][data-echo-lyric-current="true"]::before {
+.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-text-align="center"][data-classic-lyric-marker="dot"] [data-echo-lyric-line]::before {
   content: none !important;
 }
 
@@ -467,7 +542,7 @@ const EFFECT_CSS = `
   animation: echo-classic-marker-pulse 1.8s ease-in-out infinite;
 }
 
-.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-text-align="center"][data-classic-lyric-marker="bar"] [data-echo-lyric-line][data-echo-lyric-current="true"]::before {
+.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-text-align="center"][data-classic-lyric-marker="bar"] [data-echo-lyric-line]::before {
   content: none !important;
 }
 
@@ -496,12 +571,12 @@ const EFFECT_CSS = `
 
 /* Collapsed mode: keep it subtle */
 .echo-classic-lyrics[data-classic-lyric-enabled="true"] .lyric-scroller.is-collapsed [data-echo-lyric-line] {
-  transform: none;
+  transform: none !important;
   filter: none;
 }
 
 .echo-classic-lyrics[data-classic-lyric-enabled="false"] [data-echo-lyric-line] {
-  transform: none;
+  transform: none !important;
   filter: none;
 }
 `;
@@ -678,7 +753,7 @@ const createSettingsComponent = (ctx) =>
           slider("辉光强度", "currentGlow", 0, 80, "当前歌词行的文字发光。"),
           slider("其他行透明度", "idleOpacity", 20, 80, "非当前行的最低不透明度。", 100),
           slider("滚动过渡", "scrollDuration", 100, 1200, "歌词切换时的过渡动画时长。"),
-          slider("行间距", "lineHeight", 15, 35, "歌词行之间的间距。", 10),
+          slider("行间距", "lineHeight", 15, 50, "歌词行之间的间距。", 10),
           draft.textAlign === "left"
             ? slider("歌词边距", "lyricPadding", 0, 288, "左对齐时歌词与左侧的间距。")
             : null,
