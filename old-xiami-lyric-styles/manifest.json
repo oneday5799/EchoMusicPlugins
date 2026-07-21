@@ -10,6 +10,6 @@
     "lyricEffects": true
   },
   "requires": {
-    "echoMusicVersion": ">=2.2.6-beta.20"
+    "echoMusicVersion": ">=2.2.9-beta.6"
   }
 }
