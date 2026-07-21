@@ -381,7 +381,7 @@ function updateCamera(dt){
     var bi=clamp(Math.floor(fi),0,ab.charTimings.length-1);
     var fc=fi-bi;
     ctx.save();
-    ctx.font=ab.fontWeight+' '+ab.fontPx+'px "Inter","Noto Sans SC",system-ui,sans-serif';
+    ctx.font=ab.fontWeight+' '+ab.fontPx+'px "Inter","PingFang SC","Microsoft YaHei","Noto Sans CJK SC",system-ui,sans-serif';
     for(var pi=0;pi<bi;pi++)px+=ctx.measureText(ab.charTimings[pi].char).width;
     if(bi<ab.charTimings.length-1&&fc>0){
       px+=ctx.measureText(ab.charTimings[bi].char).width+ctx.measureText(ab.charTimings[bi+1].char).width*fc;
@@ -454,7 +454,7 @@ function render(){
       gS=(b.variant==='hero'?12:8)+ge*b.fontPx*(b.variant==='hero'?0.7:0.52)*CFG.glowIntensity;
     }
 
-    ctx.font=b.fontWeight+' '+b.fontPx+'px "Inter","Noto Sans SC",system-ui,sans-serif';
+    ctx.font=b.fontWeight+' '+b.fontPx+'px "Inter","PingFang SC","Microsoft YaHei","Noto Sans CJK SC",system-ui,sans-serif';
     ctx.textBaseline='top';ctx.textAlign='left';
     var charX=b.x,charY=b.y;
     for(var ci=0;ci<b.charTimings.length;ci++){

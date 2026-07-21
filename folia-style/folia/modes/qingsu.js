@@ -270,7 +270,7 @@ function measureTextWidth(text,fontPx,fw,fs){
   if(!_canvas)_canvas=document.createElement('canvas');
   var c=_canvas.getContext('2d');
   if(!c)return text.length*fontPx*0.6;
-  c.font=(fw||400)+' '+(fs||'normal')+' '+fontPx+'px "Inter","Noto Sans SC",system-ui,sans-serif';
+  c.font=(fw||400)+' '+(fs||'normal')+' '+fontPx+'px "Inter","PingFang SC","Microsoft YaHei","Noto Sans CJK SC",system-ui,sans-serif';
   return c.measureText(text).width;
 }
 
