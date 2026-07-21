@@ -17,6 +17,7 @@ let state = null;
 let effectDispose = null;
 let settingsDispose = null;
 let settingsStyleDispose = null;
+let saveTimer = 0;
 
 const mountedHosts = new Set();
 
@@ -139,13 +140,23 @@ const normalizeSettings = (value) => {
   };
 };
 
+const scheduleSave = (ctx) => {
+  if (saveTimer) window.clearTimeout(saveTimer);
+  saveTimer = window.setTimeout(() => {
+    saveTimer = 0;
+    if (!state) return;
+    void ctx.storage.set(STORAGE_KEY, normalizeSettings(state.settings));
+  }, 240);
+};
+
 const updateSettings = (ctx, patch) => {
   if (!state) return;
   state.settings = normalizeSettings({ ...state.settings, ...patch });
   for (const entry of mountedHosts) {
     applyHostSettings(entry);
-    if (entry.snapshot) syncHostLayout(entry, entry.snapshot);
+    if (entry.snapshot) scheduleSync(entry, entry.snapshot);
   }
+  scheduleSave(ctx);
 };
 
 const applyHostSettings = (entry) => {
@@ -187,6 +198,17 @@ const syncRowProps = (row, scale, opacity, blur, distance) => {
   }
 };
 
+// ── Batched sync via requestAnimationFrame ──
+
+const scheduleSync = (entry, snapshot) => {
+  entry.snapshot = snapshot;
+  if (entry.syncFrame) return;
+  entry.syncFrame = window.requestAnimationFrame(() => {
+    entry.syncFrame = 0;
+    syncHostLayout(entry, entry.snapshot);
+  });
+};
+
 const syncHostLayout = (entry, snapshot) => {
   if (!state) return;
   entry.snapshot = snapshot;
@@ -203,6 +225,21 @@ const syncHostLayout = (entry, snapshot) => {
   // Respect reduced motion: skip scale/blur effects when the user prefers it
   const reducedMotion = snapshot.reducedMotion;
   const rows = entry.host.scroller.querySelectorAll("[data-echo-lyric-row]");
+
+  const targetKey = [
+    effectIdx,
+    rows.length,
+    s.currentScale,
+    s.currentGlow,
+    s.idleOpacity,
+    s.lineHeight,
+    s.showMarker,
+    s.markerStyle,
+    s.textAlign,
+    reducedMotion ? "reduce" : "motion",
+  ].join("|");
+  if (entry.targetKey === targetKey) return;
+  entry.targetKey = targetKey;
 
   rows.forEach((row) => {
     const ri = Number(row.getAttribute("data-echo-lyric-index") || -1);
@@ -321,6 +358,8 @@ const mountClassicEffect = (host) => {
     springScroll: new SpringValue(host.scroller?.scrollTop ?? 0),
     scrollActive: false,
     lastEffectIdx: -1,
+    syncFrame: 0,
+    targetKey: "",
   };
 
   const scroller = host.scroller;
@@ -334,7 +373,7 @@ const mountClassicEffect = (host) => {
     scroller.addEventListener("wheel", onWheel, { passive: true });
   }
 
-  entry.scrollDispose = host.setAutoScrollHandler((request) => {
+  entry.scrollDispose = host.setAutoScrollHandler?.((request) => {
     if (!state?.settings?.enabled) return false;
     const { targetTop, smooth } = request;
     const clamped = Math.max(0, Math.min(targetTop, scroller.scrollHeight - scroller.clientHeight));
@@ -360,12 +399,12 @@ const mountClassicEffect = (host) => {
   syncHostLayout(entry, entry.snapshot);
 
   entry.unsubscribe = host.subscribe((snap) => {
-    entry.snapshot = snap;
-    syncHostLayout(entry, snap);
+    scheduleSync(entry, snap);
   });
 
   return () => {
     mountedHosts.delete(entry);
+    if (entry.syncFrame) window.cancelAnimationFrame(entry.syncFrame);
     entry.unsubscribe?.();
     entry.scrollDispose?.();
     if (scroller) {
@@ -810,8 +849,10 @@ export async function activate(ctx) {
   });
 }
 
-export function deactivate() {
+export function deactivate(ctx) {
+  if (saveTimer) window.clearTimeout(saveTimer);
   if (globalFrameId) window.cancelAnimationFrame(globalFrameId);
+  saveTimer = 0;
   globalFrameId = 0;
   globalLastFrameTime = 0;
   effectDispose?.();
