@@ -216,6 +216,13 @@ const syncHostLayout = (entry, snapshot) => {
   entry._prevEffectIdx = effectIdx;
   const hasEffect = Number.isFinite(effectIdx) && effectIdx >= 0;
 
+  if (effectIdx !== prevIdx) {
+    console.log(
+      `[classic-lyric] effectIdx changed: ${prevIdx} → ${effectIdx}`,
+      `(raw=${snapshot.currentIndex}, filtered=${filterApplied})`
+    );
+  }
+
   // Respect reduced motion: skip scale/blur effects when the user prefers it
   const reducedMotion = snapshot.reducedMotion;
 
@@ -224,6 +231,14 @@ const syncHostLayout = (entry, snapshot) => {
     const distance = hasEffect ? ri - effectIdx : 0;
     const abs = Math.abs(distance);
     const isCurrent = ri === effectIdx;
+
+    const prevIsCurrent = row._classicCache?.["--echo-classic-row-is-current"] === "1";
+    if (prevIsCurrent !== isCurrent) {
+      console.log(
+        `[classic-lyric] row ${ri} isCurrent: ${prevIsCurrent}→${isCurrent}`,
+        `(effectIdx=${effectIdx}, prevIdx=${prevIdx}, raw=${snapshot.currentIndex})`
+      );
+    }
 
     const scale = reducedMotion
       ? 1
@@ -235,25 +250,29 @@ const syncHostLayout = (entry, snapshot) => {
 
     syncRowProps(row, scale, opacity, blur, distance, isCurrent);
 
+    // 在 row 上也设置标记属性，供左对齐标记使用
+    const expected = isCurrent ? "true" : "false";
+    if (row.getAttribute("data-classic-is-current") !== expected) {
+      row.setAttribute("data-classic-is-current", expected);
+    }
+
     const line = row.querySelector("[data-echo-lyric-line]");
     if (line) {
       // CSS 变量控制辉光/模糊/透明度，Vue 不会覆盖 inline style
       line.style.setProperty("--echo-classic-row-is-current", isCurrent ? "1" : "0");
       // 属性控制标记（marker），因为 CSS 动画会覆盖 opacity 变量
-      const expected = isCurrent ? "true" : "false";
       if (line.getAttribute("data-classic-is-current") !== expected) {
         line.setAttribute("data-classic-is-current", expected);
       }
 
-      // 检测当前行是否溢出，启用横向滚动
+      // 先处理 overflow（强制回流），再设置辉光，避免回流干扰后续样式更新
       const primary = line.querySelector("[data-echo-lyric-primary]");
       if (primary) {
-        if (isCurrent && primary.scrollWidth > line.clientWidth + 2) {
+        const isOverflowing = isCurrent && primary.scrollWidth > line.clientWidth + 2;
+        if (isOverflowing) {
           line.classList.add("is-overflowing");
           const overflow = primary.scrollWidth - line.clientWidth;
-          // 滚动距离 = 溢出量 + 两侧留白
           const distance = overflow + 40;
-          // 滚动速度：每秒约 100px，动画时长 = 停留 + 滚动时间
           const duration = Math.max(3, (distance / 100) + 1.5);
           line.style.setProperty("--echo-classic-marquee-distance", `${distance}px`);
           line.style.setProperty("--echo-classic-marquee-duration", `${duration}s`);
@@ -262,6 +281,15 @@ const syncHostLayout = (entry, snapshot) => {
           line.style.removeProperty("--echo-classic-marquee-distance");
           line.style.removeProperty("--echo-classic-marquee-duration");
         }
+
+        // 直接设置辉光（text-shadow）到 primary 元素
+        // 始终设置 text-shadow 属性，永不删除，防止浏览器反复分配/释放辉光 backing store
+        primary.style.setProperty("text-shadow",
+          isCurrent
+            ? `0 0 var(--echo-classic-glow-size) var(--color-primary, #31cfa1), 0 0 calc(var(--echo-classic-glow-size) * 2) var(--color-primary, #31cfa1)`
+            : `0 0 0 transparent`,
+          "important");
+        primary.style.setProperty("will-change", "text-shadow", "important");
       }
     }
   });
@@ -397,6 +425,7 @@ const mountClassicEffect = (host) => {
     // Clean up per-row caches
     for (const row of entry.host.scroller.querySelectorAll("[data-echo-lyric-row]")) {
       delete row._classicCache;
+      row.removeAttribute("data-classic-is-current");
       for (const prop of ROW_PROPS) {
         row.style.removeProperty(prop);
       }
@@ -408,6 +437,11 @@ const mountClassicEffect = (host) => {
         line.style.removeProperty("--echo-classic-row-is-current");
         line.style.removeProperty("--echo-classic-marquee-distance");
         line.style.removeProperty("--echo-classic-marquee-duration");
+      }
+      const primary = row.querySelector("[data-echo-lyric-primary]");
+      if (primary) {
+        primary.style.removeProperty("text-shadow");
+        primary.style.removeProperty("will-change");
       }
     }
   };
@@ -452,6 +486,7 @@ const EFFECT_CSS = `
     scale(var(--echo-classic-row-scale, 1)) !important;
   opacity: var(--echo-classic-row-opacity, 1) !important;
   filter: blur(var(--echo-classic-row-blur, 0px));
+  will-change: filter, opacity, mask-image, -webkit-mask-image;
 }
 
 /* 当前行溢出时启用横向滚动 */
@@ -476,24 +511,33 @@ const EFFECT_CSS = `
   }
 }
 
-.echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-line] {
-  filter: blur(calc(var(--echo-classic-row-blur, 0px) * (1 - var(--echo-classic-row-is-current, 0))));
+.echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-line][data-classic-is-current="true"] {
+  filter: none;
+}
+
+.echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-line][data-classic-is-current="false"] {
+  filter: blur(var(--echo-classic-row-blur, 0px));
 }
 
 .echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-primary] {
   text-align: var(--echo-classic-text-align, center) !important;
-  transition:
-    color var(--echo-classic-scroll-duration) ease,
-    text-shadow var(--echo-classic-scroll-duration) ease;
+}
+
+/* 辉光冗余规则：内联样式为主，CSS 规则为兜底 */
+.echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-line][data-classic-is-current="true"] [data-echo-lyric-primary] {
   text-shadow:
-    0 0 calc(var(--echo-classic-glow-size) * var(--echo-classic-row-is-current, 0)) var(--color-primary, #31cfa1),
-    0 0 calc(var(--echo-classic-glow-size) * 2 * var(--echo-classic-row-is-current, 0)) var(--color-primary, #31cfa1) !important;
+    0 0 var(--echo-classic-glow-size) var(--color-primary, #31cfa1),
+    0 0 calc(var(--echo-classic-glow-size) * 2) var(--color-primary, #31cfa1) !important;
 }
 
 .echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-secondary] {
   transition:
     opacity var(--echo-classic-scroll-duration) ease;
-  opacity: calc(var(--echo-classic-row-opacity, 1) + 0.85 * var(--echo-classic-row-is-current, 0) * (1 - var(--echo-classic-row-opacity, 1))) !important;
+  opacity: var(--echo-classic-row-opacity, 1) !important;
+}
+
+.echo-classic-lyrics[data-classic-lyric-enabled="true"] [data-echo-lyric-line][data-classic-is-current="true"] [data-echo-lyric-secondary] {
+  opacity: 0.85 !important;
 }
 
 /* Current line marker — left-aligned (absolute, outside text) */
@@ -502,7 +546,7 @@ const EFFECT_CSS = `
   position: relative;
 }
 
-.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-marker="dot"] [data-echo-lyric-row][data-echo-lyric-current="true"]::before {
+.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-marker="dot"] [data-echo-lyric-row][data-classic-is-current="true"]::before {
   content: "";
   position: absolute;
   left: -16px;
@@ -522,7 +566,7 @@ const EFFECT_CSS = `
   position: relative;
 }
 
-.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-marker="bar"] [data-echo-lyric-row][data-echo-lyric-current="true"]::before {
+.echo-classic-lyrics[data-classic-lyric-enabled="true"][data-classic-lyric-marker="bar"] [data-echo-lyric-row][data-classic-is-current="true"]::before {
   content: "";
   position: absolute;
   left: -16px;
