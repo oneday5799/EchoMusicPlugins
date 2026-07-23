@@ -1,8 +1,8 @@
 {
   "id": "apple-music-lyrics",
-  "name": "Apple Music 歌词弹跳",
-  "version": "1.0.0",
-  "description": "模仿 Apple Music 的弹簧手感，为页面歌词行切换加入轻盈回弹动画。",
+  "name": "Apple Music-like 歌词",
+  "version": "1.1.9",
+  "description": "使用 @applemusic-like-lyrics/core 渲染 EchoMusic 页面歌词。",
   "author": "EchoMusic",
   "icon": "icon.svg",
   "main": "index.js",
@@ -10,6 +10,6 @@
     "lyricEffects": true
   },
   "requires": {
-    "echoMusicVersion": ">=2.2.7-beta.30"
+    "echoMusicVersion": ">=2.2.9-beta.6"
   }
 }

@@ -1,0 +1,22 @@
+{
+  "name": "echo-plugin-apple-music-lyrics",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/index.js --bundle --format=esm --target=chrome120 --loader:.css=text --define:process.env.NODE_ENV=\\\"production\\\" --outfile=index.js"
+  },
+  "dependencies": {
+    "@applemusic-like-lyrics/core": "^0.5.2",
+    "@pixi/app": "^7.4.3",
+    "@pixi/core": "^7.4.3",
+    "@pixi/display": "^7.4.3",
+    "@pixi/filter-blur": "^7.4.3",
+    "@pixi/filter-bulge-pinch": "^5.1.1",
+    "@pixi/filter-color-matrix": "^7.4.3",
+    "@pixi/sprite": "^7.4.3"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1"
+  }
+}

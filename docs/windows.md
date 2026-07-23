@@ -136,7 +136,7 @@ export function activateWindow(ctx) {
 
 ### 本地进度推算
 
-`onSnapshot` 适合订阅状态变化，但它不是逐帧歌词时钟。歌词滚动、桌面歌词这类对时序敏感的插件，应使用 `playback.currentTime`、`playback.updatedAt` 和 `playback.playbackRate` 在本地推算当前播放时间，再叠加 `lyric.timeOffset` 计算歌词行，避免显示慢半拍。
+`onSnapshot` 适合订阅状态变化，但它不是逐帧歌词时钟。`playback.currentTime` 和 `ctx.player.currentTime` 一样，表示播放引擎最近一次推送的离散进度（秒）；`playback.updatedAt` 是这次进度样本的时间戳。歌词滚动、桌面歌词这类对时序敏感的插件，应使用 `playback.currentTime`、`playback.updatedAt` 和 `playback.playbackRate` 在本地推算当前播放时间，再叠加 `lyric.timeOffset` 计算歌词行，避免显示慢半拍。
 
 ```js
 function getEstimatedPlaybackMs(playback) {

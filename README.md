@@ -102,7 +102,13 @@ EchoMusic 支持在线插件源和本地插件。用户可以在"插件管理"�
 
 - [插件浮窗与 Now Playing](docs/windows.md)：声明独立桌面浮窗、订阅当前播放/歌词快照、发送播放与歌词命令。
 - `water-lyrics`：页面歌词动效示例，演示 `ctx.lyricEffects.register()` 的 style/decorator 接入方式。
-- `apple-music-lyrics`：页面歌词弹跳示例，演示歌词自动滚动接管和弹簧动画。
+- `apple-music-lyrics`：页面歌词 AMLL 渲染示例，演示通过 decorator 扩展点接入 `@applemusic-like-lyrics/core`。
+
+## 许可证
+
+除非子目录另有说明，本仓库插件代码默认按根目录 [LICENSE](LICENSE) 的 MIT License 分发。
+
+`apple-music-lyrics/` 是例外：该插件打包了 `@applemusic-like-lyrics/core`，插件目录及其构建产物按 `AGPL-3.0-only` 分发。详见 [apple-music-lyrics/LICENSE](apple-music-lyrics/LICENSE) 和 [apple-music-lyrics/NOTICE.md](apple-music-lyrics/NOTICE.md)。
 
 ## 安全模式与故障恢复
 
@@ -306,7 +312,7 @@ export default {
 | `ctx.vue`                                                             | Vue 运行时，包含 `defineComponent`、`h`、`ref`、`computed`、`watch` 等                                                                                                                                                                                                                                                                                                                                        |
 | `ctx.app` / `ctx.router` / `ctx.pinia`                                | 主应用实例、路由和 Pinia 实例                                                                                                                                                                                                                                                                                                                                                                                 |
 | `ctx.stores.player` / `.playlist` / `.lyric` / `.settings` / `.theme` | 应用核心 store                                                                                                                                                                                                                                                                                                                                                                                                |
-| `ctx.player`                                                          | 播放控制便捷 API：`currentTrack/currentTrackId/currentTime/duration/isPlaying/isLoading/playbackState/playbackTargetTrackId/playbackRate/volume/playMode`（computed）、`play()`、`playTrack()`、`playSong()`、`playNext()`、`playLast()`、`replaceQueueAndPlay()`、`toggle()`、`stop()`、`next()`、`prev()`、`dislikePersonalFm()`、`seek(time)`、`setVolume(vol)`、`setPlaybackRate(rate)`、`setPlayMode(mode)`、`setAudioQuality(quality)`、`setAudioEffect(effect)`、`toggleLyricView(open?)` |
+| `ctx.player`                                                          | 播放控制便捷 API：`currentTrack/currentTrackId/currentTime/duration/isPlaying/isLoading/playbackState/playbackTargetTrackId/playbackRate/volume/playMode`（computed）、`play()`、`playTrack()`、`playSong()`、`playNext()`、`playLast()`、`replaceQueueAndPlay()`、`toggle()`、`stop()`、`next()`、`prev()`、`dislikePersonalFm()`、`seek(time)`、`setVolume(vol)`、`setPlaybackRate(rate)`、`setPlayMode(mode)`、`setAudioQuality(quality)`、`setAudioEffect(effect)`、`toggleLyricView(open?)`。其中 `currentTime` 是播放引擎最近一次推送的离散进度（秒），适合状态展示和控制逻辑；歌词逐帧渲染请使用 `ctx.lyricEffects` 的 `timelineMs`，或 `ctx.lyrics` / `ctx.nowPlaying` 快照里的 `playback.currentTime + updatedAt + playbackRate` 自行推算。 |
 | `ctx.player.audioSource.register(options)`                            | 注册自定义音源解析器，要求 manifest 声明 `capabilities.audioSource: true`                                                                                                                                                                                                                                                                                                                                     |
 | `ctx.audio.spectrum`                                                  | 读取或订阅音频频谱：`getStatus()`、`getSnapshot()`、`subscribe(options, handler)`，要求 manifest 声明 `capabilities.audioSpectrum: true`                                                                                                                                                                                                                                                                      |
 | `ctx.playlist`                                                        | 播放队列便捷 API：读取当前队列/队列歌曲、替换队列、追加歌曲、播放歌曲、加入下一首（插队）、排队候播（顺序追加到下一首播放队列末尾）、清空、移除、重排和切换活动队列                                                                                                                                                                                                                                                                                             |
@@ -444,7 +450,7 @@ off(); // 主动退订；插件禁用/卸载时也会自动退订
 | `event` | 事件名 |
 | `track` | 当前曲目快照（可能为 `null`） |
 | `trackId` | 当前曲目 id（可能为 `null`） |
-| `currentTime` | 当前进度（秒） |
+| `currentTime` | 事件触发时播放引擎的进度快照（秒），不是逐帧时钟 |
 | `duration` | 当前曲目时长（秒） |
 | `isPlaying` | 是否正在播放；切歌加载期间如果用户意图仍是播放，会保持 `true` |
 | `error` | 仅 `error` 事件存在，错误码 |
@@ -1911,7 +1917,7 @@ export function activate(ctx) {
 | `host.root`      | 歌词动效根节点，即 `.echo-lyric-effect-host`。                                |
 | `host.scroller`  | 歌词滚动容器。                                                               |
 | `host.overlay`   | 宿主管理的装饰层，默认 `pointer-events: none`，适合挂 SVG、Canvas、光效层。   |
-| `host.getSnapshot()` | 读取当前歌词快照，包括 `lines`、`currentIndex`、`scrollIndex`、`timelineMs`、`isPlaying`、`lyricsMode`、`collapsed`、`reducedMotion` 等。 |
+| `host.getSnapshot()` | 读取当前歌词快照，包括 `lines`、`currentIndex`、`scrollIndex`、`timelineMs`、`isPlaying`、`lyricsMode`、`collapsed`、`reducedMotion`、`appearance` 等。`timelineMs` 是宿主统一后的歌词时间轴（毫秒，已包含歌词偏移），适合逐帧动画、逐字高亮和滚动计算；不要用 `ctx.player.currentTime` 代替它。`currentIndex` 与宿主写入的 `data-echo-lyric-current` / `data-echo-lyric-current-index` 使用同一稳定索引源。`appearance` 包含宿主歌词外观语义，如 `playedColor`、`unplayedColor`、`fontFamily`、`fontScale`、`fontWeight`，插件应优先复用这些字段而不是读取原生歌词 DOM 样式。 |
 | `host.subscribe(handler)` | 订阅歌词快照更新，返回取消订阅函数；插件停用时宿主也会兜底清理。       |
 | `host.setAutoScrollHandler(handler)` | 接管页面歌词自动跟随滚动。handler 收到 `{ index, targetTop, smooth, collapsed, snapshot }`，返回 `true` 表示插件已处理，宿主不再执行默认 `scrollTo`。 |
 | `host.requestUpdate()` | 请求宿主立即向订阅者派发一次当前快照。                                  |
@@ -1938,6 +1944,7 @@ export function activate(ctx) {
 最佳实践：
 
 - 用 `className` 限定 CSS 作用域，例如 `.my-water-lyrics [data-echo-lyric-line]`，避免影响其它页面。
+- CSS 动效可以直接使用 `[data-echo-lyric-current="true"]` 等宿主标记；在 `host.subscribe()` 的 JS 回调中，请优先以 `snapshot.currentIndex` / `snapshot.timelineMs` 为准计算状态，避免自行覆盖宿主的 `data-echo-lyric-*` 属性。
 - 优先叠加样式和装饰层，不要替换宿主歌词滚动容器；完整替换渲染器会更脆弱。
 - 尊重 `snapshot.reducedMotion` 或根节点 `data-echo-lyric-reduced-motion="true"`，降低或关闭高频动画。
 - 桌面歌词插件如需在桌面歌词独立窗口运行，需要在 manifest 中设置 `runtime.desktopLyric: true`。只在主窗口注册 `scope: "desktop"` 不会影响已经打开的桌面歌词窗口。
