@@ -63,13 +63,6 @@
   -webkit-mask-image:linear-gradient(to bottom,transparent 0%,black 11%,black 88%,transparent 100%);
   mask-image:linear-gradient(to bottom,transparent 0%,black 11%,black 88%,transparent 100%);
 }
-.monet-secondary{
-  font-size:clamp(0.94rem,1.2vw,1.14rem);
-  color:rgba(255,255,255,0.5);font-weight:500;
-  margin-top:4px;
-  opacity:0;transform:translateY(8px);
-  animation:monet-slideUp 0.28s ease 0.1s forwards;
-}
 .monet-badge{
   margin-top:auto;padding-top:1rem;
 }
@@ -118,25 +111,9 @@
 .monet-particle:nth-child(6){left:10%;top:80%;--dur:20s;--delay:5s}
 .monet-particle:nth-child(7){left:75%;top:10%;--dur:32s;--delay:1.5s}
 
-@keyframes monet-slideLeft{
-  from{opacity:0;transform:translateX(-30px) translateY(-10px)}
-  to{opacity:1;transform:translateX(0) translateY(0)}
-}
-@keyframes monet-expandLine{
-  from{opacity:0;transform:scaleY(0)}
-  to{opacity:1;transform:scaleY(1)}
-}
 @keyframes monet-slideUp{
   from{opacity:0;transform:translateY(20px)}
   to{opacity:1;transform:translateY(0)}
-}
-@keyframes monet-popIn{
-  from{opacity:0;transform:scale(0.9) translateY(10px)}
-  to{opacity:1;transform:scale(1) translateY(0)}
-}
-@keyframes monet-slideInRight{
-  from{opacity:0;transform:translateX(50px) scale(0.95) rotate(1deg)}
-  to{opacity:1;transform:translateX(0) scale(1) rotate(0)}
 }
 @keyframes monet-float{
   0%{transform:translateY(-20px) translateX(0) rotate(0deg)}

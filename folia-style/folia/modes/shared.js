@@ -111,13 +111,6 @@ window.ModeUtils={
     return charEl;
   },
 
-  // 去掉 "歌手 - 歌名" 中的歌手前缀
-  stripArtistPrefix:function(title,artist){
-    if(artist&&title.indexOf(artist)===0)
-      return title.substring(artist.length).replace(/^\s*[-–—]\s*/,'');
-    return title;
-  },
-
   // 散落布局工厂函数 (yunjie/liuguang 共享)
   createScatteredLine:function(line,lyricsLayer,config){
     var seed=line.time_ms/1000;

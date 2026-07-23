@@ -184,6 +184,7 @@ function createPlayerFrame(ctx, closeOverlay) {
       let lastLyricStoreKey = ''
       let stopTrackWatch = null
       let stopVolumeWatch = null
+      let stopFontWatch = null
       let commandQueue = Promise.resolve()
       let positionHeartbeatTimer = null
 
@@ -337,6 +338,47 @@ function createPlayerFrame(ctx, closeOverlay) {
         canShowMiniPlayer: typeof window.electron?.miniPlayer?.show === 'function',
       })
 
+      // 获取宿主歌词字体设置
+      const buildAppearancePayload = () => {
+        const settings = ctx.stores.settings || ctx.settings
+        let lyricFontFamily = ''
+        try {
+          if (typeof settings?.buildLyricFontFamily === 'function') {
+            lyricFontFamily = settings.buildLyricFontFamily()
+          }
+        } catch (error) {
+          console.warn('[FoliaBridge] 读取歌词字体失败', error)
+        }
+        return {
+          lyricFontFamily: String(lyricFontFamily || '').trim(),
+        }
+      }
+
+      // 推送外观设置（歌词字体等）
+      const pushAppearance = () => {
+        postToFrame({
+          type: 'echo-folia:appearance',
+          payload: buildAppearancePayload(),
+        })
+      }
+
+      // 监听宿主字体设置变化
+      const initFontWatch = () => {
+        if (stopFontWatch) return
+        const settings = ctx.stores.settings || ctx.settings
+        stopFontWatch = ctx.vue.watch(
+          () => [
+            String(settings?.lyricFont || ''),
+            String(settings?.globalFont || ''),
+            buildAppearancePayload().lyricFontFamily,
+          ].join('::'),
+          () => {
+            if (!ready || disposed) return
+            pushAppearance()
+          },
+        )
+      }
+
       // 推送歌词
       const pushLyrics = (force = false) => {
         if (!ready && !force) return
@@ -360,8 +402,7 @@ function createPlayerFrame(ctx, closeOverlay) {
       }
 
       // 推送完整快照
-      const pushSnapshot = (force = false) => {
-        if (!ready && !force) return
+      const pushSnapshot = () => {
         ensureLyricLoaded()
         postToFrame({
           type: 'echo-folia:snapshot',
@@ -404,7 +445,7 @@ function createPlayerFrame(ctx, closeOverlay) {
           (newId) => {
             if (!newId || newId === lastId) return
             lastId = newId
-            pushSnapshot(true)
+            pushSnapshot()
             pushLyrics(true)
             pushPosition('track_change')
           },
@@ -417,7 +458,7 @@ function createPlayerFrame(ctx, closeOverlay) {
           () => Number(ctx.stores.player.volume ?? 0.8),
           () => {
             if (!ready || disposed) return
-            pushSnapshot(true)
+            pushSnapshot()
           },
         )
       }
@@ -589,25 +630,25 @@ function createPlayerFrame(ctx, closeOverlay) {
         }
         else if (data.command === 'set-anim-mode') {
           const mode = String(data.mode || 'yunjie')
-          try { window.localStorage.setItem('folia-animMode', mode) } catch {}
+          try { window.localStorage.setItem('folia-animMode', mode) } catch (e) { console.warn('[FoliaBridge] 保存动画模式失败', e) }
         }
         else if (data.command === 'set-intensity') {
           const intensity = String(data.intensity || 'normal')
-          try { window.localStorage.setItem('folia-intensity', intensity) } catch {}
+          try { window.localStorage.setItem('folia-intensity', intensity) } catch (e) { console.warn('[FoliaBridge] 保存强度设置失败', e) }
         }
       }
 
       // 命令完成后补发状态
       const pushCommandResultState = () => {
         if (disposed) return
-        pushSnapshot(true)
+        pushSnapshot()
         pushPosition('command')
       }
 
       // 串行执行命令
       const handleCommand = (data) => {
         commandQueue = commandQueue
-          .catch(() => {})
+          .catch((e) => { console.warn('[FoliaBridge] 清除前序命令错误', e) })
           .then(async () => {
             await executeCommand(data)
             pushCommandResultState()
@@ -631,20 +672,21 @@ function createPlayerFrame(ctx, closeOverlay) {
             try {
               savedAnimMode = window.localStorage.getItem('folia-animMode') || 'yunjie'
               savedIntensity = window.localStorage.getItem('folia-intensity') || 'normal'
-            } catch {}
+            } catch (e) { console.warn('[FoliaBridge] 读取保存设置失败', e) }
             postToFrame({
               type: 'echo-folia:init',
               payload: {
                 directEnter: true,
                 pluginVersion: String(ctx.manifest?.version || ''),
                 hostControls: buildHostControlsPayload(),
+                lyricFontFamily: buildAppearancePayload().lyricFontFamily,
                 settings: {
                   animMode: savedAnimMode,
                   intensity: savedIntensity,
                 },
               },
             })
-            pushSnapshot(true)
+            pushSnapshot()
             pushLyrics(true)
             pushPosition('init')
             if (lastSpectrumFrame) {
@@ -658,8 +700,9 @@ function createPlayerFrame(ctx, closeOverlay) {
             handleCommand(data)
             break
           case 'echo-folia:request-snapshot':
-            pushSnapshot(true)
+            pushSnapshot()
             pushLyrics(true)
+            pushAppearance()
             pushPosition('init')
             break
         }
@@ -692,6 +735,7 @@ function createPlayerFrame(ctx, closeOverlay) {
         initLyricStoreSubscription()
         initTrackWatch()
         initVolumeWatch()
+        initFontWatch()
         startPositionHeartbeat()
 
         try {
@@ -730,6 +774,8 @@ function createPlayerFrame(ctx, closeOverlay) {
         stopTrackWatch = null
         if (stopVolumeWatch) stopVolumeWatch()
         stopVolumeWatch = null
+        if (stopFontWatch) stopFontWatch()
+        stopFontWatch = null
         if (spectrumDispose) spectrumDispose()
         spectrumDispose = null
       })
@@ -766,7 +812,7 @@ function createPlayerFrame(ctx, closeOverlay) {
                   allow: 'autoplay; fullscreen',
                   onLoad: () => {
                     ready = true
-                    pushSnapshot(true)
+                    pushSnapshot()
                   },
                 })
               : renderLoading(),

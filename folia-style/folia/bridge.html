@@ -53,20 +53,20 @@
     </div>
     <!-- 歌词子页面 -->
     <div class="sm-lyrics" id="sm-lyrics">
-      <div class="sm-lyrics-header">
-        <span class="sm-lyrics-title">歌词</span>
-        <div class="sm-lyrics-actions">
-          <button class="sm-lyrics-btn" id="sm-lyrics-refresh" title="刷新">
-            <svg viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>
-          </button>
-          <button class="sm-lyrics-btn" id="sm-lyrics-match" title="在线匹配">
-            <svg viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-          </button>
+      <!-- 歌词过滤 -->
+      <div class="sm-row lyric-filter-row">
+        <span class="sm-row-label">歌词过滤</span>
+        <div class="sm-seg">
+          <button class="sm-seg-btn active" id="lyric-filter-on"><span class="sm-bg-dot"></span> 开启</button>
+          <button class="sm-seg-btn" id="lyric-filter-off"><span class="sm-bg-dot"></span> 关闭</button>
         </div>
       </div>
-      <div class="sm-source-row">
-        <span class="sm-source-label">歌词来源</span>
-        <span class="sm-source-badge" id="sm-source-badge">酷狗音乐</span>
+      <div class="sm-row lyric-filter-regex-row" id="lyric-filter-regex-row">
+        <span class="sm-row-label">过滤规则<br><small style="opacity:.6">空=默认</small></span>
+        <div style="display:flex;align-items:center;gap:6px;flex:1">
+          <input type="text" id="lyric-filter-regex-input" class="lyric-filter-input" placeholder="正则表达式" spellcheck="false">
+          <button class="sm-mini-btn" id="lyric-filter-reset-btn" type="button" title="恢复默认">↺</button>
+        </div>
       </div>
     </div>
     <!-- 设置子页面 -->
@@ -253,6 +253,26 @@
 (function(){
 'use strict';
 
+// ===== 歌词字体（由宿主设置） =====
+var foliaDefaultFont='"Inter","PingFang SC","Microsoft YaHei","Noto Sans CJK SC",system-ui,sans-serif'
+var foliaLyricFontFamily=''
+window.foliaGetLyricFontFamily=function(){
+  return foliaLyricFontFamily||foliaDefaultFont
+}
+function applyLyricFontFamily(family){
+  var f=String(family||'').trim()
+  foliaLyricFontFamily=f
+  document.documentElement.style.setProperty('--lyric-font-family',f||foliaDefaultFont)
+}
+
+// ===== 歌词过滤 =====
+var DEFAULT_LYRIC_FILTER_REGEX='^([^：]*)：.*$|^([^:]*):.*$|^([^翻唱]*)翻唱.*$|^([^许可]*)许可.*$|^([^音乐人]*)音乐人.*$|^([^国风]*)国风.*$|^([^纯音乐]*)纯音乐.*$|^([^星曜计划]*)星曜计划.*$'
+var lyricFilterEnabled=localStorage.getItem('folia-lyricFilterEnabled')!=='false'
+var lyricFilterRegex=''
+try{lyricFilterRegex=localStorage.getItem('folia-lyricFilterRegex')||''}catch(e){}
+lyricFilterRegex=(function(v){v=String(v||'').trim();if(!v)return '';try{new RegExp(v);return v}catch(e){return DEFAULT_LYRIC_FILTER_REGEX}})(lyricFilterRegex)
+var rawLyricLines=[]
+
 // ===== 状态 =====
 var S={
   track:null,isPlaying:false,currentTimeMs:0,durationMs:0,
@@ -290,7 +310,6 @@ var lastPositionAtMs=0;     // 收到时的 Date.now()
 var extrapolateSpeed=1;     // 播放速率
 
 // ===== 工具 =====
-function lerp(a,b,t){return a+(b-a)*t}
 function clamp(v,a,b){return Math.max(a,Math.min(b,v))}
 function formatTime(ms){var s=Math.floor(ms/1000),m=Math.floor(s/60);s%=60;return m+':'+(s<10?'0':'')+s}
 function escapeHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
@@ -300,14 +319,69 @@ function getLocalTimeMs(){
   return lastPositionMs+(Date.now()-lastPositionAtMs)*extrapolateSpeed;
 }
 
+// ===== 歌词过滤工具 =====
+function activeLyricFilterMatcher(){
+  if(lyricFilterEnabled===false)return null
+  var pattern=lyricFilterRegex||DEFAULT_LYRIC_FILTER_REGEX
+  if(!pattern)return null
+  try{return new RegExp(pattern)}catch(e){return null}
+}
+function lyricLineMatchesFilter(line,matcher){
+  if(!matcher||!line)return false
+  var text=String(line.text||line.secondary||'')
+  if(!text)return false
+  matcher.lastIndex=0
+  return matcher.test(text)
+}
+function buildLyricFilterFallbackLine(line){
+  var track=S.track||{}
+  var title=String((track&&(track.name||track.title))||'').trim()||'未知歌曲'
+  var artist=String((track&&track.artist)||'').trim()||'未知歌手'
+  return{
+    time_ms:line?line.time_ms:0,
+    text:title+' - '+artist,
+    secondary:'',characters:[],
+    duration_ms:line?line.duration_ms:4000
+  }
+}
+function filterLyricLines(lines){
+  if(!Array.isArray(lines)||!lines.length)return[]
+  var matcher=activeLyricFilterMatcher()
+  if(!matcher)return lines
+  var output=[]
+  var insertedFallback=false
+  for(var i=0;i<lines.length;i++){
+    if(!lyricLineMatchesFilter(lines[i],matcher)){
+      output.push(lines[i])
+      continue
+    }
+    if(!output.length&&!insertedFallback){
+      output.push(buildLyricFilterFallbackLine(lines[i]))
+      insertedFallback=true
+    }
+  }
+  return output
+}
+function reFilterLyrics(){
+  S.lyricLines=filterLyricLines(rawLyricLines)
+  S.lyricIndex=-1
+  currentLineStartTime=-1
+  renderLyricLine()
+}
+function saveLyricFilterSettings(){
+  try{
+    localStorage.setItem('folia-lyricFilterEnabled',lyricFilterEnabled?'true':'false')
+    localStorage.setItem('folia-lyricFilterRegex',lyricFilterRegex)
+  }catch(e){console.warn('[Folia] 保存歌词过滤设置失败',e)}
+}
+
 // ===== 几何背景 =====
 var geoLayer=document.getElementById('geo-layer');
 var shapes=[];
-var geoParticles=[];
 
 function createGeometricBackground(){
   geoLayer.innerHTML='';
-  shapes=[];geoParticles=[];
+  shapes=[];
   var types=['circle','square','triangle','cross'];
   // 15 个几何形状
   for(var i=0;i<15;i++){
@@ -387,10 +461,6 @@ var lyricsLayer=document.getElementById('lyrics-layer');
 var subtitleBar=document.getElementById('subtitle-bar');
 var currentLineEl=null;
 var currentLineStartTime=-1;
-var NON_ENG_REGEX=/[^a-zA-Z0-9\s]/;
-var ENG_WORD_REGEX=/^[a-zA-Z0-9']+$/;
-function isNonEng(text){return NON_ENG_REGEX.test(text)}
-function isEngWord(text){return ENG_WORD_REGEX.test(text.trim())}
 
 var exitTimer=null;
 var preExitTimer=null;
@@ -408,7 +478,7 @@ function initFume(){
   wrap.style.display='';
   if(lyricsLayer)lyricsLayer.style.display='none';
   // 隐藏原始 DOM 背景，使用 fume 专属背景
-  var geoLayer=document.getElementById('geo-layer');
+  geoLayer=document.getElementById('geo-layer');
   if(geoLayer)geoLayer.style.display='none';
   var centerGlow=document.querySelector('.center-glow');
   if(centerGlow)centerGlow.style.display='none';
@@ -518,7 +588,7 @@ function renderLyricLine(){
     if(fc)fc.style.display='none';
     if(lyricsLayer)lyricsLayer.style.display='';
     // 恢复原始 DOM 背景
-    var geoLayer=document.getElementById('geo-layer');
+    geoLayer=document.getElementById('geo-layer');
     if(geoLayer)geoLayer.style.display='';
     var centerGlow=document.querySelector('.center-glow');
     if(centerGlow)centerGlow.style.display='';
@@ -808,7 +878,6 @@ function updateWordStates(){
 }
 
 // ===== 队列 =====
-var queuePanel=document.getElementById('queue-panel');
 var queueList=document.getElementById('queue-list');
 var queueCount=document.getElementById('queue-count');
 
@@ -936,6 +1005,10 @@ window.addEventListener('message',function(ev){
           intensityOpts.forEach(function(o){o.classList.toggle('selected',o.getAttribute('data-val')===s.intensity)});
         }
       }
+      // 应用宿主歌词字体
+      if(init.lyricFontFamily){
+        applyLyricFontFamily(init.lyricFontFamily);
+      }
       break;
     case'echo-folia:snapshot':
       var snap=d.payload;
@@ -965,7 +1038,8 @@ window.addEventListener('message',function(ev){
       }
       break;
     case'echo-folia:lyrics':
-      S.lyricLines=d.payload.lines||[];
+      rawLyricLines=d.payload.lines||[];
+      S.lyricLines=filterLyricLines(rawLyricLines);
       S.lyricIndex=-1;
       currentLineStartTime=-1;
       renderLyricLine();
@@ -1045,6 +1119,12 @@ window.addEventListener('message',function(ev){
       window._monetBridgeState.mid=S.mid;
       window._monetBridgeState.treble=S.treble;
       break;
+    case'echo-folia:appearance':
+      var appearancePayload=d.payload||{};
+      if(appearancePayload.lyricFontFamily){
+        applyLyricFontFamily(appearancePayload.lyricFontFamily);
+      }
+      break;
   }
 });
 
@@ -1071,7 +1151,6 @@ function updateModeIcon(){
 
 // ===== 控件绑定 =====
 var ctrlCapsule=document.querySelector('.ctrl-capsule');
-var bottomBar=document.getElementById('bottom-bar');
 document.getElementById('btn-play').onclick=function(){
   // 乐观更新播放状态，立即阻止退出动画
   S.isPlaying=!S.isPlaying;
@@ -1150,8 +1229,6 @@ if(subtitleBar){
     },120);
   });
 }
-document.getElementById('queue-close').onclick=function(){};
-
 // 设置菜单
 var settingsMenu=document.getElementById('settings-menu');
 var settingsBtn=document.getElementById('settings-btn');
@@ -1176,7 +1253,6 @@ function showTab(tab){
   }else if(tab==='lyrics'){
     smLyrics.classList.add('active');
     document.getElementById('sm-btn-lyrics').classList.add('active');
-    updateLyricsSource();
   }else if(tab==='settings'){
     smSettings.classList.add('active');
     document.getElementById('sm-btn-settings').classList.add('active');
@@ -1252,24 +1328,8 @@ document.getElementById('sm-artist').onclick=function(){
 // 歌词按钮 - 切换歌词子页面
 var smLyrics=document.getElementById('sm-lyrics');
 var smInfo=document.querySelector('.sm-info');
-function updateLyricsSource(){
-  var badge=document.getElementById('sm-source-badge');
-  if(S.track&&S.track.sourceType==='webdav'){
-    badge.textContent=S.track.lyricSource==='embedded'?'歌曲内嵌':'酷狗音乐';
-  }else{
-    badge.textContent='酷狗音乐';
-  }
-}
 document.getElementById('sm-btn-lyrics').onclick=function(){
   showTab('lyrics');
-};
-// 歌词刷新
-document.getElementById('sm-lyrics-refresh').onclick=function(){
-  sendCmd('refresh-lyrics');
-};
-// 歌词在线匹配
-document.getElementById('sm-lyrics-match').onclick=function(){
-  sendCmd('match-lyrics');
 };
 // 设置按钮 - 切换设置子页面
 var smSettings=document.getElementById('sm-settings');
@@ -1315,9 +1375,6 @@ function updateBgLayer(){
 }
 function updateCoverBlurBtn(){
   blurBtn.classList.toggle('active',S.coverBlur);
-}
-function updateRhythmLayer(){
-  // 由 updateBgLayer 统一处理
 }
 document.getElementById('sm-btn-blur').onclick=function(){
   S.coverBlur=!S.coverBlur;
@@ -1378,6 +1435,52 @@ function setLyricTimeOffset(v){
 }
 document.getElementById('lyric-offset-minus').onclick=function(){setLyricTimeOffset(lyricTimeOffset-0.1)};
 document.getElementById('lyric-offset-plus').onclick=function(){setLyricTimeOffset(lyricTimeOffset+0.1)};
+
+// ===== 歌词过滤控件 =====
+function updateLyricFilterControls(){
+  document.getElementById('lyric-filter-on').classList.toggle('active',lyricFilterEnabled!==false)
+  document.getElementById('lyric-filter-off').classList.toggle('active',lyricFilterEnabled===false)
+  document.getElementById('lyric-filter-regex-row').style.display=lyricFilterEnabled!==false?'':'none'
+  var inputEl=document.getElementById('lyric-filter-regex-input')
+  var displayVal=lyricFilterRegex||DEFAULT_LYRIC_FILTER_REGEX
+  if(inputEl.value!==displayVal)inputEl.value=displayVal
+}
+function applyLyricFilterRegex(pattern){
+  var next=String(pattern||'').trim()
+  if(next){
+    try{new RegExp(next)}catch(e){
+      updateLyricFilterControls()
+      return
+    }
+  }
+  lyricFilterRegex=next
+  if(lyricFilterEnabled!==false)reFilterLyrics()
+  saveLyricFilterSettings()
+  updateLyricFilterControls()
+}
+document.getElementById('lyric-filter-on').onclick=function(){
+  if(lyricFilterEnabled!==false)return
+  lyricFilterEnabled=true
+  if(rawLyricLines.length)reFilterLyrics()
+  updateLyricFilterControls()
+  saveLyricFilterSettings()
+}
+document.getElementById('lyric-filter-off').onclick=function(){
+  if(lyricFilterEnabled===false)return
+  lyricFilterEnabled=false
+  if(rawLyricLines.length)reFilterLyrics()
+  updateLyricFilterControls()
+  saveLyricFilterSettings()
+}
+var filterRegexInput=document.getElementById('lyric-filter-regex-input')
+filterRegexInput.addEventListener('change',function(){applyLyricFilterRegex(filterRegexInput.value)})
+filterRegexInput.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();applyLyricFilterRegex(filterRegexInput.value)}})
+document.getElementById('lyric-filter-reset-btn').onclick=function(){
+  lyricFilterRegex=''
+  filterRegexInput.value=DEFAULT_LYRIC_FILTER_REGEX
+  if(lyricFilterEnabled!==false)reFilterLyrics()
+  saveLyricFilterSettings()
+}
 var volTrack=document.getElementById('sm-volume-track');
 var volDragging=false;
 function volSeek(e){
@@ -1584,6 +1687,8 @@ if(S.coverBlur||S.rhythm){
 }
 // 同步歌词时间矫正控件初始显示
 updateLyricOffsetControls();
+// 同步歌词过滤控件初始显示
+updateLyricFilterControls();
 requestAnimationFrame(tick);
 parent.postMessage({source:'echo-folia-child',type:'echo-folia:ready'},'*');
 

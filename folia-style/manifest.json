@@ -1,12 +1,12 @@
 {
   "id": "folia-style",
   "name": "Folia 歌词 beta",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "基于 Folia 的歌词可视化插件",
-  "author": "Oneday5799",
+  "author": "Oneday5799、xiaotian2333",
   "path": "",
-  "repo": "",
-  "homepage": "",
+  "repo": "https://github.com/EchoMusic-org/folia-style",
+  "homepage": "https://github.com/EchoMusic-org/folia-style",
   "main": "index.js",
   "style": "style.css",
   "tags": [

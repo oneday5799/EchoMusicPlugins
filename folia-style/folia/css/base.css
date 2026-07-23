@@ -1,6 +1,6 @@
 /* ===== 基础样式 ===== */
 *{margin:0;padding:0;box-sizing:border-box;user-select:none;-webkit-user-select:none}
-html,body{width:100%;height:100%;overflow:hidden;background:#09090b;color:#f4f4f5;font-family:'Inter','PingFang SC','Microsoft YaHei','Noto Sans CJK SC',system-ui,sans-serif;-webkit-font-smoothing:antialiased;-webkit-user-drag:none;drag:none}
+html,body{width:100%;height:100%;overflow:hidden;background:#09090b;color:#f4f4f5;font-family:var(--lyric-font-family,'Inter','PingFang SC','Microsoft YaHei','Noto Sans CJK SC',system-ui,sans-serif);-webkit-font-smoothing:antialiased;-webkit-user-drag:none;drag:none}
 
 #app{width:100%;height:100%;position:relative;overflow:hidden}
 
@@ -115,15 +115,6 @@ html,body{width:100%;height:100%;overflow:hidden;background:#09090b;color:#f4f4f
 .word-eng .word-char:last-child{
   margin-right:0;
 }
-/* 英文染色效果 */
-.word-eng .word-body.sweep-active{
-  background:linear-gradient(90deg,#ffb432 0%,#ffb432 50%,#fff 50%,#fff 100%);
-  background-size:200% 100%;
-  background-position:0 0;
-  -webkit-background-clip:text;background-clip:text;
-  -webkit-text-fill-color:transparent;
-  color:transparent;
-}
 /* 光圈扩散动画 */
 .word-ring{
   position:absolute;top:50%;left:50%;width:0;height:0;
@@ -137,13 +128,6 @@ html,body{width:100%;height:100%;overflow:hidden;background:#09090b;color:#f4f4f
 @keyframes ringExpand{
   0%{width:0;height:0;opacity:0.8;border-width:2px}
   100%{width:360px;height:360px;opacity:0;border-width:0.5px}
-}
-@keyframes liuguangFloat{
-  0%{transform:translateY(0) scale(1)}
-  25%{transform:translateY(-14px) scale(1.01)}
-  50%{transform:translateY(0) scale(1)}
-  75%{transform:translateY(6px) scale(0.995)}
-  100%{transform:translateY(0) scale(1)}
 }
 .word-deco::before{
   content:'';position:absolute;bottom:-9px;left:9px;
@@ -338,7 +322,6 @@ html,body{width:100%;height:100%;overflow:hidden;background:#09090b;color:#f4f4f
   transition:all 0.2s ease;pointer-events:auto;
 }
 .ctrl-icon-btn:hover{color:rgba(255,255,255,0.85);background:rgba(255,255,255,0.06)}
-.ctrl-icon-btn.active{color:rgba(255,240,184,0.9)}
 .ctrl-icon-btn.fav-active{color:#ef4444}
 .ctrl-icon-btn.fav-active svg{fill:#ef4444;stroke:#ef4444}
 
@@ -450,26 +433,19 @@ html,body{width:100%;height:100%;overflow:hidden;background:#09090b;color:#f4f4f
 /* 歌词子页面 */
 .sm-lyrics{display:none;width:100%;flex-direction:column;gap:12px}
 .sm-lyrics.active{display:flex}
-.sm-lyrics-header{display:flex;align-items:center;justify-content:space-between}
-.sm-lyrics-title{font-size:14px;font-weight:600;color:rgba(255,255,255,0.8)}
-.sm-lyrics-actions{display:flex;gap:8px}
-.sm-lyrics-btn{
-  width:30px;height:30px;border-radius:8px;border:none;
-  background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.4);
-  cursor:pointer;display:flex;align-items:center;justify-content:center;
-  transition:all 0.2s ease;
+/* 歌词过滤 */
+.lyric-filter-row{margin-top:2px}
+.lyric-filter-regex-row{display:flex}
+.lyric-filter-input{
+  width:100%;height:30px;padding:0 9px;border-radius:8px;
+  border:1px solid rgba(255,255,255,0.12);
+  background:rgba(0,0,0,0.22);color:rgba(255,255,255,0.86);
+  font:11px/1.2 'Inter','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  outline:none;min-width:0
 }
-.sm-lyrics-btn:hover{background:rgba(255,255,255,0.1);color:#fff}
-.sm-lyrics-btn svg{width:16px;height:16px;display:block;stroke:currentColor;fill:none}
-.sm-source-row{
-  display:flex;align-items:center;justify-content:space-between;
-  padding:10px 12px;border-radius:10px;
-  background:rgba(255,255,255,0.04);
-}
-.sm-source-label{font-size:12px;color:rgba(255,255,255,0.4)}
-.sm-source-badge{
-  font-size:11px;font-weight:500;padding:3px 10px;border-radius:6px;
-  background:rgba(59,130,246,0.2);color:#60a5fa;
+.lyric-filter-input:focus{
+  border-color:rgba(0,245,212,0.34);
+  box-shadow:0 0 0 2px rgba(0,245,212,0.08)
 }
 /* 设置子页面 */
 .sm-settings{display:none;width:100%;flex-direction:column;gap:16px}
@@ -513,6 +489,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#09090b;color:#f4f4f
 }
 .sm-seg-btn:hover{border-color:rgba(255,255,255,0.2);color:rgba(255,255,255,0.7)}
 .sm-seg-btn.active{background:rgba(255,255,255,0.1);border-color:rgba(255,255,255,0.2);color:#fff}
+.sm-bg-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:currentColor;vertical-align:middle;margin-right:4px}
 /* 歌词时间矫正控件 */
 .sm-mini-btn{
   width:30px;height:30px;border-radius:8px;
