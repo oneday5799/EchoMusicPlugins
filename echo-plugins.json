@@ -300,6 +300,20 @@
         "lyrics",
         "lyric-effects"
       ]
+    },
+    {
+      "id": "xiaotoolkit",
+      "name": "小功能插件",
+      "description": "热门排序、单击播放、歌词沉浸、顶部插件按钮、10 种桌面特效、搜索历史、多账号切换",
+      "author": "Max8808",
+      "path": "",
+      "repo": "https://github.com/Max8808/xiaotoolkit",
+      "homepage": "https://github.com/Max8808/xiaotoolkit",
+      "tags": [
+        "toolkit",
+        "appearance",
+        "productivity"
+      ]
     }
   ]
 }
