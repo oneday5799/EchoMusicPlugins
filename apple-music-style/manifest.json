@@ -1,0 +1,20 @@
+{
+  "id": "apple-music-style",
+  "name": "Apple Music 风格播放页",
+  "version": "1.0.0",
+  "description": "将播放页面替换为 Apple Music 风格的双栏布局，使用 AMLL 渲染歌词",
+  "author": "Oneday5799",
+  "icon": "icon.svg",
+  "main": "index.js",
+  "style": "style.css",
+  "tags": [
+    "player",
+    "lyrics"
+  ],
+  "capabilities": {
+    "localFiles": true
+  },
+  "requires": {
+    "echoMusicVersion": ">=2.2.9-beta.12"
+  }
+}

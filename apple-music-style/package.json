@@ -1,0 +1,24 @@
+{
+  "name": "echo-plugin-apple-music-style",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "build:host": "esbuild src/index.js --bundle --format=esm --target=chrome120 --outfile=index.js",
+    "build:amll": "esbuild src/amll-entry.js --bundle --format=iife --target=chrome120 --loader:.css=text --outfile=apple-music/amll.js",
+    "build": "npm run build:host && npm run build:amll"
+  },
+  "dependencies": {
+    "@applemusic-like-lyrics/core": "^0.5.2",
+    "@pixi/app": "^7.4.3",
+    "@pixi/core": "^7.4.3",
+    "@pixi/display": "^7.4.3",
+    "@pixi/filter-blur": "^7.4.3",
+    "@pixi/filter-bulge-pinch": "^5.1.1",
+    "@pixi/filter-color-matrix": "^7.4.3",
+    "@pixi/sprite": "^7.4.3"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1"
+  }
+}

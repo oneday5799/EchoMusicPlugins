@@ -1,0 +1,294 @@
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{width:100%;height:100%;overflow:hidden;background:transparent;font-family:'Inter',"PingFang SC","Microsoft YaHei","Noto Sans CJK SC",system-ui,sans-serif}
+button{font:inherit;cursor:pointer;border:none;background:none;color:inherit}
+img{-webkit-user-drag:none;user-select:none}
+
+.applemusic-root{
+  position:relative;width:100%;height:100%;overflow:hidden;
+  display:flex;flex-direction:row;
+}
+
+/* ===== 模糊封面背景 ===== */
+.blur-bg{
+  position:absolute;inset:-60px;z-index:0;
+  background-size:cover;background-position:center;
+  filter:blur(80px) saturate(1.2) brightness(0.65);
+  transform:scale(1.2);transition:background-image 0.6s ease;
+}
+.blur-bg::after{
+  content:'';position:absolute;inset:0;
+  background:rgba(0,0,0,0.25);
+}
+
+/* ===== 左侧面板 ===== */
+.left-panel{
+  position:relative;z-index:1;
+  width:42%;min-width:320px;
+  display:flex;flex-direction:column;
+  padding:60px 96px 28px;
+}
+.left-panel-content{
+  display:flex;flex-direction:column;
+  flex:1;justify-content:center;
+}
+
+/* 封面顶部拖拽条 */
+.cover-drag-bar{
+  width:42px;height:12px;border-radius:6px;
+  background:rgba(255,255,255,0.6);
+  position:absolute;top:45px;left:50%;transform:translateX(-50%);
+  z-index:10;-webkit-app-region:drag;
+}
+
+/* 封面 */
+.cover-wrap{
+  position:relative;width:100%;aspect-ratio:1/1;
+  margin:0 auto 96px;flex-shrink:0;
+}
+.cover-img{
+  width:100%;height:100%;object-fit:cover;
+  border-radius:14px;
+  box-shadow:0 12px 40px rgba(0,0,0,0.45),0 2px 8px rgba(0,0,0,0.25);
+  transition:opacity 0.4s ease;
+}
+.cover-img[data-loaded="false"]{opacity:0}
+.cover-placeholder{
+  width:100%;height:100%;border-radius:14px;
+  background:rgba(255,255,255,0.08);
+  display:flex;align-items:center;justify-content:center;
+  font-size:64px;color:rgba(255,255,255,0.25);
+}
+
+/* 歌曲信息 */
+.track-info{
+  width:100%;margin-bottom:16px;flex-shrink:0;
+  display:flex;align-items:center;justify-content:space-between;gap:8px;
+}
+.track-text-group{
+  flex:1;min-width:0;overflow:hidden;
+}
+.track-title{
+  font-size:22px;font-weight:700;color:#fff;
+  line-height:1.35;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;flex:1;min-width:0;
+  text-shadow:0 1px 4px rgba(0,0,0,0.3);
+}
+.track-artist{
+  font-size:22px;font-weight:700;color:rgba(255,255,255,0.8);
+  line-height:1.35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  text-shadow:0 1px 4px rgba(0,0,0,0.3);
+}
+
+/* 操作按钮 */
+.track-actions{
+  display:flex;align-items:center;gap:8px;flex-shrink:0;
+}
+.action-btn{
+  width:38px;height:38px;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+  background:rgba(255,255,255,0.15);
+  color:rgba(255,255,255,0.8);transition:color 0.18s,background 0.18s;
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+}
+.action-btn:hover{color:#fff;background:rgba(255,255,255,0.25)}
+.action-btn.active{color:#ff6b6b}
+.action-btn svg{width:18px;height:18px}
+
+/* 进度条 */
+.progress-section{
+  width:100%;margin-bottom:6px;flex-shrink:0;
+}
+.progress-track{
+  --bar-h:12px;
+  --fill-h:var(--bar-h);
+  width:100%;height:var(--bar-h);position:relative;cursor:pointer;
+  margin-bottom:14px;
+}
+.progress-track::before{
+  content:'';position:absolute;left:0;right:0;top:50%;height:var(--fill-h);
+  transform:translateY(-50%);border-radius:var(--fill-h);
+  background:rgba(255,255,255,0.2);
+  transition:height 0.5s ease,border-radius 0.5s ease;
+}
+.progress-track:hover::before{
+  height:calc(var(--bar-h) * 1.5);border-radius:calc(var(--bar-h) * 1.5);
+}
+@keyframes progress-spring{
+  0%{height:calc(var(--bar-h) * 1.5);border-radius:calc(var(--bar-h) * 1.5)}
+  60%{height:calc(var(--bar-h) * 0.5);border-radius:calc(var(--bar-h) * 0.5)}
+  100%{height:var(--bar-h);border-radius:var(--bar-h)}
+}
+.progress-track.spring::before{animation:progress-spring 0.5s ease;transition:none}
+.progress-track.spring{--fill-h:var(--bar-h)}
+.progress-fill{
+  position:absolute;left:0;top:50%;height:var(--fill-h);
+  transform:translateY(-50%);background:#fff;border-radius:var(--fill-h);
+  transition:height 0.5s ease;pointer-events:none;
+  min-width:var(--fill-h);
+}
+.progress-track:hover .progress-fill{height:calc(var(--bar-h) * 1.5)}
+.progress-track.spring .progress-fill{animation:progress-spring 0.5s ease;transition:none}
+.progress-thumb{
+  display:none;
+}
+.progress-times{
+  display:flex;justify-content:space-between;
+}
+.progress-time{
+  font-size:12px;font-weight:500;color:rgba(255,255,255,0.5);
+  min-width:36px;font-variant-numeric:tabular-nums;
+}
+.progress-time.right{text-align:right}
+
+/* 播放控制 */
+.playback-controls{
+  display:flex;align-items:center;justify-content:space-between;
+  width:100%;flex-shrink:0;
+}
+.playback-controls .center-btns{
+  display:flex;align-items:center;justify-content:center;gap:16px;
+}
+.ctrl-btn{
+  width:48px;height:48px;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+  color:rgba(255,255,255,0.75);
+  transition:background 0.18s;
+}
+.ctrl-btn:hover{background:rgba(255,255,255,0.15);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
+.ctrl-btn svg{width:28px;height:28px}
+.ctrl-btn.play-btn{
+  width:72px;height:72px;color:#fff;
+}
+.ctrl-btn.play-btn svg{width:36px;height:36px}
+.ctrl-btn.small{width:48px;height:48px;margin:0 -13px;color:rgba(255,255,255,0.5)}
+.ctrl-btn.small svg{width:22px;height:22px}
+.ctrl-btn.prev-next{width:72px;height:72px}
+.ctrl-btn.prev-next svg{width:42px;height:42px}
+.ctrl-btn.active{color:#fff}
+
+@keyframes btn-press{
+  0%{transform:scale(1)}
+  100%{transform:scale(0.8)}
+}
+@keyframes btn-hold{
+  0%{transform:scale(0.8)}
+  100%{transform:scale(0.9)}
+}
+@keyframes btn-release{
+  0%{transform:scale(0.9)}
+  66.67%{transform:scale(1.1)}
+  100%{transform:scale(1)}
+}
+.ctrl-btn.pressing{animation:btn-press 0.2s ease forwards}
+.ctrl-btn.holding{animation:btn-hold 0.3s ease forwards}
+.ctrl-btn.releasing{animation:btn-release 0.3s ease forwards}
+.ctrl-btn.active{color:#fff}
+
+/* ===== 右侧歌词面板 ===== */
+.right-panel{
+  position:relative;z-index:1;flex:1;
+  display:flex;align-items:center;justify-content:center;
+  padding:60px 40px 60px 0px;
+  overflow:hidden;
+}
+
+/* AMLL 歌词容器 */
+.lyrics-container{
+  width:100%;height:100%;position:relative;
+  overflow:hidden;
+}
+
+/* AMLL 样式覆盖 — 与 apple-music-lyrics 完全一致 */
+.lyrics-container .amll-lyric-player{
+  --amll-lp-color: var(--amll-played-color, rgba(255, 255, 255, 0.98));
+  --amll-lp-bg-color: transparent;
+  --amll-lp-hover-bg-color: rgba(255, 255, 255, 0.08);
+  --amll-lp-font-size: clamp(24px, calc(4.2vh * var(--amll-font-scale, 1)), 52px);
+  --amll-lp-line-width-aspect: 0.86;
+  --amll-lp-line-padding-x: 0.35em;
+  --amll-lp-bg-line-scale: 0.74;
+  color: var(--amll-unplayed-color, rgba(255, 255, 255, 0.92));
+  mix-blend-mode: normal;
+  text-shadow: var(--amll-text-shadow, 0 2px 8px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.2));
+}
+
+.lyrics-container .amll-lyric-player [class*="_lyricMainLine"]{
+  color: var(--amll-unplayed-color, rgba(255, 255, 255, 0.92));
+  font-weight: var(--amll-font-weight, 850);
+}
+.lyrics-container .amll-lyric-player [class*="_lyricSubLine"]{
+  color: var(--amll-unplayed-color, rgba(255, 255, 255, 0.9));
+  opacity: var(--amll-sub-opacity, 0.56) !important;
+}
+.lyrics-container .amll-lyric-player [class*="_lyricBgLine"]{
+  color: var(--amll-unplayed-color, rgba(255, 255, 255, 0.86));
+  opacity: var(--amll-bg-opacity, 0.46) !important;
+}
+.lyrics-container .amll-lyric-player [class*="_lyricLine"][class*="_active"] [class*="_lyricMainLine"],
+.lyrics-container .amll-lyric-player [class*="_lyricMainLine"][class*="_active"]{
+  color: var(--amll-played-color, #fff);
+}
+.lyrics-container .amll-lyric-player [class*="_lyricLine"][class*="_active"] [class*="_lyricSubLine"]{
+  color: var(--amll-played-color, rgba(255, 255, 255, 0.94));
+}
+
+/* ===== 顶部悬停区（窗口控制 & 关闭按钮） ===== */
+.top-hover-zone{
+  position:fixed;top:0;left:0;right:0;height:56px;z-index:9;
+  -webkit-app-region:drag;
+}
+.win-controls,
+.applemusic-root .close-overlay-btn{
+  opacity:0;pointer-events:none;
+  transition:opacity 0.3s ease;
+}
+.controls-visible .win-controls,
+.controls-visible .close-overlay-btn{
+  opacity:1;pointer-events:auto;
+}
+
+/* ===== 窗口控制按钮 ===== */
+.win-controls{
+  position:fixed;top:12px;right:16px;z-index:10;
+  display:flex;gap:8px;align-items:center;
+  transition:opacity 0.3s ease;
+}
+.win-btn{
+  width:28px;height:28px;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+  background:rgba(255,255,255,0.1);
+  color:rgba(255,255,255,0.7);
+  transition:background 0.15s,color 0.15s;
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+}
+.win-btn:hover{background:rgba(255,255,255,0.2);color:#fff}
+.win-btn svg{width:12px;height:12px}
+.win-btn.close:hover{background:rgba(255,59,48,0.85);color:#fff}
+
+/* ===== 关闭按钮（左上角） ===== */
+.close-overlay-btn{
+  position:fixed;top:12px;left:16px;z-index:10;
+  width:32px;height:32px;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+  background:rgba(255,255,255,0.1);
+  color:rgba(255,255,255,0.6);
+  transition:background 0.15s,color 0.15s,opacity 0.3s ease;
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+}
+.close-overlay-btn:hover{background:rgba(255,255,255,0.2);color:#fff}
+.close-overlay-btn svg{width:16px;height:16px}
+
+/* ===== 加载状态 ===== */
+.loading-hint{
+  position:absolute;inset:0;z-index:2;
+  display:flex;align-items:center;justify-content:center;
+  color:rgba(255,255,255,0.4);font-size:14px;
+}
+
+/* ===== 响应式 ===== */
+@media (max-width:800px){
+  .left-panel{width:100%;min-width:0;max-width:none;padding:48px 24px 20px}
+  .right-panel{display:none}
+  .cover-wrap{width:min(260px,70%);margin-bottom:16px}
+  .track-title{font-size:18px}
+}
