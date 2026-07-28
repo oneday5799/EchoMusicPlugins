@@ -2,13 +2,13 @@
 var STORAGE_KEY = "apple-music-style-settings";
 var playModeOrder = ["sequential", "list", "random", "single"];
 var DEFAULT_SETTINGS = {
-  followEchoAppearance: true,
+  followEchoAppearance: false,
   enhanceContrast: false,
   fontScale: 100,
   fontWeight: 850,
-  enableBlur: false,
+  enableBlur: true,
   enableScale: true,
-  enableSpring: false,
+  enableSpring: true,
   fadeWidth: 50,
   alignPosition: 48
 };
