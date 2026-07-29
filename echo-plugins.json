@@ -314,6 +314,21 @@
         "appearance",
         "productivity"
       ]
+    },
+    {
+      "id": "apple-music-style",
+      "name": "Apple Music 风格播放页",
+      "description": "将播放页面替换为 Apple Music 风格的双栏布局，使用 AMLL 渲染歌词。",
+      "author": "Oneday5799",
+      "path": "apple-music-style",
+      "repo": "https://github.com/oneday5799/EchoMusicPlugins",
+      "homepage": "https://github.com/oneday5799/EchoMusicPlugins/tree/main/apple-music-style",
+      "tags": [
+        "player",
+        "lyrics",
+        "lyric-effects",
+        "appearance"
+      ]
     }
   ]
 }
