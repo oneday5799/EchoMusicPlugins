@@ -2,7 +2,6 @@
 var STORAGE_KEY = "apple-music-style-settings";
 var playModeOrder = ["sequential", "list", "random", "single"];
 var DEFAULT_SETTINGS = {
-  followEchoAppearance: false,
   enhanceContrast: false,
   fontScale: 100,
   fontWeight: 850,
@@ -10,7 +9,9 @@ var DEFAULT_SETTINGS = {
   enableScale: true,
   enableSpring: true,
   fadeWidth: 50,
-  alignPosition: 48
+  alignPosition: 48,
+  showTranslation: false,
+  showRomanization: false
 };
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
@@ -18,7 +19,6 @@ function clamp(v, min, max) {
 function normalizeSettings(value) {
   const s = value && typeof value === "object" ? value : {};
   return {
-    followEchoAppearance: Boolean(s.followEchoAppearance ?? DEFAULT_SETTINGS.followEchoAppearance),
     enhanceContrast: Boolean(s.enhanceContrast ?? DEFAULT_SETTINGS.enhanceContrast),
     fontScale: clamp(Number(s.fontScale ?? DEFAULT_SETTINGS.fontScale), 50, 200),
     fontWeight: clamp(Number(s.fontWeight ?? DEFAULT_SETTINGS.fontWeight), 300, 900),
@@ -26,7 +26,9 @@ function normalizeSettings(value) {
     enableScale: Boolean(s.enableScale ?? DEFAULT_SETTINGS.enableScale),
     enableSpring: Boolean(s.enableSpring ?? DEFAULT_SETTINGS.enableSpring),
     fadeWidth: clamp(Number(s.fadeWidth ?? DEFAULT_SETTINGS.fadeWidth), 0, 100),
-    alignPosition: clamp(Number(s.alignPosition ?? DEFAULT_SETTINGS.alignPosition), 0, 100)
+    alignPosition: clamp(Number(s.alignPosition ?? DEFAULT_SETTINGS.alignPosition), 0, 100),
+    showTranslation: Boolean(s.showTranslation ?? DEFAULT_SETTINGS.showTranslation),
+    showRomanization: Boolean(s.showRomanization ?? DEFAULT_SETTINGS.showRomanization)
   };
 }
 function getPluginFilePath(ctx, ...parts) {
@@ -116,6 +118,8 @@ function normalizeLyricLine(ctx, line, index, lines) {
     time_ms: startMs,
     text: text(line?.text),
     secondary: lyricSecondary(ctx, line),
+    translated: line?.translated || "",
+    romanized: line?.romanized || "",
     characters: lyricCharacters(line),
     duration_ms: nextStartMs > startMs ? Math.max(400, nextStartMs - startMs) : 4800
   };
@@ -179,7 +183,7 @@ function createPlayerFrame(ctx, closeOverlay) {
           track_id: currentId,
           hash,
           lines,
-          lyricsMode: lyric.showTranslation && lyric.showRomanization ? "both" : lyric.showTranslation ? "translation" : lyric.showRomanization ? "romanization" : "none"
+          lyricsMode: pluginState?.settings?.showTranslation && pluginState?.settings?.showRomanization ? "both" : pluginState?.settings?.showTranslation ? "translation" : pluginState?.settings?.showRomanization ? "romanization" : "none"
         };
       };
       const buildPositionPayload = (cause) => {
@@ -226,12 +230,6 @@ function createPlayerFrame(ctx, closeOverlay) {
         let textShadow = pluginSettings.enhanceContrast ? "0 2px 8px rgba(0,0,0,.48), 0 12px 32px rgba(0,0,0,.34)" : "0 2px 8px rgba(0,0,0,.26)";
         try {
           const appearance = ctx.stores.lyric?.appearance || settings?.lyricAppearance || {};
-          if (pluginSettings.followEchoAppearance) {
-            if (appearance.playedColor || appearance.activeColor) playedColor = appearance.playedColor || appearance.activeColor;
-            if (appearance.unplayedColor || appearance.inactiveColor) unplayedColor = appearance.unplayedColor || appearance.inactiveColor;
-            if (appearance.fontScale != null) fontScale = clamp(Number(appearance.fontScale) || 1, 0.75, 1.5);
-            if (appearance.fontWeight != null) fontWeight = clamp(Number(appearance.fontWeight) || 850, 300, 900);
-          }
           if (appearance.fontFamily) lyricFontFamily = String(appearance.fontFamily).trim() || lyricFontFamily;
         } catch (e) {
         }
@@ -605,11 +603,12 @@ function createSettingsComponent(ctx) {
     name: "AppleMusicStyleSettings",
     setup() {
       return () => h("div", { class: "echo-amll-settings" }, [
-        toggle("\u8DDF\u968F EchoMusic \u5916\u89C2", "followEchoAppearance", "\u590D\u7528\u9875\u9762\u6B4C\u8BCD\u7684\u5DF2\u64AD\u653E\u8272\u3001\u672A\u64AD\u653E\u8272\u3001\u5B57\u4F53\u548C\u5B57\u91CD\u3002"),
         toggle("\u589E\u5F3A\u5BF9\u6BD4\u5EA6", "enhanceContrast", "\u4FDD\u7559 AMLL \u5C42\u6B21\u611F\uFF0C\u540C\u65F6\u63D0\u9AD8\u5C01\u9762\u80CC\u666F\u4E0A\u7684\u6587\u5B57\u53EF\u8BFB\u6027\u3002"),
         toggle("\u6B4C\u8BCD\u7F29\u653E", "enableScale", "\u5F00\u542F\u5F53\u524D\u884C\u805A\u7126\u7F29\u653E\u6548\u679C\u3002"),
         toggle("\u5F39\u7C27\u52A8\u753B", "enableSpring", "\u5F00\u542F\u6B4C\u8BCD\u6EDA\u52A8\u65F6\u7684\u5F39\u7C27\u56DE\u5F39\u52A8\u753B\u3002"),
         toggle("\u6B4C\u8BCD\u6A21\u7CCA", "enableBlur", "\u5F00\u542F\u8FDC\u79BB\u7126\u70B9\u884C\u7684\u6A21\u7CCA\u6548\u679C\u3002"),
+        toggle("\u663E\u793A\u7FFB\u8BD1", "showTranslation", "\u663E\u793A\u6B4C\u8BCD\u7684\u4E2D\u6587\u7FFB\u8BD1\u3002"),
+        toggle("\u663E\u793A\u6CE8\u97F3", "showRomanization", "\u663E\u793A\u6B4C\u8BCD\u7684\u6CE8\u97F3\u3002"),
         slider(
           "\u5B57\u4F53\u7F29\u653E",
           "fontScale",

@@ -91,7 +91,7 @@ img{-webkit-user-drag:none;user-select:none}
   backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
 }
 .action-btn:hover{color:#fff;background:rgba(255,255,255,0.25)}
-.action-btn.active{color:#ff6b6b}
+.action-btn.active{color:#fff}
 .action-btn svg{width:18px;height:18px}
 
 /* 进度条 */

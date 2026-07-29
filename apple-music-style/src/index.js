@@ -6,7 +6,6 @@ const STORAGE_KEY = 'apple-music-style-settings'
 const playModeOrder = ['sequential', 'list', 'random', 'single']
 
 const DEFAULT_SETTINGS = {
-  followEchoAppearance: false,
   enhanceContrast: false,
   fontScale: 100,
   fontWeight: 850,
@@ -15,6 +14,8 @@ const DEFAULT_SETTINGS = {
   enableSpring: true,
   fadeWidth: 50,
   alignPosition: 48,
+  showTranslation: false,
+  showRomanization: false,
 }
 
 function clamp(v, min, max) {
@@ -24,7 +25,6 @@ function clamp(v, min, max) {
 function normalizeSettings(value) {
   const s = value && typeof value === 'object' ? value : {}
   return {
-    followEchoAppearance: Boolean(s.followEchoAppearance ?? DEFAULT_SETTINGS.followEchoAppearance),
     enhanceContrast: Boolean(s.enhanceContrast ?? DEFAULT_SETTINGS.enhanceContrast),
     fontScale: clamp(Number(s.fontScale ?? DEFAULT_SETTINGS.fontScale), 50, 200),
     fontWeight: clamp(Number(s.fontWeight ?? DEFAULT_SETTINGS.fontWeight), 300, 900),
@@ -33,6 +33,8 @@ function normalizeSettings(value) {
     enableSpring: Boolean(s.enableSpring ?? DEFAULT_SETTINGS.enableSpring),
     fadeWidth: clamp(Number(s.fadeWidth ?? DEFAULT_SETTINGS.fadeWidth), 0, 100),
     alignPosition: clamp(Number(s.alignPosition ?? DEFAULT_SETTINGS.alignPosition), 0, 100),
+    showTranslation: Boolean(s.showTranslation ?? DEFAULT_SETTINGS.showTranslation),
+    showRomanization: Boolean(s.showRomanization ?? DEFAULT_SETTINGS.showRomanization),
   }
 }
 
@@ -144,6 +146,8 @@ function normalizeLyricLine(ctx, line, index, lines) {
     time_ms: startMs,
     text: text(line?.text),
     secondary: lyricSecondary(ctx, line),
+    translated: line?.translated || '',
+    romanized: line?.romanized || '',
     characters: lyricCharacters(line),
     duration_ms: nextStartMs > startMs ? Math.max(400, nextStartMs - startMs) : 4800,
   }
@@ -221,9 +225,9 @@ function createPlayerFrame(ctx, closeOverlay) {
           track_id: currentId,
           hash,
           lines,
-          lyricsMode: lyric.showTranslation && lyric.showRomanization ? 'both'
-            : lyric.showTranslation ? 'translation'
-            : lyric.showRomanization ? 'romanization'
+          lyricsMode: pluginState?.settings?.showTranslation && pluginState?.settings?.showRomanization ? 'both'
+            : pluginState?.settings?.showTranslation ? 'translation'
+            : pluginState?.settings?.showRomanization ? 'romanization'
             : 'none',
         }
       }
@@ -278,12 +282,6 @@ function createPlayerFrame(ctx, closeOverlay) {
           : '0 2px 8px rgba(0,0,0,.26)'
         try {
           const appearance = ctx.stores.lyric?.appearance || settings?.lyricAppearance || {}
-          if (pluginSettings.followEchoAppearance) {
-            if (appearance.playedColor || appearance.activeColor) playedColor = appearance.playedColor || appearance.activeColor
-            if (appearance.unplayedColor || appearance.inactiveColor) unplayedColor = appearance.unplayedColor || appearance.inactiveColor
-            if (appearance.fontScale != null) fontScale = clamp(Number(appearance.fontScale) || 1, 0.75, 1.5)
-            if (appearance.fontWeight != null) fontWeight = clamp(Number(appearance.fontWeight) || 850, 300, 900)
-          }
           if (appearance.fontFamily) lyricFontFamily = String(appearance.fontFamily).trim() || lyricFontFamily
         } catch (e) {}
         return {
@@ -697,11 +695,12 @@ function createSettingsComponent(ctx) {
     setup() {
       return () =>
         h('div', { class: 'echo-amll-settings' }, [
-          toggle('跟随 EchoMusic 外观', 'followEchoAppearance', '复用页面歌词的已播放色、未播放色、字体和字重。'),
           toggle('增强对比度', 'enhanceContrast', '保留 AMLL 层次感，同时提高封面背景上的文字可读性。'),
           toggle('歌词缩放', 'enableScale', '开启当前行聚焦缩放效果。'),
           toggle('弹簧动画', 'enableSpring', '开启歌词滚动时的弹簧回弹动画。'),
           toggle('歌词模糊', 'enableBlur', '开启远离焦点行的模糊效果。'),
+          toggle('显示翻译', 'showTranslation', '显示歌词的中文翻译。'),
+          toggle('显示注音', 'showRomanization', '显示歌词的注音。'),
           slider(
             '字体缩放',
             'fontScale',
