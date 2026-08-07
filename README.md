@@ -126,7 +126,7 @@ EchoMusic --safe-mode
 pnpm exec electron . --safe-mode
 ```
 
-插件禁用或卸载前，运行时会调用插件的 `deactivate(ctx)`，随后清理通过宿主 API 注册的页面、统一设置、歌曲菜单、命令、事件监听、`ctx.css.inject` 样式、manifest 样式、`ctx.lyricEffects` 歌词动效、`ctx.ui.mount` / `ctx.ui.teleport` 挂载组件和 `ctx.dom.observe` 监听。插件如果直接修改 DOM 或注册了宿主无法感知的全局副作用，应通过 `ctx.dispose(() => ...)` 或 `deactivate(ctx)` 自行归还。
+插件禁用或卸载前，运行时会调用插件的 `deactivate(ctx)`，随后清理通过宿主 API 注册的页面、统一设置、歌曲菜单、命令、事件监听、应用内快捷键、系统级全局快捷键、`ctx.css.inject` 样式、manifest 样式、`ctx.lyricEffects` 歌词动效、`ctx.ui.mount` / `ctx.ui.teleport` 挂载组件和 `ctx.dom.observe` 监听。插件如果直接修改 DOM 或注册了宿主无法感知的全局副作用，应通过 `ctx.dispose(() => ...)` 或 `deactivate(ctx)` 自行归还。
 
 卸载插件会删除插件目录、移除启用状态、清除已追踪的插件私有 KV 数据，并清除与该插件相关的最近故障记录。
 
@@ -191,7 +191,7 @@ pnpm exec electron . --safe-mode
 
 `capabilities.audioSpectrum` 可选。插件如需通过 `ctx.audio.spectrum` 读取或订阅音频频谱数据，必须显式设为 `true`。该能力会启动系统音频捕获订阅，请只在可视化或音频分析插件中声明。
 
-`capabilities.localFiles` 可选。插件如需通过 `ctx.fs.listFiles()` 扫描本地音乐目录，通过 `ctx.fs.readTextFile()` / `ctx.fs.readFileBytes()` 读取用户本地文件内容，或通过 `ctx.fs.writeFile()` 写入插件目录内文件，必须显式设为 `true`。适合本地播放、本地媒体库、CUE/M3U/LRC 解析、插件生成缓存图片或图标等场景。播放音频文件本身应使用 `ctx.fs.getFileUrl()` 转成 URL 后交给播放器，不要通过 IPC 读取整首音频。
+`capabilities.localFiles` 可选。插件如需通过 `ctx.fs.listFiles()` 扫描本地音乐目录，通过 `ctx.fs.readTextFile()` / `ctx.fs.readFileBytes()` / `ctx.fs.readAudioMetadata()` 读取用户本地文件信息，或通过 `ctx.fs.writeFile()` 写入插件目录内文件，必须显式设为 `true`。适合本地播放、本地媒体库、CUE/M3U/LRC 解析、插件生成缓存图片或图标等场景。播放音频文件本身应使用 `ctx.fs.getFileUrl()` 转成 URL 后交给播放器，不要通过 IPC 读取整首音频。
 
 `capabilities.lyricEffects` 可选。插件如需通过 `ctx.lyricEffects.register()` 调整页面歌词或桌面歌词排版、动效或挂载歌词装饰层，必须显式设为 `true`。适合水波歌词、KTV 字幕模板、当前行辉光、歌词背景水印、竖排桌面歌词等视觉插件。该能力只影响歌词显示，不提供歌词内容解析；提供歌词内容请使用 `capabilities.lyrics`。
 
@@ -331,6 +331,7 @@ export default {
 | `ctx.fs.getFileUrl(filePath)`                                         | 将用户选择的本地文件路径转换为可播放或可渲染的 `file://` URL                                                                                                                                                                                                                                                                                                                                                  |
 | `ctx.fs.readTextFile(filePath, options?)`                             | 读取本地文本文件片段，默认最多 1 MB，最大 4 MB，要求 manifest 声明 `capabilities.localFiles: true`                                                                                                                                                                                                                                                                                                            |
 | `ctx.fs.readFileBytes(filePath, options?)`                            | 读取本地文件字节片段，适合解析音频头部或标签，默认最多 1 MB，最大 4 MB，要求 manifest 声明 `capabilities.localFiles: true`                                                                                                                                                                                                                                                                                    |
+| `ctx.fs.readAudioMetadata(filePath)`                                  | 读取本地音频标签和时长，返回标准化标题、歌手、专辑、年份、曲序等信息，要求 manifest 声明 `capabilities.localFiles: true`；新增插件使用时请通过 `requires.echoMusicVersion` 限制到包含该 API 的主程序版本                                                                                                                                                                                                       |
 | `ctx.fs.writeFile(filePath, data, options?)`                          | 写入插件目录内文件，支持字符串、`ArrayBuffer`、`Uint8Array` 和 `{ type: "base64", data }`，默认不覆盖已有文件，最大 8 MB，要求 manifest 声明 `capabilities.localFiles: true`                                                                                                                                                                                                                                  |
 | `ctx.fs.deleteFile(filePath)`                                         | 删除插件目录内文件，仅删除文件不删除目录，要求 manifest 声明 `capabilities.localFiles: true`                                                                                                                                                                                                                                                                                                                  |
 | `ctx.appIcons.refresh()`                                              | 重新读取插件存储中的应用图标配置并尝试刷新托盘、任务栏/窗口和桌面快捷方式图标                                                                                                                                                                                                                                                                                                                                  |
@@ -348,6 +349,7 @@ export default {
 | `ctx.theme.pageTransition.clear()`                                    | 清理当前插件提交的页面动效设置                                                                                                                                                                                                                                                                                                                                                                                |
 | `ctx.theme.accentGradient.set(options)`                               | 请求宿主调整顶部主题色渐变氛围层（横跨侧栏与内容顶部的色带），支持颜色、角度、高度、透明度与暗色独立覆盖 |
 | `ctx.theme.accentGradient.clear()`                                    | 清理当前插件提交的顶部渐变配置 |
+| `ctx.cover.createThemedIconCoverUrl({ icon, color? })`                | 生成与 EchoMusic 内置详情页一致的主题色图标封面；不传 `color` 时主插件上下文跟随当前主题色，插件浮窗建议显式传入快照里的 `appearance.accentColor` |
 | `ctx.nowPlaying`                                                      | 当前播放/歌词/外观快照 API，可读取快照、订阅变化、发送播放与歌词命令                                                                                                                                                                                                                                                                                                                                          |
 | `ctx.desktopLyric`                                                    | 桌面歌词 API：`getSnapshot()`、`getWindow()`、`show()`、`hide()`、`updateSettings(partial)`、`updateWindow(bounds)`；可调整原桌面歌词窗口设置和受控窗口尺寸                                                                                                                                                                                                                                                     |
 | `ctx.scroll`                                                          | 页面滚动容器 API：`queryContainers()`、`getCurrentContainer()`、`getState(el)`、`scrollToTop(el?)`、`scrollToBottom(el?)`、`observeContainers(handler)`；用于滚动增强插件，避免依赖宿主内部 DOM 类名                                                                                                                                                                                                            |
@@ -358,7 +360,8 @@ export default {
 | `ctx.electron.platform`                                               | 当前平台：`'darwin'` / `'win32'` / `'linux'`                                                                                                                                                                                                                                                                                                                                                                  |
 | `ctx.css.inject(cssText, options?)`                                   | 注入全局 CSS，禁用插件时自动清理                                                                                                                                                                                                                                                                                                                                                                              |
 | `ctx.commands.register(id, handler)`                                  | 注册插件命令                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `ctx.shortcuts.register(accelerator, handler)`                        | 注册自定义快捷键，支持 `'Ctrl+A'`、`'Shift+Right'`、`'CmdOrCtrl+S'` 等标准 Electron 加速器格式；返回清理函数，插件卸载时自动解绑                                                                                                                                                                                                                                                                             |
+| `ctx.shortcuts.register(accelerator, handler)`                        | 注册应用内快捷键，窗口获得焦点时生效；支持 `'Ctrl+A'`、`'Shift+Right'`、`'CmdOrCtrl+S'` 等标准 Electron 加速器格式；返回清理函数，插件卸载时自动解绑                                                                                                                                                                                                                                                        |
+| `ctx.shortcuts.registerGlobal(accelerator, handler)`                  | 注册系统级全局快捷键，EchoMusic 在后台时也可触发；返回 `Promise<dispose>`，注册失败时抛出冲突或格式错误；依赖该 API 的插件建议设置 `requires.echoMusicVersion` 到包含该能力的 EchoMusic 版本                                                                                                                                                                                                                |
 | `ctx.events.onTrackChange(handler)`                                   | 监听当前曲目变化                                                                                                                                                                                                                                                                                                                                                                                              |
 | `ctx.events.onPlaybackChange(handler)`                                | 监听播放/暂停状态变化                                                                                                                                                                                                                                                                                                                                                                                         |
 | `ctx.events.onPlaybackStateChange(handler)`                           | 监听播放展示状态变化，handler 收到 `loading` / `playing` / `paused` / `error`                                                                                                                                                                                                                                                                                                                                |
@@ -463,6 +466,8 @@ off(); // 主动退订；插件禁用/卸载时也会自动退订
 
 `ctx.ui.cover.setFallback(resolver)` 用于接管「无封面」或「封面加载失败」时的显示。同一时刻只有最后注册的兜底生效，禁用插件时自动清理。
 
+如果只是想生成一张和内置「我最喜爱」「私人 FM」风格一致的图标封面，使用 `ctx.cover.createThemedIconCoverUrl(...)` 即可，不需要注册全局兜底。
+
 ```js
 const dispose = ctx.ui.cover.setFallback({
   id: "cover-fallback", // 可选，缺省为 "default"
@@ -470,7 +475,10 @@ const dispose = ctx.ui.cover.setFallback({
     // 必须同步返回字符串（图片 URL / data: URI）；返回 null/undefined 表示放弃，回退到宿主默认封面
     if (context.reason === "empty") {
       // 无封面：用主题色生成一张占位图
-      return makeSvgCover(context.accentColor, context.size);
+      return ctx.cover.createThemedIconCoverUrl({
+        icon: ctx.icons.iconMusic,
+        color: context.accentColor,
+      });
     }
     return null; // 封面加载失败时交还宿主默认处理
   },
@@ -512,6 +520,8 @@ const isLinux = ctx.electron.platform === "linux";
   }
 }
 ```
+
+`ctx.fs` 下的文件枚举、URL 转换、文本读取、字节读取、音频 metadata 读取、写入和删除接口均为异步 Promise。插件应使用 `await`，不要在渲染循环或同步 resolver 中直接等待文件 IO；需要展示封面、播放本地文件或返回歌词时，先在初始化、设置保存或用户选择文件阶段把 URL/metadata 预取并缓存到插件状态。
 
 #### 删除文件
 
@@ -999,9 +1009,9 @@ export async function activate(ctx) {
 - `handler` 抛错时宿主会记录插件运行异常并返回 500，不会拖垮播放器主流程。
 - `ctx.webServer` 也会出现在插件浮窗上下文中，适合由浮窗里的开关控制服务启停。
 
-### 注册快捷键
+### 注册应用内快捷键
 
-插件可以使用 `ctx.shortcuts.register(accelerator, handler)` 注册自定义快捷键：
+插件可以使用 `ctx.shortcuts.register(accelerator, handler)` 注册应用内快捷键。应用内快捷键只在 EchoMusic 窗口获得焦点时生效，适合插件页面、播放页增强和临时操作：
 
 ```js
 export function activate(ctx) {
@@ -1050,9 +1060,54 @@ export function activate(ctx) {
 - `ctx.shortcuts.register()` 返回清理函数，插件卸载时会自动解绑
 - 同一个快捷键可以被多个插件注册，按注册顺序依次触发
 
+### 注册全局快捷键
+
+插件可以使用 `ctx.shortcuts.registerGlobal(accelerator, handler)` 注册系统级全局快捷键。全局快捷键在 EchoMusic 处于后台时也会触发，适合媒体控制、外部设备联动、全局显示/隐藏浮窗等场景。
+
+如果插件依赖该能力，请在 manifest 中用 `requires.echoMusicVersion` 限制到包含该 API 的 EchoMusic 版本，例如：
+
+```json
+{
+  "requires": {
+    "echoMusicVersion": ">=2.2.9-beta.24"
+  }
+}
+```
+
+基础用法：
+
+```js
+export async function activate(ctx) {
+  if (!ctx.shortcuts.registerGlobal) {
+    ctx.toast.warning("当前 EchoMusic 版本不支持插件全局快捷键");
+    return;
+  }
+
+  await ctx.shortcuts.registerGlobal("CmdOrCtrl+Alt+Right", () => {
+    const currentTime = ctx.player.currentTime.value;
+    const duration = ctx.player.duration.value;
+    ctx.player.seek(Math.min(duration, currentTime + 10));
+    ctx.toast.success("全局快进 10 秒");
+  });
+
+  await ctx.shortcuts.registerGlobal("CmdOrCtrl+Alt+Left", () => {
+    const currentTime = ctx.player.currentTime.value;
+    ctx.player.seek(Math.max(0, currentTime - 10));
+    ctx.toast.success("全局快退 10 秒");
+  });
+}
+```
+
+**注意事项：**
+- 全局快捷键不需要额外 manifest capability，但需要 EchoMusic 版本支持该 API
+- `ctx.shortcuts.registerGlobal()` 返回 `Promise<dispose>`；插件卸载时会自动解绑，也可以手动调用返回的清理函数
+- 如果快捷键已被系统、EchoMusic 内置全局快捷键或其他插件占用，注册会抛出错误
+- 同一个全局快捷键同一时间只能有一个注册者，建议使用带多个修饰键的组合
+- macOS 首次使用全局快捷键时可能受系统权限、输入法或其他应用占用影响；注册失败时应给用户清晰提示
+
 ### 控制播放位置（快进快退）
 
-插件可以通过三种方式实现快进快退：
+插件可以通过三种方式实现快进快退。推荐优先复用宿主的 `seekForward` / `seekBackward` 命令，这样会自动使用用户在 EchoMusic 设置中配置的快进/快退步长。
 
 #### 方式 1：直接使用 `ctx.player.seek()`
 
@@ -1075,13 +1130,13 @@ export function activate(ctx) {
 }
 ```
 
-#### 方式 2：使用系统快捷键命令
+#### 方式 2：使用宿主快进快退命令
 
-EchoMusic 2.2.6+ 支持系统级的 `seekForward` 和 `seekBackward` 命令，偏移量由用户设置：
+EchoMusic 支持 `seekForward` 和 `seekBackward` 命令，偏移量由用户在设置中配置：
 
 ```js
 export function activate(ctx) {
-  // 使用系统快进快退设置（默认 5 秒）
+  // 使用用户设置的快进快退步长
   ctx.shortcuts.register('Alt+Right', () => {
     ctx.nowPlaying.command('seekForward');
   });
@@ -1089,6 +1144,25 @@ export function activate(ctx) {
   ctx.shortcuts.register('Alt+Left', () => {
     ctx.nowPlaying.command('seekBackward');
   });
+}
+```
+
+也可以注册成系统级全局快捷键：
+
+```js
+export async function activate(ctx) {
+  if (!ctx.shortcuts.registerGlobal) return;
+
+  try {
+    await ctx.shortcuts.registerGlobal("CmdOrCtrl+Alt+Right", () => {
+      ctx.nowPlaying.command("seekForward");
+    });
+    await ctx.shortcuts.registerGlobal("CmdOrCtrl+Alt+Left", () => {
+      ctx.nowPlaying.command("seekBackward");
+    });
+  } catch (error) {
+    ctx.toast.warning(`全局快进快退快捷键注册失败：${error?.message || error}`);
+  }
 }
 ```
 
@@ -1348,6 +1422,31 @@ const Icon = ctx.vue.resolveComponent("Icon");
 h(Icon, { icon: ctx.icons.iconPictureInPicture, width: 16, height: 16 });
 ```
 
+### 主题图标封面
+
+`ctx.cover.createThemedIconCoverUrl({ icon, color? })` 会返回一段 `data:image/svg+xml` URL，用于生成和内置详情页一致的主题色图标封面。主插件上下文中不传 `color` 会使用当前主题色；如果你需要和某首歌、某个窗口快照或自定义页面主题对齐，可以传入十六进制颜色。
+
+```js
+const favoriteCover = ctx.cover.createThemedIconCoverUrl({
+  icon: ctx.icons.iconHeartFilled,
+});
+
+const cloudCover = ctx.cover.createThemedIconCoverUrl({
+  icon: ctx.icons.iconCloud,
+  color: "#0ea5e9",
+});
+```
+
+插件浮窗也提供同名 API 和 `ctx.icons`。浮窗运行时没有主界面的主题 store，推荐从 `ctx.nowPlaying` 快照取当前外观色：
+
+```js
+const snapshot = await ctx.nowPlaying.getSnapshot();
+const coverUrl = ctx.cover.createThemedIconCoverUrl({
+  icon: ctx.icons.iconPulse,
+  color: snapshot.appearance.accentColor,
+});
+```
+
 ## UI 能力
 
 插件既可以用稳定的宿主贡献 API，也可以直接介入主界面 DOM。
@@ -1356,6 +1455,7 @@ h(Icon, { icon: ctx.icons.iconPictureInPicture, width: 16, height: 16 });
 - `ctx.ui.sidebar.addItem(...)`：为插件页面或自定义动作注册正式侧边栏导航入口，支持路由匹配、高亮和折叠侧栏图标。
 - `ctx.ui.settings.define(...)`：声明插件设置入口，传入自定义 Vue 组件自由渲染。
 - `ctx.ui.cover.setFallback(...)`：设置无封面或封面加载失败时的显示图片。
+- `ctx.cover.createThemedIconCoverUrl(...)`：生成 EchoMusic 内置风格的主题色图标封面。
 - `ctx.ui.addSongContextMenuItem(...)`：注册歌曲右键菜单项。
 - `ctx.ui.mount(selectorOrElement, component, options)`：把 Vue 组件挂载到任意 DOM 位置。
 - `ctx.ui.teleport(component, options)`：把 Vue 组件挂载到 `document.body`，适合全局浮层/悬浮窗。
@@ -1579,7 +1679,26 @@ if (result.ok) {
 }
 ```
 
-`ctx.fs.readTextFile(filePath, options?)` 适合读取 `.lrc`、`.cue`、`.m3u` 等文本片段；`ctx.fs.readFileBytes(filePath, options?)` 适合读取音频头部做标签解析。两者默认最多读取 1 MB，最大 4 MB；播放整首音频请使用 `getFileUrl()`，不要通过 IPC 读取完整音频文件。
+`listFiles()` 返回的 `kind` 由宿主统一分类：`audio`、`image`、`lyric`、`playlist`、`cue` 或 `other`。其中 `audio` 使用 EchoMusic 本地播放格式清单，当前包括 `aac`、`aif`、`aiff`、`alac`、`ape`、`caf`、`dff`、`dsf`、`flac`、`m4a`、`mp3`、`oga`、`ogg`、`opus`、`wav`、`wave`、`webm`、`wma`、`wv`。云盘上传额外支持的业务格式不等同于本地播放清单。
+
+如果只需要音频文件，可以显式传 `kinds: ["audio"]`；如果插件自己维护扩展名白名单，也可以传 `extensions`。`extensions` 和 `kinds` 都会在主进程侧过滤，适合大目录扫描。
+
+`ctx.fs.readAudioMetadata(filePath)` 适合本地媒体库构建歌名、歌手、专辑和时长索引；它在主进程异步解析，不需要插件通过 `readFileBytes()` 自己读取音频头部：
+
+```js
+const metadata = await ctx.fs.readAudioMetadata(first.path);
+if (metadata.ok) {
+  console.log(metadata.title, metadata.artist, metadata.duration);
+} else {
+  console.warn(metadata.error);
+}
+```
+
+成功结果会包含文件信息 `name`、`path`、`url`、`size`、`modifiedAt`、`extension`、`relativePath`、`kind`，以及音频信息 `title`、`artist`、`album`、`duration`、`year`、`track`、`disk`、`genre`。`title` 一定有值：标签解析失败时宿主会按文件名降级；`metadataParsed` 表示是否成功读到标签，`metadataError` 会在解析失败但文件本身可用时返回错误摘要。
+
+该 API 需要包含本地音频 metadata 能力的 EchoMusic 主程序版本。插件如果依赖它，应在 `manifest.json` 中设置合适的 `requires.echoMusicVersion`，避免旧主程序启用后运行时报错。
+
+`ctx.fs.readTextFile(filePath, options?)` 适合读取 `.lrc`、`.cue`、`.m3u` 等文本片段；`ctx.fs.readFileBytes(filePath, options?)` 适合读取小型二进制片段或自定义格式头部。两者默认最多读取 1 MB，最大 4 MB；播放整首音频请使用 `getFileUrl()`，不要通过 IPC 读取完整音频文件。
 
 `ctx.fs.writeFile(filePath, data, options?)` 只允许写入当前插件目录内的文件，目标路径可以是相对插件目录的路径，也可以是插件目录内的绝对路径。默认自动创建父目录，默认不覆盖已有文件；如需覆盖，显式传入 `overwrite: true`。单次写入最大 8 MB，适合保存插件生成的缓存、图片、图标或配置导出文件。
 
