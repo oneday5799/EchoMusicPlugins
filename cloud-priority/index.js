@@ -1,29 +1,51 @@
 export async function activate(ctx) {
   let lastTrackId = null;
+  let currentTrack = null;
+  let retryTimer = null;
+
+  function trySwitchToCloud() {
+    const s = ctx.pinia.state.value.player;
+    if (!s.currentTrackId) return;
+    if (!currentTrack) return;
+    if (String(currentTrack.id) !== String(s.currentTrackId)) return;
+    if (s.currentResolvedSourceKind === "cloud") return;
+    if (s.currentCloudSourceOverrideTrackId === s.currentTrackId) return;
+
+    if (currentTrack.cloudAudioSource?.hash) {
+      s.currentCloudSourceOverrideTrackId = String(s.currentTrackId);
+      s.currentCatalogSourceOverrideTrackId = null;
+      s.currentAudioQualityOverride = null;
+      s.pendingSettingRefresh = false;
+      void ctx.stores.player.refreshCurrentTrack().catch(() => {});
+      return true;
+    }
+    return false;
+  }
 
   const off = ctx.events.onTrackChange((track) => {
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+
     if (!track) return;
     if (track.source === "cloud") return;
 
+    currentTrack = track;
     const trackId = String(track.id);
     if (trackId === lastTrackId) return;
     lastTrackId = trackId;
-
-    const s = ctx.pinia.state.value.player;
-    s.currentCloudSourceOverrideTrackId = trackId;
-    s.currentCatalogSourceOverrideTrackId = null;
-    s.currentAudioQualityOverride = null;
   });
 
   const offPhase = ctx.events.onPlaybackStateChange((displayState) => {
-    const s = ctx.pinia.state.value.player;
-    if (!s.currentTrackId) return;
-    if (s.currentCloudSourceOverrideTrackId !== s.currentTrackId) return;
-    if (s.currentResolvedSourceKind === "cloud") return;
+    if (displayState !== "playing" && displayState !== "paused") return;
+    if (trySwitchToCloud()) return;
 
-    if (displayState === "playing" || displayState === "paused") {
-      s.pendingSettingRefresh = false;
-      void ctx.stores.player.refreshCurrentTrack().catch(() => {});
+    if (!retryTimer) {
+      retryTimer = setTimeout(() => {
+        retryTimer = null;
+        trySwitchToCloud();
+      }, 300);
     }
   });
 
