@@ -1993,7 +1993,10 @@ export async function activate(ctx) {
     title: "WebDAV",
     icon: "tabler:server",
     component: BrowserPage,
-    sidebar: true,
+    sidebar: {
+      section: "library",
+      order: 100,
+    },
   });
 
   ctx.commands.register("webdav-music:searchLyric", async () => {
