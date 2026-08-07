@@ -1,32 +1,41 @@
-export async function activate(ctx) {
-  let lastTrackId = null;
-  let currentTrack = null;
-  let retryTimer = null;
+let lastTrackId = null;
+let currentTrack = null;
+let retryTimer = null;
 
-  function trySwitchToCloud() {
-    const s = ctx.pinia.state.value.player;
-    if (!s.currentTrackId) return;
-    if (!currentTrack) return;
-    if (String(currentTrack.id) !== String(s.currentTrackId)) return;
-    if (s.currentResolvedSourceKind === "cloud") return;
-    if (s.currentCloudSourceOverrideTrackId === s.currentTrackId) return;
+function trySwitchToCloud(ctx) {
+  const s = ctx.pinia.state.value.player;
+  if (!s.currentTrackId) return;
+  if (!currentTrack) return;
+  if (String(currentTrack.id) !== String(s.currentTrackId)) return;
+  if (s.currentResolvedSourceKind === "cloud") return;
+  if (s.currentCloudSourceOverrideTrackId === s.currentTrackId) return;
+  if (s.currentCatalogSourceOverrideTrackId === s.currentTrackId) return;
 
-    if (currentTrack.cloudAudioSource?.hash) {
-      s.currentCloudSourceOverrideTrackId = String(s.currentTrackId);
-      s.currentCatalogSourceOverrideTrackId = null;
-      s.currentAudioQualityOverride = null;
-      s.pendingSettingRefresh = false;
-      void ctx.stores.player.refreshCurrentTrack().catch(() => {});
-      return true;
-    }
-    return false;
+  if (currentTrack.cloudAudioSource?.hash) {
+    s.currentCloudSourceOverrideTrackId = String(s.currentTrackId);
+    s.currentCatalogSourceOverrideTrackId = null;
+    s.currentAudioQualityOverride = null;
+    s.pendingSettingRefresh = false;
+    void ctx.stores.player.refreshCurrentTrack().catch(() => {});
+    return true;
   }
+  return false;
+}
+
+function clearRetryTimer() {
+  if (retryTimer) {
+    clearTimeout(retryTimer);
+    retryTimer = null;
+  }
+}
+
+export async function activate(ctx) {
+  lastTrackId = null;
+  currentTrack = null;
+  clearRetryTimer();
 
   const off = ctx.events.onTrackChange((track) => {
-    if (retryTimer) {
-      clearTimeout(retryTimer);
-      retryTimer = null;
-    }
+    clearRetryTimer();
 
     if (!track) return;
     if (track.source === "cloud") return;
@@ -39,12 +48,12 @@ export async function activate(ctx) {
 
   const offPhase = ctx.events.onPlaybackStateChange((displayState) => {
     if (displayState !== "playing" && displayState !== "paused") return;
-    if (trySwitchToCloud()) return;
+    if (trySwitchToCloud(ctx)) return;
 
     if (!retryTimer) {
       retryTimer = setTimeout(() => {
         retryTimer = null;
-        trySwitchToCloud();
+        trySwitchToCloud(ctx);
       }, 300);
     }
   });
@@ -62,6 +71,9 @@ export async function activate(ctx) {
 }
 
 export async function deactivate(ctx) {
+  clearRetryTimer();
+  currentTrack = null;
+  lastTrackId = null;
   const s = ctx.pinia.state.value.player;
   s.currentCloudSourceOverrideTrackId = null;
   s.currentCatalogSourceOverrideTrackId = null;
