@@ -90,7 +90,8 @@
     {
       "id": "webdav-music",
       "path": "webdav-music",
-      "homepage": "https://github.com/hoowhoami/EchoMusicPlugins/tree/main/webdav-music",
+      "repo": "https://github.com/oneday5799/EchoMusicPlugins",
+      "homepage": "https://github.com/oneday5799/EchoMusicPlugins/tree/main/webdav-music",
       "tags": [
         "audio-source",
         "webdav",
@@ -193,7 +194,7 @@
       "description": "允许用户自定义托盘图标、窗口标题栏图标、任务栏图标、桌面快捷方式图标以及启动画面。",
       "author": "Oneday5799",
       "path": "custom-icon",
-      "repo": "",
+      "repo": "https://github.com/oneday5799/EchoMusicPlugins",
       "homepage": "https://github.com/oneday5799/EchoMusicPlugins/tree/main/custom-icon",
       "tags": [
         "appearance",
@@ -328,6 +329,19 @@
         "lyrics",
         "lyric-effects",
         "appearance"
+      ]
+    },
+    {
+      "id": "cloud-priority",
+      "name": "云盘优先",
+      "description": "当播放歌曲时，如果这首歌存在于云盘文件，则优先播放云盘文件。",
+      "author": "Oneday5799",
+      "path": "cloud-priority",
+      "repo": "https://github.com/oneday5799/EchoMusicPlugins",
+      "homepage": "https://github.com/oneday5799/EchoMusicPlugins/tree/main/cloud-priority",
+      "tags": [
+        "player",
+        "now-playing"
       ]
     }
   ]
