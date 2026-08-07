@@ -343,6 +343,19 @@
         "player",
         "now-playing"
       ]
+    },
+    {
+      "id": "tingfm-radio",
+      "name": "听FM网络电台",
+      "description": "接入听FM海量网络电台直播源，支持搜索添加全国各地电台",
+      "author": "xiaotian2333",
+      "path": "",
+      "repo": "https://github.com/EchoMusic-org/tingfm-radio",
+      "homepage": "https://github.com/EchoMusic-org/tingfm-radio",
+      "tags": [
+        "radio",
+        "fm"
+      ]
     }
   ]
 }
