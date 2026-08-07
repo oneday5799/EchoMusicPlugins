@@ -164,11 +164,11 @@
     {
       "id": "plugin-panel",
       "name": "插件面板",
-      "description": "在侧边栏添加插件面板快捷入口，一键跳转",
+      "description": "在侧边栏和主应用顶部导航栏添加插件面板快捷入口，一键跳转",
       "author": "yaoyaoprincess",
-      "path": "",
-      "repo": "https://github.com/yaoyaoprincess/plugin-panel",
-      "homepage": "https://github.com/yaoyaoprincess/plugin-panel",
+      "path": "plugin-panel",
+      "repo": "https://github.com/oneday5799/EchoMusicPlugins",
+      "homepage": "https://github.com/oneday5799/EchoMusicPlugins/tree/main/plugin-panel",
       "tags": [
         "plugin-panel"
       ]
