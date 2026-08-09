@@ -155,19 +155,19 @@ img{-webkit-user-drag:none;user-select:none}
 /* 音质弹窗 */
 .quality-popup{
   position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);
-  background:rgba(30,30,30,0.55);border-radius:10px;
+  background:rgba(255,255,255,0.6);border-radius:10px;
   padding:4px 0;min-width:120px;
-  box-shadow:0 8px 32px rgba(0,0,0,0.32),inset 0 0 0 0.5px rgba(255,255,255,0.15);
+  box-shadow:0 8px 32px rgba(0,0,0,0.12),inset 0 0 0 0.5px rgba(255,255,255,0.5);
   backdrop-filter:blur(40px) saturate(180%);-webkit-backdrop-filter:blur(40px) saturate(180%);
   z-index:100;
 }
 .quality-popup-item{
-  padding:7px 14px;font-size:12px;color:rgba(255,255,255,0.65);
+  padding:7px 14px;font-size:12px;color:rgba(0,0,0,0.5);
   cursor:pointer;transition:all 0.15s ease;
   white-space:nowrap;
 }
-.quality-popup-item:hover{background:rgba(255,255,255,0.12);color:rgba(255,255,255,0.9)}
-.quality-popup-item.active{color:#fff;font-weight:500}
+.quality-popup-item:hover{background:rgba(0,0,0,0.06);color:rgba(0,0,0,0.85)}
+.quality-popup-item.active{color:#000;font-weight:500}
 
 /* 播放控制 */
 .playback-controls{
