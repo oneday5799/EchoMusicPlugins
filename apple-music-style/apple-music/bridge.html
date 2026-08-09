@@ -47,7 +47,7 @@
       <div class="progress-times">
         <span class="progress-time" id="time-current">0:00</span>
         <button class="quality-btn" id="btn-quality" title="音质切换">
-          <span id="quality-text">无损</span>
+          <span id="quality-text"></span>
         </button>
         <span class="progress-time right" id="time-duration">0:00</span>
       </div>
@@ -764,8 +764,11 @@ var qualityMap = {
 var qualityPopup = null;
 
 function updateQualityText(quality) {
-  var label = qualityMap[quality] || quality || 'SQ';
+  var label = qualityMap[quality] || quality || '';
   qualityText.textContent = label;
+  if (label) {
+    btnQuality.classList.add('has-quality');
+  }
 }
 
 function showQualityPopup() {
