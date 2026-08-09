@@ -46,6 +46,9 @@
       </div>
       <div class="progress-times">
         <span class="progress-time" id="time-current">0:00</span>
+        <button class="quality-btn" id="btn-quality" title="音质切换">
+          <span id="quality-text">无损</span>
+        </button>
         <span class="progress-time right" id="time-duration">0:00</span>
       </div>
     </div>
@@ -141,6 +144,9 @@ var S = {
   isFavorited: false,
   lyricsMode: 'none',
   reducedMotion: false,
+  audioQuality: '',
+  availableQualities: ['128'],
+  hasCloudAudioSource: false,
 };
 
 // 本地时间外推
@@ -178,6 +184,8 @@ var progressTrack = $('progress-track');
 var progressFill = $('progress-fill');
 var timeCurrent = $('time-current');
 var timeDuration = $('time-duration');
+var btnQuality = $('btn-quality');
+var qualityText = $('quality-text');
 var lyricsContainer = $('lyrics-container');
 var closeBtn = $('close-overlay-btn');
 var winControls = $('win-controls');
@@ -577,6 +585,9 @@ function applySnapshot(snapshot){
   if (savedAppearance) cachedSnapshot.appearance = savedAppearance;
   var track = snapshot.track || {};
   S.playMode = snapshot.playMode || 'list';
+  S.audioQuality = snapshot.audioQuality || '';
+  S.availableQualities = snapshot.availableQualities || ['128'];
+  S.hasCloudAudioSource = Boolean(snapshot.hasCloudAudioSource);
 
   updateTrackInfo(track);
   updateCover(track.cover || track.coverUrl);
@@ -587,6 +598,7 @@ function applySnapshot(snapshot){
   );
   updateFavState(Boolean(snapshot.isFavorited));
   updateModeIcon(S.playMode);
+  updateQualityText(S.audioQuality);
 }
 
 // ===== 消息处理 =====
@@ -738,6 +750,63 @@ btnShuffle.addEventListener('click', function(){
 });
 closeBtn.addEventListener('click', function(){
   postToParent('echo-amll:command', { command: 'close' });
+});
+
+// ===== 音质切换 =====
+var qualityMap = {
+  '128': 'SD',
+  '320': 'HQ',
+  'flac': 'SQ',
+  'high': 'HR',
+  'super': 'DSD',
+  'cloud': 'CLD',
+};
+var qualityPopup = null;
+
+function updateQualityText(quality) {
+  var label = qualityMap[quality] || quality || 'SQ';
+  qualityText.textContent = label;
+}
+
+function showQualityPopup() {
+  if (qualityPopup) { qualityPopup.remove(); qualityPopup = null; return; }
+  qualityPopup = document.createElement('div');
+  qualityPopup.className = 'quality-popup';
+  var availableQualities = S.availableQualities || ['128'];
+  if (S.hasCloudAudioSource) {
+    var cloudItem = document.createElement('div');
+    cloudItem.className = 'quality-popup-item' + (S.audioQuality === 'cloud' ? ' active' : '');
+    cloudItem.textContent = 'CLD 云盘';
+    cloudItem.addEventListener('click', function() {
+      postToParent('echo-amll:command', { command: 'set-audio-quality', quality: 'cloud' });
+      updateQualityText('cloud');
+      S.audioQuality = 'cloud';
+      if (qualityPopup) { qualityPopup.remove(); qualityPopup = null; }
+    });
+    qualityPopup.appendChild(cloudItem);
+  }
+  availableQualities.forEach(function(q) {
+    var item = document.createElement('div');
+    item.className = 'quality-popup-item' + (q === S.audioQuality ? ' active' : '');
+    item.textContent = qualityMap[q] + ' ' + ({'128':'标准','320':'高品质','flac':'无损','high':'高解析','super':'珍品'}[q] || '');
+    item.addEventListener('click', function() {
+      postToParent('echo-amll:command', { command: 'set-audio-quality', quality: q });
+      updateQualityText(q);
+      S.audioQuality = q;
+      if (qualityPopup) { qualityPopup.remove(); qualityPopup = null; }
+    });
+    qualityPopup.appendChild(item);
+  });
+  btnQuality.appendChild(qualityPopup);
+}
+
+btnQuality.addEventListener('click', function(e) {
+  e.stopPropagation();
+  showQualityPopup();
+});
+
+document.addEventListener('click', function() {
+  if (qualityPopup) { qualityPopup.remove(); qualityPopup = null; }
 });
 
 // ===== 按钮按压动画 =====

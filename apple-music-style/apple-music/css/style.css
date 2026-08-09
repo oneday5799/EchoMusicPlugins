@@ -132,13 +132,42 @@ img{-webkit-user-drag:none;user-select:none}
   display:none;
 }
 .progress-times{
-  display:flex;justify-content:space-between;
+  display:flex;justify-content:space-between;align-items:center;
 }
 .progress-time{
   font-size:12px;font-weight:500;color:rgba(255,255,255,0.5);
   min-width:36px;font-variant-numeric:tabular-nums;
 }
 .progress-time.right{text-align:right}
+
+/* 音质按钮 */
+.quality-btn{
+  display:inline-flex;align-items:center;justify-content:center;
+  padding:2px 8px;border-radius:4px;
+  background:rgba(255,255,255,0.15);
+  color:rgba(255,255,255,0.8);
+  font-size:11px;font-weight:600;
+  cursor:pointer;transition:background 0.18s;
+  position:relative;
+}
+.quality-btn:hover{background:rgba(255,255,255,0.25)}
+
+/* 音质弹窗 */
+.quality-popup{
+  position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);
+  background:rgba(30,30,30,0.55);border-radius:10px;
+  padding:4px 0;min-width:120px;
+  box-shadow:0 8px 32px rgba(0,0,0,0.32),inset 0 0 0 0.5px rgba(255,255,255,0.15);
+  backdrop-filter:blur(40px) saturate(180%);-webkit-backdrop-filter:blur(40px) saturate(180%);
+  z-index:100;
+}
+.quality-popup-item{
+  padding:7px 14px;font-size:12px;color:rgba(255,255,255,0.65);
+  cursor:pointer;transition:all 0.15s ease;
+  white-space:nowrap;
+}
+.quality-popup-item:hover{background:rgba(255,255,255,0.12);color:rgba(255,255,255,0.9)}
+.quality-popup-item.active{color:#fff;font-weight:500}
 
 /* 播放控制 */
 .playback-controls{

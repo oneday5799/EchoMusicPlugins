@@ -88,7 +88,12 @@ function normalizeSong(song) {
     coverUrl: trackCover(song),
     album: text(song.album || song.albumName),
     albumId: trackAlbumId(song),
-    duration: Number(song.duration || 0)
+    duration: Number(song.duration || 0),
+    source: String(song.source || ""),
+    relateGoods: (Array.isArray(song.relateGoods) ? song.relateGoods : []).map((g) => ({
+      quality: String(g?.quality || ""),
+      level: Number(g?.level || 0)
+    }))
   };
 }
 function lyricSecondary(ctx, line) {
@@ -110,6 +115,28 @@ function lyricCharacters(line) {
       endTime: Number.isFinite(endTime) ? endTime : 0
     };
   }).filter((character) => character.text);
+}
+function getAvailableQualities(song) {
+  if (!song) return ["128"];
+  const qualities = ["128"];
+  const goods = song.relateGoods || [];
+  const hasQuality = (q) => {
+    if (q === "128") return true;
+    return goods.some((item) => {
+      const itemQuality = String(item.quality || "").trim().toLowerCase();
+      const itemLevel = item.level;
+      if (q === "320") return itemQuality === "320" || itemQuality === "hq" || itemLevel === 4;
+      if (q === "flac") return itemQuality === "flac" || itemQuality === "sq" || itemLevel === 5;
+      if (q === "high") return itemQuality === "high" || itemQuality === "hires" || itemQuality === "hi-res" || itemLevel === 6;
+      if (q === "super") return itemQuality === "super" || itemQuality === "dsd" || itemLevel === 7;
+      return false;
+    });
+  };
+  if (hasQuality("320")) qualities.push("320");
+  if (hasQuality("flac")) qualities.push("flac");
+  if (hasQuality("high")) qualities.push("high");
+  if (hasQuality("super")) qualities.push("super");
+  return qualities;
 }
 function normalizeLyricLine(ctx, line, index, lines) {
   const startMs = Math.max(0, Math.round(Number(line?.time || 0) * 1e3));
@@ -197,7 +224,8 @@ function createPlayerFrame(ctx, closeOverlay) {
       };
       const buildSnapshot = () => {
         const player = ctx.stores.player;
-        const current = normalizeSong(ctx.player.currentTrack.value || player.currentTrackSnapshot);
+        const rawTrack = ctx.player.currentTrack.value || player.currentTrackSnapshot;
+        const current = normalizeSong(rawTrack);
         const playlistStore = ctx.stores.playlist;
         const favorites = playlistStore?.favorites || [];
         const isFavorited = favorites.some((s) => String(s.id) === String(current?.id || ""));
@@ -209,7 +237,10 @@ function createPlayerFrame(ctx, closeOverlay) {
           duration: Number(player.duration || current?.duration || 0),
           volume: Number(player.volume ?? 0.8),
           playMode: String(player.playMode || "list"),
-          isFavorited
+          isFavorited,
+          audioQuality: player.currentResolvedSourceKind === "cloud" ? "cloud" : String(player.audioQuality || player.currentAudioQualityOverride || current?.quality || ""),
+          availableQualities: getAvailableQualities(rawTrack),
+          hasCloudAudioSource: Boolean(rawTrack?.cloudAudioSource?.hash)
         };
       };
       const buildAppearancePayload = () => {
@@ -324,6 +355,16 @@ function createPlayerFrame(ctx, closeOverlay) {
           }
         );
       };
+      let stopQualityWatch = null;
+      const initQualityWatch = () => {
+        stopQualityWatch = ctx.vue.watch(
+          () => String(ctx.stores.player.audioQuality || ctx.stores.player.currentAudioQualityOverride || "") + "::" + String(ctx.stores.player.currentResolvedSourceKind || ""),
+          () => {
+            if (!ready || disposed) return;
+            pushSnapshot();
+          }
+        );
+      };
       const initAppearanceWatch = () => {
         const settings = ctx.stores.settings || ctx.settings;
         stopAppearanceWatch = ctx.vue.watch(
@@ -392,6 +433,24 @@ function createPlayerFrame(ctx, closeOverlay) {
           } catch (e) {
             console.warn("[AppleMusicBridge] toggle-favorite failed", e);
           }
+        } else if (data.command === "set-audio-quality") {
+          try {
+            const quality = String(data.quality || "");
+            const player = ctx.stores.player;
+            if (quality === "cloud") {
+              if (typeof player.preferCurrentTrackCloudSource === "function") {
+                player.preferCurrentTrackCloudSource();
+              }
+            } else {
+              if (player.currentResolvedSourceKind === "cloud" && typeof player.preferCurrentTrackCatalogQuality === "function") {
+                player.preferCurrentTrackCatalogQuality(quality);
+              } else if (typeof ctx.player.setAudioQuality === "function") {
+                ctx.player.setAudioQuality(quality);
+              }
+            }
+          } catch (e) {
+            console.warn("[AppleMusicBridge] set-audio-quality failed", e);
+          }
         }
       };
       const pushCommandResultState = () => {
@@ -454,6 +513,7 @@ function createPlayerFrame(ctx, closeOverlay) {
         initLyricStoreSubscription();
         initTrackWatch();
         initVolumeWatch();
+        initQualityWatch();
         initAppearanceWatch();
         startPositionHeartbeat();
       });
@@ -470,6 +530,8 @@ function createPlayerFrame(ctx, closeOverlay) {
         stopTrackWatch = null;
         if (stopVolumeWatch) stopVolumeWatch();
         stopVolumeWatch = null;
+        if (stopQualityWatch) stopQualityWatch();
+        stopQualityWatch = null;
         if (stopAppearanceWatch) stopAppearanceWatch();
         stopAppearanceWatch = null;
       });
