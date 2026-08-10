@@ -1,7 +1,7 @@
 {
   "id": "plugin-panel",
   "name": "插件面板",
-  "version": "1.1.1",
+  "version": "1.0.1",
   "description": "在侧边栏和主应用顶部导航栏添加插件面板快捷入口，一键跳转。",
   "author": "yaoyaoprincess、Oneday5799",
   "icon": "icon.svg",
