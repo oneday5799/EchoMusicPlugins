@@ -540,12 +540,6 @@ const normalizeSettings = (value) => {
   return settings;
 };
 
-/** 获取当前激活的库配置 */
-const getActiveLibrary = (settings) => {
-  if (!settings || !settings.libraries || settings.libraries.length === 0) return null;
-  return settings.libraries.find((lib) => lib.id === settings.activeLibraryId) || settings.libraries[0];
-};
-
 /** 生成唯一的库 ID */
 const generateLibraryId = () => "lib_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
@@ -1282,6 +1276,18 @@ const createBrowserPage = (ctx, state) => {
         ctx.toast.info("当前歌曲不在本目录中");
       };
 
+      // ---- 排序比较器（目录视图和平铺视图共用） ----
+      const compareSongs = (a, b) => {
+        let cmp = 0;
+        if (_sortField === 'name') cmp = a.name.localeCompare(b.name);
+        else if (_sortField === 'title') {
+          const { title: ta } = parseTitleArtist(a.name);
+          const { title: tb } = parseTitleArtist(b.name);
+          cmp = (ta || a.name).localeCompare(tb || b.name);
+        } else if (_sortField === 'size') cmp = (a.contentLength || 0) - (b.contentLength || 0);
+        return _sortOrder === 'desc' ? -cmp : cmp;
+      };
+
       // ---- 搜索过滤 ----
       const filteredEntries = computed(() => {
         const q = searchQuery.value.trim().toLowerCase();
@@ -1298,16 +1304,7 @@ const createBrowserPage = (ctx, state) => {
         const dirs = entries.value.filter((e) => e.isCollection);
         const files = entries.value.filter((e) => !e.isCollection);
         if (!_sortField || !_sortOrder) return [...dirs, ...files];
-        const sortedFiles = [...files].sort((a, b) => {
-          let cmp = 0;
-          if (_sortField === 'name') cmp = a.name.localeCompare(b.name);
-          else if (_sortField === 'title') {
-            const { title: ta } = parseTitleArtist(a.name);
-            const { title: tb } = parseTitleArtist(b.name);
-            cmp = (ta || a.name).localeCompare(tb || b.name);
-          } else if (_sortField === 'size') cmp = (a.contentLength || 0) - (b.contentLength || 0);
-          return _sortOrder === 'desc' ? -cmp : cmp;
-        });
+        const sortedFiles = [...files].sort(compareSongs);
         return [...dirs, ...sortedFiles];
       });
 
@@ -1318,16 +1315,7 @@ const createBrowserPage = (ctx, state) => {
         if (!_sortField || !_sortOrder) {
           return [...songs].sort((a, b) => a.name.localeCompare(b.name));
         }
-        return [...songs].sort((a, b) => {
-          let cmp = 0;
-          if (_sortField === 'name') cmp = a.name.localeCompare(b.name);
-          else if (_sortField === 'title') {
-            const { title: ta } = parseTitleArtist(a.name);
-            const { title: tb } = parseTitleArtist(b.name);
-            cmp = (ta || a.name).localeCompare(tb || b.name);
-          } else if (_sortField === 'size') cmp = (a.contentLength || 0) - (b.contentLength || 0);
-          return _sortOrder === 'desc' ? -cmp : cmp;
-        });
+        return [...songs].sort(compareSongs);
       });
 
       const flatFilteredEntries = computed(() => {
@@ -1344,20 +1332,6 @@ const createBrowserPage = (ctx, state) => {
         const lib = currentLibrary.value;
         if (lib?.flatView) return flatFilteredEntries.value;
         return filteredEntries.value;
-      });
-
-      const songCount = computed(() => {
-        const lib = currentLibrary.value;
-        if (lib?.flatView) return flatSongs.value.length;
-        return entries.value.filter((e) => !e.isCollection).length;
-      });
-
-      const displayCount = computed(() => {
-        const q = searchQuery.value.trim();
-        if (!q) return songCount.value;
-        const lib = currentLibrary.value;
-        if (lib?.flatView) return flatFilteredEntries.value.length;
-        return filteredEntries.value.filter((e) => !e.isCollection).length;
       });
 
       // 右键菜单
@@ -1613,7 +1587,7 @@ const createBrowserPage = (ctx, state) => {
       const refreshFlatView = async () => {
         const lib = currentLibrary.value;
         if (!lib) return;
-        try { await ctx.storage.set(`flatView:${lib.id}`, null); } catch {}
+        try { await ctx.storage.delete(`flatView:${lib.id}`); } catch {}
         await loadFlatView(true);
       };
 
