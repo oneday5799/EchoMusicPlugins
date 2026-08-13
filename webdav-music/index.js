@@ -27,6 +27,7 @@ const createDefaultLibrary = (id) => ({
   username: "",
   password: "",
   rootPath: "/",
+  flatView: false,
 });
 
 const DEFAULT_SETTINGS = {
@@ -741,6 +742,65 @@ const createSongObject = (entryName, filePath, opts = {}) => {
   };
 };
 
+/* ---- Flat View Cache ---- */
+const FLAT_CACHE_TTL = 24 * 60 * 60 * 1000;
+
+/** 递归收集库中所有音频文件 */
+const collectAllSongs = async (ctx, lib, signal, onProgress) => {
+  const allSongs = [];
+  const visited = new Set();
+  const walk = async (dirPath) => {
+    if (signal?.aborted) return;
+    if (visited.has(dirPath)) return;
+    visited.add(dirPath);
+    let results;
+    try {
+      results = await propfind(ctx, lib, dirPath);
+    } catch (err) {
+      console.warn("[webdav-music] collectAllSongs skip:", dirPath, err.message);
+      return;
+    }
+    if (signal?.aborted) return;
+    const dirs = results.filter((e) => e.isCollection && e.name);
+    const files = results.filter((e) => !e.isCollection && isAudioFile(e.name));
+    for (const f of files) {
+      allSongs.push({
+        ...createSongObject(f.name, dirPath + f.name, {
+          album: dirPath.split("/").filter(Boolean).pop() || "WebDAV",
+          libraryId: lib.id,
+        }),
+        contentLength: f.contentLength || 0,
+      });
+    }
+    if (onProgress) onProgress(visited.size, allSongs.length);
+    for (const d of dirs) {
+      if (signal?.aborted) return;
+      await walk(normalizeDir(dirPath) + d.name + "/");
+    }
+  };
+  await walk(normalizeDir(lib.rootPath || "/"));
+  if (signal?.aborted) throw new Error("aborted");
+  return allSongs;
+};
+
+const readFlatCache = async (ctx, lib) => {
+  try {
+    const c = await ctx.storage.get(`flatView:${lib.id}`);
+    if (!c?.songs?.length) return null;
+    if (c.serverUrl !== lib.serverUrl || c.rootPath !== normalizeDir(lib.rootPath || "/")) return null;
+    return c;
+  } catch { return null; }
+};
+
+const writeFlatCache = async (ctx, lib, songs) => {
+  await ctx.storage.set(`flatView:${lib.id}`, {
+    songs,
+    timestamp: Date.now(),
+    rootPath: normalizeDir(lib.rootPath || "/"),
+    serverUrl: lib.serverUrl,
+  });
+};
+
 /* ---- WebDAV PROPFIND ---- */
 const PROPFIND_BODY = `<?xml version="1.0" encoding="utf-8"?>
 <D:propfind xmlns:D="DAV:">
@@ -953,9 +1013,13 @@ const createSettingsPanel = (ctx, state) => {
           h(Switch, { modelValue, "onUpdate:modelValue": onUpdate }),
         ]);
 
+      const getHostname = (url) => {
+        try { return new URL(url).hostname; } catch { return url; }
+      };
+
       const renderLibraryCard = (lib) => {
         const isExpanded = expandedLibraries.value.has(lib.id);
-        const displayName = lib.name || (lib.serverUrl ? new URL(lib.serverUrl).hostname : "未命名库");
+        const displayName = lib.name || (lib.serverUrl ? getHostname(lib.serverUrl) : "未命名库");
         
         return h("div", { class: "pm-group" }, [
           // 折叠头
@@ -964,7 +1028,7 @@ const createSettingsPanel = (ctx, state) => {
               h("span", { class: ["pm-group-arrow", isExpanded ? "" : "is-collapsed"], innerHTML: "▼" }),
               h("span", null, displayName),
               lib.serverUrl
-                ? h("span", { class: "pm-group-header-count" }, new URL(lib.serverUrl).hostname)
+                ? h("span", { class: "pm-group-header-count" }, getHostname(lib.serverUrl))
                 : null,
             ]),
           ]),
@@ -1002,6 +1066,10 @@ const createSettingsPanel = (ctx, state) => {
                 inputClass: "!h-9 !rounded-lg !pl-3 !pr-3 !text-[13px]",
                 "onUpdate:modelValue": (v) => updateLibrary(lib.id, "rootPath", String(v ?? "/")),
               }), "浏览音乐文件的起始路径，默认为根目录 /"),
+              formRow("平铺展示", h(Switch, {
+                modelValue: lib.flatView,
+                "onUpdate:modelValue": (v) => updateLibrary(lib.id, "flatView", v),
+              }), "开启后把库中所有音乐集中展示，关闭后按文件夹展示"),
               h("div", { style: "display: flex; justify-content: flex-end;" }, [
                 h(Button, {
                   size: "xs",
@@ -1095,6 +1163,14 @@ const createBrowserPage = (ctx, state) => {
       const libraryPaths = ref({});
       const librarySongCounts = ref({});
 
+      // 平铺视图状态
+      const flatSongs = ref([]);
+      const flatLoading = ref(false);
+      const flatError = ref("");
+      const flatScanningLibId = ref(null);
+      let _flatAbort = null;
+      let _flatDisposer = null;
+
       // 批量选择状态（仿主应用 BatchActionDrawer）
       const showBatchDrawer = ref(false);
       const selectedKeys = ref(new Set());
@@ -1131,7 +1207,9 @@ const createBrowserPage = (ctx, state) => {
       };
 
       const toggleSelectAll = () => {
-        const songEntries = filteredEntries.value.filter((e) => !e.isCollection);
+        const lib = currentLibrary.value;
+        const list = lib?.flatView ? flatFilteredEntries.value : filteredEntries.value;
+        const songEntries = lib?.flatView ? list : list.filter((e) => !e.isCollection);
         if (selectedKeys.value.size === songEntries.length) {
           selectedKeys.value = new Set();
         } else {
@@ -1148,11 +1226,15 @@ const createBrowserPage = (ctx, state) => {
       };
 
       const selectedSongs = computed(() => {
-        return filteredEntries.value.filter((e) => !e.isCollection && selectedKeys.value.has(e.name));
+        const lib = currentLibrary.value;
+        const list = lib?.flatView ? flatFilteredEntries.value : filteredEntries.value;
+        return list.filter((e) => lib?.flatView ? selectedKeys.value.has(e.name) : !e.isCollection && selectedKeys.value.has(e.name));
       });
 
       const isAllSelected = computed(() => {
-        const songEntries = filteredEntries.value.filter((e) => !e.isCollection);
+        const lib = currentLibrary.value;
+        const list = lib?.flatView ? flatFilteredEntries.value : filteredEntries.value;
+        const songEntries = lib?.flatView ? list : list.filter((e) => !e.isCollection);
         return songEntries.length > 0 && selectedKeys.value.size === songEntries.length;
       });
 
@@ -1160,7 +1242,10 @@ const createBrowserPage = (ctx, state) => {
 
       const batchPlaySelected = async () => {
         if (selectedSongs.value.length === 0) return;
-        const songs = selectedSongs.value.map((e) => createSong(e, currentPath.value)).filter(Boolean);
+        const lib = currentLibrary.value;
+        const songs = lib?.flatView
+          ? selectedSongs.value.map((e) => ({ ...e }))
+          : selectedSongs.value.map((e) => createSong(e, currentPath.value)).filter(Boolean);
         enrichSong(songs[0]).catch(() => {});
         try {
           await ctx.player.replaceQueueAndPlay(songs);
@@ -1171,7 +1256,10 @@ const createBrowserPage = (ctx, state) => {
 
       const batchAddToQueue = async () => {
         if (selectedSongs.value.length === 0) return;
-        const songs = selectedSongs.value.map((e) => createSong(e, currentPath.value)).filter(Boolean);
+        const lib = currentLibrary.value;
+        const songs = lib?.flatView
+          ? selectedSongs.value.map((e) => ({ ...e }))
+          : selectedSongs.value.map((e) => createSong(e, currentPath.value)).filter(Boolean);
         ctx.playlist.append(songs);
         ctx.toast.success(`已添加 ${songs.length} 首到队列`);
         closeBatchDrawer();
@@ -1224,6 +1312,55 @@ const createBrowserPage = (ctx, state) => {
         return [...dirs, ...sortedFiles];
       });
 
+      // ---- 平铺视图排序/过滤 ----
+      const flatSortedEntries = computed(() => {
+        void sortTick.value;
+        const songs = flatSongs.value;
+        if (!_sortField || !_sortOrder) {
+          return [...songs].sort((a, b) => a.name.localeCompare(b.name));
+        }
+        return [...songs].sort((a, b) => {
+          let cmp = 0;
+          if (_sortField === 'name') cmp = a.name.localeCompare(b.name);
+          else if (_sortField === 'title') {
+            const { title: ta } = parseTitleArtist(a.name);
+            const { title: tb } = parseTitleArtist(b.name);
+            cmp = (ta || a.name).localeCompare(tb || b.name);
+          } else if (_sortField === 'size') cmp = (a.contentLength || 0) - (b.contentLength || 0);
+          return _sortOrder === 'desc' ? -cmp : cmp;
+        });
+      });
+
+      const flatFilteredEntries = computed(() => {
+        const q = searchQuery.value.trim().toLowerCase();
+        if (!q) return flatSortedEntries.value;
+        return flatSortedEntries.value.filter((song) => {
+          const { title, artist } = parseTitleArtist(song.name);
+          return (title || song.name).toLowerCase().includes(q) || (artist || "").toLowerCase().includes(q);
+        });
+      });
+
+      // ---- 当前显示列表（统一平铺/目录模式） ----
+      const currentDisplayList = computed(() => {
+        const lib = currentLibrary.value;
+        if (lib?.flatView) return flatFilteredEntries.value;
+        return filteredEntries.value;
+      });
+
+      const songCount = computed(() => {
+        const lib = currentLibrary.value;
+        if (lib?.flatView) return flatSongs.value.length;
+        return entries.value.filter((e) => !e.isCollection).length;
+      });
+
+      const displayCount = computed(() => {
+        const q = searchQuery.value.trim();
+        if (!q) return songCount.value;
+        const lib = currentLibrary.value;
+        if (lib?.flatView) return flatFilteredEntries.value.length;
+        return filteredEntries.value.filter((e) => !e.isCollection).length;
+      });
+
       // 右键菜单
       const contextMenu = ref(null);
       const contextMenuRef = ref(null);
@@ -1260,7 +1397,19 @@ const createBrowserPage = (ctx, state) => {
         if (!ctxMenu) return;
         contextMenu.value = null;
         if (ctxMenu.isDir) await playFolder(normalizeDir(currentPath.value) + ctxMenu.entry.name + "/");
-        else await playSong(ctxMenu.entry);
+        else {
+          const lib = currentLibrary.value;
+          if (lib?.flatView) {
+            // 平铺模式：直接使用 flatFilteredEntries 中的对象
+            const song = flatFilteredEntries.value.find(s => s.name === ctxMenu.entry.name);
+            if (song) {
+              enrichSong(song).catch(() => {});
+              await ctx.player.replaceQueueAndPlay([song]);
+            }
+          } else {
+            await playSong(ctxMenu.entry);
+          }
+        }
       };
 
       const handleCtxPlayNext = async () => {
@@ -1283,7 +1432,13 @@ const createBrowserPage = (ctx, state) => {
             ctx.toast.success(`已添加 ${songs.length} 首到队列`);
           } catch (err) { ctx.toast.danger("读取文件夹失败"); }
         } else {
-          const song = createSong(ctxMenu.entry, currentPath.value);
+          const lib = currentLibrary.value;
+          let song;
+          if (lib?.flatView) {
+            song = flatFilteredEntries.value.find(s => s.name === ctxMenu.entry.name);
+          } else {
+            song = createSong(ctxMenu.entry, currentPath.value);
+          }
           if (!song) return;
           if (String(song.id) === String(ctx.player.currentTrackId ?? '')) { ctx.toast.info("当前正在播放此歌曲"); return; }
           ctx.playlist.playNext(song);
@@ -1295,7 +1450,13 @@ const createBrowserPage = (ctx, state) => {
         const ctxMenu = contextMenu.value;
         if (!ctxMenu || ctxMenu.isDir) return;
         contextMenu.value = null;
-        const song = createSong(ctxMenu.entry, currentPath.value);
+        const lib = currentLibrary.value;
+        let song;
+        if (lib?.flatView) {
+          song = flatFilteredEntries.value.find(s => s.name === ctxMenu.entry.name);
+        } else {
+          song = createSong(ctxMenu.entry, currentPath.value);
+        }
         if (!song) return;
         const hash = String(song.id);
         try {
@@ -1357,7 +1518,110 @@ const createBrowserPage = (ctx, state) => {
         navigateTo(parent.startsWith(rootPath) ? parent : rootPath);
       };
 
-      const refresh = () => loadDirectory(currentPath.value);
+      // ---- 平铺视图加载 ----
+      const loadFlatView = async () => {
+        const lib = currentLibrary.value;
+        if (!lib || !lib.flatView) return;
+
+        // 1. 尝试读缓存
+        const cached = await readFlatCache(ctx, lib);
+        if (cached && Date.now() - cached.timestamp < FLAT_CACHE_TTL) {
+          flatSongs.value = cached.songs;
+          flatLoading.value = false;
+          return;
+        }
+
+        // 2. 已有该库的扫描在进行中，不重复启动
+        if (flatScanningLibId.value === lib.id) return;
+
+        // 3. 停止旧扫描
+        if (_flatAbort) {
+          _flatAbort.abort();
+          _flatAbort = null;
+          _flatDisposer = null;
+        }
+
+        // 4. 启动新扫描
+        flatLoading.value = true;
+        flatError.value = "";
+        flatScanningLibId.value = lib.id;
+        _flatAbort = new AbortController();
+        const taskId = `webdav-music:flatScan:${lib.id}`;
+
+        _flatDisposer = ctx.tasks.register({
+          id: taskId,
+          name: `扫描「${lib.name || "未命名库"}」`,
+          status: "running",
+          progress: { done: 0, label: "准备中..." },
+          actions: [{
+            id: "cancel", label: "中止", variant: "ghost",
+            onClick: () => _flatAbort?.abort(),
+          }],
+        });
+
+        try {
+          const songs = await collectAllSongs(ctx, lib, _flatAbort.signal, (dirs, count) => {
+            if (flatScanningLibId.value === lib.id) {
+              ctx.tasks.update(taskId, {
+                progress: { done: dirs, label: `已发现 ${count} 首歌曲` },
+              });
+            }
+          });
+
+          if (flatScanningLibId.value === lib.id) {
+            flatSongs.value = songs;
+            flatLoading.value = false;
+          }
+          await writeFlatCache(ctx, lib, songs);
+
+          ctx.tasks.update(taskId, {
+            status: "completed",
+            progress: { label: `完成，共 ${songs.length} 首歌曲` },
+            actions: [
+              { id: "dismiss", label: "关闭", variant: "ghost", onClick: () => ctx.tasks.dismiss(taskId) },
+            ],
+          });
+          setTimeout(() => { try { ctx.tasks.dismiss(taskId); } catch {} }, 3000);
+        } catch (err) {
+          // 区分中止和真正的错误
+          if (_flatAbort?.signal?.aborted || err.message === "aborted") {
+            ctx.tasks.update(taskId, {
+              status: "aborted",
+              progress: { label: "已中止" },
+              actions: [
+                { id: "dismiss", label: "关闭", variant: "ghost", onClick: () => ctx.tasks.dismiss(taskId) },
+              ],
+            });
+          } else {
+            flatError.value = "扫描失败: " + err.message;
+            ctx.tasks.update(taskId, {
+              status: "error",
+              error: err.message,
+              actions: [
+                { id: "retry", label: "重试", variant: "ghost", onClick: () => { _flatDisposer?.(); loadFlatView(); } },
+                { id: "dismiss", label: "关闭", variant: "ghost", onClick: () => ctx.tasks.dismiss(taskId) },
+              ],
+            });
+          }
+        } finally {
+          flatScanningLibId.value = null;
+          flatLoading.value = false;
+          _flatAbort = null;
+        }
+      };
+
+      const refreshFlatView = async () => {
+        const lib = currentLibrary.value;
+        if (!lib) return;
+        await ctx.storage.delete(`flatView:${lib.id}`);
+        await loadFlatView();
+      };
+
+      const refresh = () => {
+        const lib = currentLibrary.value;
+        if (lib?.flatView) refreshFlatView();
+        else loadDirectory(currentPath.value);
+      };
 
       const switchLibrary = (libId) => {
         activeLibraryId.value = libId;
@@ -1367,7 +1631,8 @@ const createBrowserPage = (ctx, state) => {
           const savedPath = libraryPaths.value[libId];
           const rootPath = normalizeDir(lib.rootPath || "/");
           currentPath.value = savedPath || rootPath;
-          loadDirectory(currentPath.value);
+          if (lib.flatView) loadFlatView();
+          else loadDirectory(currentPath.value);
         }
       };
 
@@ -1383,7 +1648,13 @@ const createBrowserPage = (ctx, state) => {
       const getSongs = () => sortedEntries.value.filter((e) => !e.isCollection).map((e) => createSong(e, currentPath.value)).filter(Boolean);
 
       const playSong = async (entry) => {
-        let song = createSong(entry, currentPath.value);
+        const lib = currentLibrary.value;
+        let song;
+        if (lib?.flatView) {
+          song = flatFilteredEntries.value.find(s => s.name === entry.name);
+        } else {
+          song = createSong(entry, currentPath.value);
+        }
         if (!song) return;
         enrichSong(song).catch(() => {});
         try {
@@ -1392,13 +1663,21 @@ const createBrowserPage = (ctx, state) => {
       };
 
       const handleDoubleTapPlay = async (entry) => {
-        let song = createSong(entry, currentPath.value);
-        if (!song) return;
+        const lib = currentLibrary.value;
+        let song;
+        if (lib?.flatView) {
+          song = flatFilteredEntries.value.find(s => s.name === entry.name);
+          if (!song) return;
+        } else {
+          song = createSong(entry, currentPath.value);
+          if (!song) return;
+        }
         enrichSong(song).catch(() => {});
         const replace = ctx.stores.settings?.replacePlaylist;
         try {
           if (replace) {
-            await ctx.player.replaceQueueAndPlay(getSongs(), { requestedSong: song });
+            const allSongs = lib?.flatView ? flatFilteredEntries.value.map(s => ({ ...s })) : getSongs();
+            await ctx.player.replaceQueueAndPlay(allSongs, { requestedSong: song });
           } else {
             const activeQueue = ctx.playlist.activeQueue;
             let queueSongs = activeQueue?.songs?.length > 0 ? [...activeQueue.songs] : [];
@@ -1409,7 +1688,10 @@ const createBrowserPage = (ctx, state) => {
       };
 
       const playAll = async () => {
-        const songs = getSongs();
+        const lib = currentLibrary.value;
+        const songs = lib?.flatView
+          ? flatFilteredEntries.value.map(s => ({ ...s }))
+          : getSongs();
         if (songs.length === 0) return;
         enrichSong(songs[0]).catch(() => {});
         try {
@@ -1440,7 +1722,8 @@ const createBrowserPage = (ctx, state) => {
           activeLibraryId.value = currentLibrary.value.id;
           const rootPath = normalizeDir(currentLibrary.value.rootPath || "/");
           currentPath.value = libraryPaths.value[currentLibrary.value.id] || rootPath;
-          loadDirectory(currentPath.value);
+          if (currentLibrary.value.flatView) loadFlatView();
+          else loadDirectory(currentPath.value);
         }
       });
 
@@ -1449,7 +1732,8 @@ const createBrowserPage = (ctx, state) => {
       // 预计算歌曲序号，避免 O(n²) 的逐行 filter
       const songIndexMap = computed(() => {
         let n = 0;
-        return filteredEntries.value.map((e) => e.isCollection ? null : ++n);
+        const list = currentLibrary.value?.flatView ? flatFilteredEntries.value : filteredEntries.value;
+        return list.map((e) => (currentLibrary.value?.flatView ? true : e.isCollection) ? null : ++n);
       });
 
       return () => {
@@ -1462,8 +1746,10 @@ const createBrowserPage = (ctx, state) => {
           ]);
         }
 
-        const songCount = entries.value.filter((e) => !e.isCollection).length;
-        const displayCount = searchQuery.value.trim() ? filteredEntries.value.filter((e) => !e.isCollection).length : songCount;
+        const songCount = currentLibrary.value?.flatView ? flatSongs.value.length : entries.value.filter((e) => !e.isCollection).length;
+        const displayCount = searchQuery.value.trim()
+          ? (currentLibrary.value?.flatView ? flatFilteredEntries.value.length : filteredEntries.value.filter((e) => !e.isCollection).length)
+          : songCount;
 
         return h("div", { class: "webdav-page" }, [
           h(PageScrollContainer, { class: "flex-1 min-h-0" }, {
@@ -1599,24 +1885,30 @@ const createBrowserPage = (ctx, state) => {
           ]),
           // === 歌曲列表内容 ===
           h("div", { ref: listContainerRef, class: "webdav-list" },
-              loading.value
-                ? h("div", { class: "webdav-loading" }, "加载中...")
-                : error.value
-                  ? h("div", { class: "webdav-error" }, error.value)
-                  : entries.value.length === 0
+              loading.value || (currentLibrary.value?.flatView && flatLoading.value)
+                ? h("div", { class: "webdav-loading" },
+                    currentLibrary.value?.flatView && flatLoading.value
+                      ? "加载中，可在任务中心查看进度"
+                      : "加载中...")
+                : error.value || flatError.value
+                  ? h("div", { class: "webdav-error" }, error.value || flatError.value)
+                  : currentDisplayList.value.length === 0
                     ? h("div", { class: "webdav-empty" }, [
                         h("p", { class: "webdav-empty-title" }, "此目录为空"),
                         h("p", { class: "webdav-empty-desc" }, "没有找到音乐文件"),
                       ])
-                    : filteredEntries.value.map((entry, idx) => {
-                          const isDir = entry.isCollection;
+                    : currentDisplayList.value.map((entry, idx) => {
+                          const isDir = currentLibrary.value?.flatView ? false : entry.isCollection;
                           const fileIdx = isDir ? null : songIndexMap.value[idx];
-                        const filePath = normalizeDir(currentPath.value) + entry.name;
-                        const songId = generateSongId(filePath);
+                        const filePath = currentLibrary.value?.flatView ? entry._filePath : normalizeDir(currentPath.value) + entry.name;
+                        const songId = currentLibrary.value?.flatView ? entry.id : generateSongId(filePath);
                         const isActive = !isDir && String(ctx.stores.player.currentTrackId) === String(songId);
                         const isPlaying = isActive && ctx.stores.player.isPlaying;
                         const isSelected = !isDir && selectedKeys.value.has(entry.name);
-                        const { artist, title } = isDir ? { artist: "", title: "" } : parseTitleArtist(entry.name);
+                        const { artist, title } = isDir ? { artist: "", title: "" }
+                          : currentLibrary.value?.flatView
+                            ? { artist: entry.artist === "未知歌手" ? "" : entry.artist, title: entry.title || entry.name }
+                            : parseTitleArtist(entry.name);
                         return h("div", {
                           class: ["webdav-row group", isDir ? "webdav-row-dir" : "", isActive ? "is-active" : "", isSelected ? "is-selected" : ""],
                           onDblclick: isDir ? () => navigateTo(filePath + "/") : () => showBatchDrawer.value ? toggleSong(entry) : handleDoubleTapPlay(entry),
