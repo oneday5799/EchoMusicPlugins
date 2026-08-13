@@ -743,7 +743,6 @@ const createSongObject = (entryName, filePath, opts = {}) => {
 };
 
 /* ---- Flat View Cache ---- */
-const FLAT_CACHE_TTL = 24 * 60 * 60 * 1000;
 
 /** 递归收集库中所有音频文件 */
 const collectAllSongs = async (ctx, lib, signal, onProgress) => {
@@ -1525,7 +1524,7 @@ const createBrowserPage = (ctx, state) => {
 
         // 1. 尝试读缓存
         const cached = await readFlatCache(ctx, lib);
-        if (cached && Date.now() - cached.timestamp < FLAT_CACHE_TTL) {
+        if (cached) {
           flatSongs.value = cached.songs;
           flatLoading.value = false;
           return;
@@ -1581,7 +1580,6 @@ const createBrowserPage = (ctx, state) => {
               { id: "dismiss", label: "关闭", variant: "ghost", onClick: () => ctx.tasks.dismiss(taskId) },
             ],
           });
-          setTimeout(() => { try { ctx.tasks.dismiss(taskId); } catch {} }, 3000);
         } catch (err) {
           // 区分中止和真正的错误
           if (_flatAbort?.signal?.aborted || err.message === "aborted") {
