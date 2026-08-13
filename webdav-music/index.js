@@ -1518,16 +1518,18 @@ const createBrowserPage = (ctx, state) => {
       };
 
       // ---- 平铺视图加载 ----
-      const loadFlatView = async () => {
+      const loadFlatView = async (force = false) => {
         const lib = currentLibrary.value;
         if (!lib || !lib.flatView) return;
 
-        // 1. 尝试读缓存
-        const cached = await readFlatCache(ctx, lib);
-        if (cached) {
-          flatSongs.value = cached.songs;
-          flatLoading.value = false;
-          return;
+        // 1. 尝试读缓存（force 时跳过）
+        if (!force) {
+          const cached = await readFlatCache(ctx, lib);
+          if (cached) {
+            flatSongs.value = cached.songs;
+            flatLoading.value = false;
+            return;
+          }
         }
 
         // 2. 已有该库的扫描在进行中，不重复启动
@@ -1611,8 +1613,8 @@ const createBrowserPage = (ctx, state) => {
       const refreshFlatView = async () => {
         const lib = currentLibrary.value;
         if (!lib) return;
-        await ctx.storage.delete(`flatView:${lib.id}`);
-        await loadFlatView();
+        try { await ctx.storage.set(`flatView:${lib.id}`, null); } catch {}
+        await loadFlatView(true);
       };
 
       const refresh = () => {
