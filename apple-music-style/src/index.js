@@ -113,6 +113,7 @@ function normalizeSong(song) {
     albumId: trackAlbumId(song),
     duration: Number(song.duration || 0),
     source: String(song.source || ''),
+    quality: String(song.quality || ''),
     relateGoods: (Array.isArray(song.relateGoods) ? song.relateGoods : []).map((g) => ({
       quality: String(g?.quality || ''),
       level: Number(g?.level || 0),
@@ -288,7 +289,7 @@ function createPlayerFrame(ctx, closeOverlay) {
           volume: Number(player.volume ?? 0.8),
           playMode: String(player.playMode || 'list'),
           isFavorited,
-          audioQuality: player.currentResolvedSourceKind === 'cloud' ? 'cloud' : String(player.audioQuality || player.currentAudioQualityOverride || current?.quality || ''),
+          audioQuality: player.currentResolvedSourceKind === 'cloud' ? 'cloud' : String(ctx.player.audioQuality.value?.resolved || ctx.player.audioQuality.value?.effective || ''),
           availableQualities: getAvailableQualities(rawTrack),
           hasCloudAudioSource: Boolean(rawTrack?.cloudAudioSource?.hash),
         }
@@ -419,7 +420,7 @@ function createPlayerFrame(ctx, closeOverlay) {
       let stopQualityWatch = null
       const initQualityWatch = () => {
         stopQualityWatch = ctx.vue.watch(
-          () => String(ctx.stores.player.audioQuality || ctx.stores.player.currentAudioQualityOverride || '') + '::' + String(ctx.stores.player.currentResolvedSourceKind || ''),
+          () => { const aq = ctx.player.audioQuality.value; return String(aq?.resolved || aq?.effective || '') + '::' + String(ctx.stores.player.currentResolvedSourceKind || ''); },
           () => {
             if (!ready || disposed) return
             pushSnapshot()
