@@ -758,7 +758,7 @@ var qualityMap = {
   '320': 'HQ',
   'flac': 'SQ',
   'high': 'HR',
-  'super': 'DSD',
+  'viper_tape': 'VPR',
   'cloud': 'CLD',
 };
 var qualityPopup = null;
@@ -791,7 +791,7 @@ function showQualityPopup() {
   availableQualities.forEach(function(q) {
     var item = document.createElement('div');
     item.className = 'quality-popup-item' + (q === S.audioQuality ? ' active' : '');
-    item.textContent = qualityMap[q] + ' ' + ({'128':'标准','320':'高品质','flac':'无损','high':'高解析','super':'珍品'}[q] || '');
+    item.textContent = qualityMap[q] + ' ' + ({'128':'标准','320':'高品质','flac':'无损','high':'Hi-Res','viper_tape':'蝰蛇母带'}[q] || '');
     item.addEventListener('click', function() {
       postToParent('echo-amll:command', { command: 'set-audio-quality', quality: q });
       updateQualityText(q);

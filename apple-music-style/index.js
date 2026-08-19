@@ -129,14 +129,14 @@ function getAvailableQualities(song) {
       if (q === "320") return itemQuality === "320" || itemQuality === "hq" || itemLevel === 4;
       if (q === "flac") return itemQuality === "flac" || itemQuality === "sq" || itemLevel === 5;
       if (q === "high") return itemQuality === "high" || itemQuality === "hires" || itemQuality === "hi-res" || itemLevel === 6;
-      if (q === "super") return itemQuality === "super" || itemQuality === "dsd" || itemLevel === 7;
+      if (q === "viper_tape") return itemQuality === "viper_tape" || itemLevel === 101;
       return false;
     });
   };
   if (hasQuality("320")) qualities.push("320");
   if (hasQuality("flac")) qualities.push("flac");
   if (hasQuality("high")) qualities.push("high");
-  if (hasQuality("super")) qualities.push("super");
+  if (hasQuality("viper_tape")) qualities.push("viper_tape");
   return qualities;
 }
 function normalizeLyricLine(ctx, line, index, lines) {
