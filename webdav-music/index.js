@@ -506,7 +506,7 @@ const detectAndSetQuality = async (ctx, state, song) => {
   if (!quality) return;
   await new Promise((resolve) => setTimeout(resolve, 0));
   ctx.stores.player.currentResolvedAudioQuality = quality;
-  ctx.stores.player.currentAudioQualityOverride = quality;
+  ctx.player.setAudioQuality(quality, { refresh: false });
 };
 
 /* ---- Helpers ---- */
@@ -690,12 +690,12 @@ const webdavFetchRaw = async (settings, path, options = {}) => {
   return fetch(url, { ...options });
 };
 /** 从 PROPFIND 结果中检测并获取文件夹封面 URL */
-const fetchFolderCover = async (lib, dirPath, results) => {
+const fetchFolderCover = async (ctx, lib, dirPath, results) => {
   const coverFiles = results.filter((e) => !e.isCollection && isCoverFile(e.name));
   if (coverFiles.length === 0) return "";
   try {
     const auth = buildAuthHeader(lib);
-    const res = await fetch(joinUrl(lib.serverUrl, dirPath + coverFiles[0].name), auth ? { headers: { Authorization: auth } } : {});
+    const res = await ctx.net.fetch(joinUrl(lib.serverUrl, dirPath + coverFiles[0].name), auth ? { headers: { Authorization: auth } } : {});
     if (res.ok) return URL.createObjectURL(await res.blob());
   } catch {}
   return "";
@@ -1398,7 +1398,7 @@ const createBrowserPage = (ctx, state) => {
             const results = await propfind(ctx, lib, folderPath);
             const files = results.filter((e) => !e.isCollection && isAudioFile(e.name)).sort((a, b) => a.name.localeCompare(b.name));
             if (files.length === 0) { ctx.toast.info("文件夹内没有音乐文件"); return; }
-            const coverUrl = await fetchFolderCover(lib, folderPath, results);
+            const coverUrl = await fetchFolderCover(ctx, lib, folderPath, results);
             const songs = files.map((entry) => createSongObject(entry.name, folderPath + entry.name, { album: folderName, coverUrl, libraryId: lib.id }));
             ctx.playlist.append(songs);
             ctx.toast.success(`已添加 ${songs.length} 首到队列`);
@@ -1466,7 +1466,7 @@ const createBrowserPage = (ctx, state) => {
           const selfName = dirPath.slice(0, -1).split("/").filter(Boolean).pop() || "";
           const dirs = results.filter((e) => e.isCollection && e.name && e.name !== selfName).sort((a, b) => a.name.localeCompare(b.name));
           const files = results.filter((e) => !e.isCollection && isAudioFile(e.name)).sort((a, b) => a.name.localeCompare(b.name));
-          coverCache.value[dirPath] = await fetchFolderCover(lib, dirPath, results);
+          coverCache.value[dirPath] = await fetchFolderCover(ctx, lib, dirPath, results);
           entries.value = [...dirs, ...files];
           librarySongCounts.value[lib.id] = files.length;
         } catch (err) { error.value = "加载目录失败: " + (err.message || "未知错误"); }
@@ -1672,7 +1672,7 @@ const createBrowserPage = (ctx, state) => {
         catch (err) { ctx.toast.danger("无法读取文件夹"); return; }
         const files = results.filter((e) => !e.isCollection && isAudioFile(e.name)).sort((a, b) => a.name.localeCompare(b.name));
         if (files.length === 0) { ctx.toast.info("文件夹内没有音乐文件"); return; }
-        const coverUrl = await fetchFolderCover(lib, normDir, results);
+        const coverUrl = await fetchFolderCover(ctx, lib, normDir, results);
         const songs = files.map((entry) => createSongObject(entry.name, normDir + entry.name, { album: folderName, coverUrl, libraryId: lib.id }));
         enrichSong(songs[0]).catch(() => {});
         try {

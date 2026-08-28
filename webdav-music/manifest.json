@@ -12,7 +12,7 @@
     "desktopLyric": false
   },
   "requires": {
-    "echoMusicVersion": ">=2.2.7-beta.13"
+    "echoMusicVersion": ">=2.3.1-beta.16"
   },
   "capabilities": {
     "audioSource": true,
