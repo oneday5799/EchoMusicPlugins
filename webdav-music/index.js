@@ -1161,8 +1161,7 @@ const createBrowserPage = (ctx, state) => {
       const flatLoading = ref(false);
       const flatError = ref("");
       const flatScanningLibId = ref(null);
-      let _flatAbort = null;
-      let _flatDisposer = null;
+      let _flatTask = null;
 
       // 批量选择状态（仿主应用 BatchActionDrawer）
       const showBatchDrawer = ref(false);
@@ -1510,34 +1509,34 @@ const createBrowserPage = (ctx, state) => {
         if (flatScanningLibId.value === lib.id) return;
 
         // 3. 停止旧扫描
-        if (_flatAbort) {
-          _flatAbort.abort();
-          _flatAbort = null;
-          _flatDisposer = null;
+        if (_flatTask) {
+          if (_flatTask.active) _flatTask.dismiss();
+          _flatTask = null;
         }
 
         // 4. 启动新扫描
         flatLoading.value = true;
         flatError.value = "";
         flatScanningLibId.value = lib.id;
-        _flatAbort = new AbortController();
         const taskId = `webdav-music:flatScan:${lib.id}`;
 
-        _flatDisposer = ctx.tasks.register({
+        const task = ctx.tasks.register({
           id: taskId,
           name: `扫描「${lib.name || "未命名库"}」`,
           status: "running",
+          retention: "transient",
           progress: { done: 0, label: "准备中..." },
           actions: [{
             id: "cancel", label: "中止", variant: "ghost",
-            onClick: () => _flatAbort?.abort(),
+            onClick: () => { if (task.cancel()) task.finish("aborted", { progress: { label: "已取消" } }); },
           }],
         });
+        _flatTask = task;
 
         try {
-          const songs = await collectAllSongs(ctx, lib, _flatAbort.signal, (dirs, count) => {
+          const songs = await collectAllSongs(ctx, lib, task.signal, (dirs, count) => {
             if (flatScanningLibId.value === lib.id) {
-              ctx.tasks.update(taskId, {
+              task.update({
                 progress: { done: dirs, label: `已发现 ${count} 首歌曲` },
               });
             }
@@ -1549,38 +1548,28 @@ const createBrowserPage = (ctx, state) => {
           }
           await writeFlatCache(ctx, lib, songs);
 
-          ctx.tasks.update(taskId, {
-            status: "completed",
+          task.finish("completed", {
             progress: { label: `完成，共 ${songs.length} 首歌曲` },
-            actions: [
-              { id: "dismiss", label: "关闭", variant: "ghost", onClick: () => ctx.tasks.dismiss(taskId) },
-            ],
           });
         } catch (err) {
           // 区分中止和真正的错误
-          if (_flatAbort?.signal?.aborted || err.message === "aborted") {
-            ctx.tasks.update(taskId, {
-              status: "aborted",
+          if (task.signal.aborted || err.message === "aborted") {
+            task.finish("aborted", {
               progress: { label: "已中止" },
-              actions: [
-                { id: "dismiss", label: "关闭", variant: "ghost", onClick: () => ctx.tasks.dismiss(taskId) },
-              ],
             });
           } else {
             flatError.value = "扫描失败: " + err.message;
-            ctx.tasks.update(taskId, {
-              status: "error",
+            task.finish("error", {
               error: err.message,
               actions: [
-                { id: "retry", label: "重试", variant: "ghost", onClick: () => { _flatDisposer?.(); loadFlatView(); } },
-                { id: "dismiss", label: "关闭", variant: "ghost", onClick: () => ctx.tasks.dismiss(taskId) },
+                { id: "retry", label: "重试", variant: "ghost", onClick: () => loadFlatView() },
               ],
             });
           }
         } finally {
           flatScanningLibId.value = null;
           flatLoading.value = false;
-          _flatAbort = null;
+          _flatTask = null;
         }
       };
 
