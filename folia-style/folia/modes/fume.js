@@ -203,6 +203,11 @@ function drawBg(time){
 }
 
 // ===== 布局: 源项目方式 =====
+// 纸张宽度 = max(视口*1.95, 视口+520), 限制920~2400
+// 水平边距 = max(视口*0.86, 280)
+// 列数由纸张宽度决定: >=1120→4, >=760→3, >=500→2, 否则1
+// body块占一列宽, hero块跨2列或全宽
+// 间距: hero = max(round(lh*0.2),6), body = max(round(lh*0.08),2)
 function buildLayout(){
   if(!lines.length)return;
   blocks=[];
@@ -292,7 +297,7 @@ function buildLayout(){
   var off=(maxH+vM-vh)/2;
   for(var i=0;i<blocks.length;i++)blocks[i].y-=off;
 
-  // 建立时间索引→块的映射
+  // 建立时间索引→块的映射 (与源项目 blockBySourceLineIndex 一致)
   blockByLineIndex={};
   for(var i=0;i<blocks.length;i++)blockByLineIndex[blocks[i].lineIndex]=blocks[i];
 }
@@ -319,6 +324,7 @@ function updateCamera(dt){
   var vw=W/dpr,vh=H/dpr;
 
   var activeIdx=-1;
+  // 用时间索引查找 (与源项目一致: 按时间顺序找当前活动块)
   for(var i=0;i<lines.length;i++){
     var lt=lines[i];
     var startMs=Math.max(0,Math.round(Number(lt.time_ms||0)));
@@ -326,6 +332,7 @@ function updateCamera(dt){
     if(currentTimeMs>=startMs&&currentTimeMs<endMs){activeIdx=i;break}
   }
   var activeBlock=activeIdx>=0?blockByLineIndex[activeIdx]:null;
+  // 兜底: 找最近的已通过块
   if(!activeBlock){
     for(var i=lines.length-1;i>=0;i--){
       var lt=lines[i];
@@ -334,7 +341,7 @@ function updateCamera(dt){
     }
   }
 
-  // 总览
+  // 总览: 时间顺序最后一个块的后半段
   var lastBlock=null;
   var lastEndTime=-1;
   for(var i=0;i<blocks.length;i++){
@@ -351,9 +358,10 @@ function updateCamera(dt){
   var activeLineIdx=activeBlock?activeBlock.lineIndex:-1;
   if(activeLineIdx!==lastActiveBlockIdx){lastActiveBlockIdx=activeLineIdx;retargetStartMs=performance.now();didRetarget=true}
   var retElapsed=Math.max(performance.now()-retargetStartMs,0);
-  var retPhase=clamp(retElapsed/200,0,1);
+  var retPhase=clamp(retElapsed/200,0,1); // 200ms重定向
   var retBoost=1-easeOutCubic(retPhase);
 
+  // 目标
   var tgtX=camFocusX,tgtY=camFocusY,tgtS=camFocusScale;
 
   if(isOverviewMode){
@@ -366,6 +374,7 @@ function updateCamera(dt){
     tgtS=clamp(Math.min(vw/(maxX-minX+200),vh/(maxY-minY+200))*0.85,CFG.overviewScale,0.72);
   }else if(activeBlock){
     var ab=activeBlock;
+    // 打印位置连续插值
     var px=ab.x;
     var lp=clamp((currentTimeMs-ab.startTime)/Math.max(ab.endTime-ab.startTime,1),0,1);
     var fi=lp*ab.charTimings.length;
@@ -381,12 +390,13 @@ function updateCamera(dt){
     }
     ctx.restore();
     tgtX=px;tgtY=ab.y+ab.height/2;
+    // 缩放: 源项目方式
     var minSide=Math.max(Math.min(vw,vh),1);
     var tgtLH=clamp(minSide*0.115,64,124);
     tgtS=clamp(tgtLH/Math.max(ab.lineHeight,1),0.88,2.2);
   }
 
-  // 入场偏置
+  // 入场偏置: 行切换时先看到块起始位置
   if(retBoost>0.01&&activeBlock){
     var eb=Math.pow(retBoost,0.58)*0.6;
     tgtX=lerp(tgtX,activeBlock.x,eb);

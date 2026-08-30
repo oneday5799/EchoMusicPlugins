@@ -1,7 +1,7 @@
 {
   "id": "folia-style",
   "name": "Folia 歌词 beta",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "基于 Folia 的歌词可视化插件",
   "author": "Oneday5799、xiaotian2333",
   "path": "",
@@ -19,6 +19,6 @@
     "audioSpectrum": true
   },
   "requires": {
-    "echoMusicVersion": ">=2.2.7"
+    "echoMusicVersion": ">=2.3.1-beta.17"
   }
 }

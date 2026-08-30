@@ -319,7 +319,7 @@ function createPlayerFrame(ctx, closeOverlay) {
           isPlaying: Boolean(player.isPlaying),
           currentTime: Number(player.currentTime || 0),
           duration: Number(player.duration || current?.duration || 0),
-          volume: Number(player.volume ?? 0.8),
+          volume: Number(player.volume ?? 100),
           playMode: String(player.playMode || 'list'),
           isFavorited,
           coverBlur,
@@ -455,7 +455,7 @@ function createPlayerFrame(ctx, closeOverlay) {
       // 监听音量变更
       const initVolumeWatch = () => {
         stopVolumeWatch = ctx.vue.watch(
-          () => Number(ctx.stores.player.volume ?? 0.8),
+          () => Number(ctx.stores.player.volume ?? 100),
           () => {
             if (!ready || disposed) return
             pushSnapshot()
@@ -573,7 +573,7 @@ function createPlayerFrame(ctx, closeOverlay) {
         else if (data.command === 'next') await ctx.player.next()
         else if (data.command === 'seek') ctx.player.seek(Math.max(0, Number(data.value) || 0))
         else if (data.command === 'volume') {
-          ctx.player.setVolume(Math.max(0, Math.min(1, Number(data.value) || 0)))
+          ctx.player.setVolume(Math.max(0, Math.min(100, Math.round(Number(data.value) || 0))))
         } else if (data.command === 'cycle-mode') cyclePlayMode()
         else if (data.command === 'play-index') await playQueueIndex(Number(data.index))
         else if (data.command === 'play-song') await playCommandSong(data.song)

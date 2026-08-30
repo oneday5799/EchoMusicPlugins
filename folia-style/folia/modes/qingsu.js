@@ -2,7 +2,6 @@
 // 参照原版 SentenceLayout 算法实现分行、tilt选择、入场动画
 (function(){
 'use strict';
-var U=window.ModeUtils;
 var REM_PX=16;
 
 // 原版 seededRandom: 接受 seed 和 offset 两个参数
@@ -270,7 +269,7 @@ function measureTextWidth(text,fontPx,fw,fs){
   if(!_canvas)_canvas=document.createElement('canvas');
   var c=_canvas.getContext('2d');
   if(!c)return text.length*fontPx*0.6;
-  c.font=(fw||400)+' '+(fs||'normal')+' '+fontPx+'px "Inter","PingFang SC","Microsoft YaHei","Noto Sans CJK SC",system-ui,sans-serif';
+  c.font=(fw||400)+' '+(fs||'normal')+' '+fontPx+'px '+(window.foliaGetLyricFontFamily?window.foliaGetLyricFontFamily():'"Inter","PingFang SC","Microsoft YaHei","Noto Sans CJK SC",system-ui,sans-serif');
   return c.measureText(text).width;
 }
 

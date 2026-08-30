@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Folia Lyrics</title>
 <meta name="referrer" content="no-referrer">
-<link rel="stylesheet" href="fonts/fonts.css">
 <link rel="stylesheet" href="css/base.css">
 <link rel="stylesheet" href="css/xinxiang.css">
 <link rel="stylesheet" href="css/liuguang.css">
@@ -276,7 +275,7 @@ var rawLyricLines=[]
 // ===== 状态 =====
 var S={
   track:null,isPlaying:false,currentTimeMs:0,durationMs:0,
-  volume:0.8,playMode:'list',queue:[],queueIndex:-1,
+  volume:100,playMode:'list',queue:[],queueIndex:-1,
   lyricLines:[],lyricIndex:-1,
   rms:0,peak:0,bass:0,mid:0,treble:0,
   isFavorited:false,
@@ -1403,7 +1402,7 @@ document.getElementById('sm-bg-rhythm').onclick=function(){
   sendCmd('toggle-cover-blur');
 };
 function updateSettingsVolume(){
-  var vol=Math.round(S.volume*100);
+  var vol=S.volume;
   document.getElementById('sm-volume-value').textContent=vol+'%';
   document.getElementById('sm-volume-fill').style.width=vol+'%';
   document.getElementById('sm-volume-thumb').style.left=vol+'%';
@@ -1485,7 +1484,7 @@ var volTrack=document.getElementById('sm-volume-track');
 var volDragging=false;
 function volSeek(e){
   var rect=volTrack.getBoundingClientRect();
-  var pct=Math.max(0,Math.min(1,(e.clientX-rect.left)/rect.width));
+  var pct=Math.max(0,Math.min(100,Math.round((e.clientX-rect.left)/rect.width*100)));
   S.volume=pct;
   updateSettingsVolume();
   sendCmd('volume',{value:pct});
