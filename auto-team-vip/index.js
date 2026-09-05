@@ -1,0 +1,827 @@
+const DEFAULT_CAPACITY = 2;
+let PLUGIN_VERSION = "0.0.0";
+
+const _DEBUG = false;
+function dlog(...args) {
+  if (_DEBUG) console.log("[auto-team-vip]", ...args);
+}
+function dwarn(...args) {
+  if (_DEBUG) console.warn("[auto-team-vip]", ...args);
+}
+
+let autoTimer = null;
+let runLock = false;
+let uiState = null;
+let ctx = null;
+let versionMismatchReported = false;
+
+// --- top bar button ---
+let topBtn = null;
+let topBtnStyle = null;
+let topBtnCheckLoop = null;
+let topDialogEl = null;
+let topDialogApp = null;
+let topDialogStyle = null;
+
+function pick(obj, keys, fallback) {
+  if (!obj || typeof obj !== "object") return fallback;
+  for (const key of keys) {
+    const value = obj[key];
+    if (value !== undefined && value !== null && value !== "") return value;
+  }
+  return fallback;
+}
+
+function asBool(value) {
+  if (value === undefined || value === null) return false;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  const s = String(value).trim().toLowerCase();
+  return s !== "" && s !== "0" && s !== "false" && s !== "no" && s !== "off";
+}
+
+function readAuth(c) {
+  const user = c.pinia?.state?.value?.user;
+  const device = c.pinia?.state?.value?.device;
+  const u = user?.info;
+  const d = device?.info;
+  if (!u?.token || !u?.userid) return null;
+  return {
+    token: u.token,
+    userid: u.userid,
+    t1: pick(u, ["t1"], ""),
+    dfid: pick(d, ["dfid"], ""),
+    mid: pick(d, ["mid"], ""),
+    uuid: pick(d, ["uuid"], ""),
+    guid: pick(d, ["guid"], ""),
+    serverDev: pick(d, ["serverDev"], ""),
+    mac: pick(d, ["mac"], ""),
+  };
+}
+
+function buildAuthHeader(auth) {
+  const parts = [];
+  if (auth.token) parts.push(`token=${auth.token}`);
+  if (auth.userid) parts.push(`userid=${auth.userid}`);
+  if (auth.t1) parts.push(`t1=${auth.t1}`);
+  if (auth.dfid) parts.push(`dfid=${auth.dfid}`);
+  if (auth.mid) parts.push(`KUGOU_API_MID=${auth.mid}`);
+  if (auth.uuid) parts.push(`uuid=${auth.uuid}`);
+  if (auth.guid) parts.push(`KUGOU_API_GUID=${auth.guid}`);
+  if (auth.serverDev) parts.push(`KUGOU_API_DEV=${auth.serverDev}`);
+  if (auth.mac) parts.push(`KUGOU_API_MAC=${auth.mac}`);
+  return parts.join(";");
+}
+
+async function teamRequest(c, method, url, params, data) {
+  const auth = readAuth(c);
+  if (!auth) return { ok: false, error: "not_logged_in" };
+  const cfg = {
+    method,
+    url,
+    params,
+    headers: { Authorization: buildAuthHeader(auth) },
+  };
+  if (data !== undefined && data !== null) cfg.data = data;
+
+  let res;
+  try {
+    res = await c.electron.api.request(cfg);
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+
+  const body = res?.body;
+  const eventId = pick(body, ["ssaCode", "eventId"], "") || pick(res?.headers, ["ssa-code", "SSA-CODE"], "");
+  const errorCode = Number(pick(body, ["error_code", "errcode"], 0));
+  const failed = Number(pick(body, ["status"], 1)) === 0;
+  if (eventId && (errorCode === 20028 || failed)) {
+    try {
+      const verified = await c.kugouVerification.request(eventId);
+      if (verified?.ok) res = await c.electron.api.request(cfg);
+    } catch (e) {
+      console.warn("[auto-team-vip] verification failed:", e);
+    }
+  }
+
+  return { ok: true, status: res?.status, body: res?.body };
+}
+
+function normalizePeriod(body) {
+  const d = body?.data ?? body ?? {};
+  const current = d?.current_period_info ?? d?.period_info ?? d;
+  const total = Number(pick(current, ["team_member_count", "member_count", "team_num", "target_member", "limit", "need_count"], 3));
+  const statusRaw = Number(pick(current, ["status"], -1));
+  const isActive = statusRaw === 0;
+  return {
+    periodId: String(pick(current, ["id", "period_id", "periodId", "activity_id"], "")),
+    periodName: String(pick(current, ["name"], "")),
+    startTime: String(pick(current, ["start_time"], "")),
+    endTime: String(pick(current, ["end_time"], "")),
+    active: isActive,
+    totalMembers: total >= 3 ? total : 3,
+    raw: body,
+  };
+}
+
+function normalizeTeam(body) {
+  const d = body?.data ?? body ?? {};
+  const createList = d?.my_create_team_list ?? [];
+  const joinList = d?.my_join_team_list ?? [];
+  const created = Array.isArray(createList) && createList.length > 0 ? createList[0] : null;
+  const joined = Array.isArray(joinList) && joinList.length > 0 ? joinList[0] : null;
+  const code = created ? pick(created, ["team_code", "code", "teamCode"], "") : "";
+  const members = created && Array.isArray(created?.member_list) ? created.member_list.length : 0;
+  const memberCount = created ? Number(pick(created, ["member_count", "count", "members_count", "current_count"], members)) : 0;
+  const joinedCode = joined ? pick(joined, ["team_code", "code", "teamCode"], "") : "";
+  const joinedMembers = joined && Array.isArray(joined?.member_list) ? joined.member_list.length : 0;
+  const joinedMemberCount = joined ? Number(pick(joined, ["member_count", "count", "members_count", "current_count"], joinedMembers)) : 0;
+  return { code, memberCount, joinedCode, joinedMemberCount, raw: d };
+}
+
+function classifyJoinError(body) {
+  const d = body?.data ?? body ?? {};
+  const code = Number(pick(d, ["error_code", "errcode", "code"], 0));
+  const msg = String(pick(d, ["msg", "message", "error"], "")).toLowerCase();
+  if (code !== 0) {
+    if (msg.includes("已加入") || msg.includes("已经") || msg.includes("已参") || msg.includes("joined"))
+      return "already_joined";
+    if (msg.includes("满") || msg.includes("full") || code === 20006) return "full";
+    return "invalid";
+  }
+  if (msg.includes("满") || msg.includes("full")) return "full";
+  if (msg.includes("已加入") || msg.includes("joined")) return "already_joined";
+  return "invalid";
+}
+
+async function getUid(c) {
+  let uid = await c.storage.get("uid");
+  if (!uid) {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    uid = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    await c.storage.set("uid", uid);
+  }
+  return uid;
+}
+
+async function getSettings(c) {
+  const saved = await c.storage.get("settings");
+  return {
+    poolUrl: pick(saved, ["poolUrl"], ""),
+    ...(saved && typeof saved === "object" ? saved : {}),
+  };
+}
+
+async function poolRequest(c, path, payload, method = "POST") {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const r = await poolRequestOnce(c, path, payload, method);
+    if (r.status === 403) return r;
+    if ((r.status === 0 || (r.status >= 500 && r.status < 600)) && attempt === 0) {
+      await new Promise(res => setTimeout(res, 500));
+      continue;
+    }
+    return r;
+  }
+}
+
+async function poolRequestOnce(c, path, payload, method = "POST") {
+  const settings = await getSettings(c);
+  const base = String(settings.poolUrl || "").replace(/\/+$/, "");
+  if (!base) {
+    console.warn("[auto-team-vip] poolRequest: no poolUrl configured");
+    return { ok: false, error: "no_pool" };
+  }
+  dlog("poolRequest:", method, base + path);
+  try {
+    const res = await c.net.request({
+      url: base + path,
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Plugin-Version": PLUGIN_VERSION,
+      },
+      body: method === "GET" ? undefined : payload,
+      responseType: "json",
+    });
+    dlog("poolRequest response:", res.status);
+    if (res.status === 403 && (res.data?.error === "version_mismatch" || res.data?.error === "version_missing")) {
+      const msg = res.data?.message || "插件版本过低，请更新";
+      console.warn("[auto-team-vip] version mismatch:", msg);
+      if (!versionMismatchReported && uiState) {
+        versionMismatchReported = true;
+        uiState.lastMessage = msg;
+        c.toast.warning(msg);
+      }
+      return { ok: false, status: res.status, data: res.data, error: msg, needUpdate: true };
+    }
+    return { ok: res.status >= 200 && res.status < 300, status: res.status, data: res.data };
+  } catch (e) {
+    console.warn("[auto-team-vip] poolRequest error:", e);
+    const msg = String(e?.message || e);
+    const hint = msg.includes("403") ? "（Cloudflare 安全挑战，请降低 Security Level 或使用 workers.dev 域名）" : "";
+    return { ok: false, status: 0, data: null, error: msg + hint };
+  }
+}
+
+async function poolRegister(c, periodId, uid, code, capacity, type = "created") {
+  return poolRequest(c, "/pool/register", { period_id: periodId, uid, code, capacity, type });
+}
+
+async function poolJoin(c, periodId, uid) {
+  return poolRequest(c, "/pool/join", { period_id: periodId, uid });
+}
+
+async function poolResult(c, periodId, uid, codeId, status) {
+  return poolRequest(c, "/pool/result", { period_id: periodId, uid, code_id: codeId, status });
+}
+
+async function getPeriodInfo(c) {
+  const r = await teamRequest(c, "GET", "/team/period/info");
+  if (!r.ok) return { ok: false, error: r.error || "请求失败" };
+  const p = normalizePeriod(r.body);
+  if (!p.periodId) return { ok: false, error: "未找到活动期次" };
+  return { ok: true, ...p };
+}
+
+async function getMyTeamInfo(c, periodId) {
+  const r = await teamRequest(c, "GET", "/team/my/info", { period_id: periodId });
+  if (!r.ok) return { ok: false, error: r.error };
+  return { ok: true, ...normalizeTeam(r.body) };
+}
+
+async function createTeam(c, periodId) {
+  return teamRequest(c, "POST", "/team/my", { period_id: periodId });
+}
+
+async function joinTeam(c, code) {
+  return teamRequest(c, "POST", "/team/join", { team_code: code });
+}
+
+async function runOnceBase(c, opts = {}) {
+  if (runLock) return { ok: false, error: "locked" };
+  runLock = true;
+  const notify = (msg) => {
+    if (opts.silent) return;
+    if (uiState) uiState.lastMessage = msg;
+  };
+  try {
+    const auth = readAuth(c);
+    if (!auth) {
+      notify("未登录 EchoMusic，请先登录");
+      return { ok: false, error: "not_logged_in" };
+    }
+
+    const settings = await getSettings(c);
+    const uid = await getUid(c);
+
+    const period = await getPeriodInfo(c);
+    if (!period.ok) {
+      notify(period.error || "获取活动信息失败");
+      return { ok: false, error: "no_period" };
+    }
+    if (uiState) {
+      uiState.periodId = String(period.periodId);
+      uiState.periodName = period.periodName;
+      uiState.startTime = period.startTime;
+      uiState.endTime = period.endTime;
+      uiState.periodActive = period.active;
+    }
+
+    const periodId = period.periodId;
+
+    let myTeam = await getMyTeamInfo(c, periodId);
+    if (!myTeam.ok || !myTeam.code) {
+      const createRes = await createTeam(c, periodId);
+      if (!createRes.ok) {
+        console.warn("[auto-team-vip] createTeam failed:", createRes.error);
+      }
+      myTeam = await getMyTeamInfo(c, periodId);
+    }
+
+    let myCode = "";
+    let myMemberCount = 0;
+    let joinedCode = "";
+    let joinedMemberCount = 0;
+    if (myTeam.ok) {
+      myCode = myTeam.code;
+      myMemberCount = myTeam.memberCount;
+      joinedCode = myTeam.joinedCode;
+      joinedMemberCount = myTeam.joinedMemberCount;
+    }
+    if (uiState) {
+      uiState.myCode = myCode;
+      uiState.myMemberCount = myMemberCount;
+      uiState.targetMembers = period.totalMembers;
+      uiState.joinedCode = joinedCode;
+      uiState.joinedMemberCount = joinedMemberCount;
+      uiState.joined = Boolean(joinedCode);
+    }
+
+    if (myCode && myMemberCount >= period.totalMembers) {
+      notify("自己的队伍已成团，队长 VIP 达成");
+    }
+
+    return {
+      ok: true,
+      myCode,
+      periodId,
+      uid,
+      totalMembers: period.totalMembers,
+      poolUrl: settings.poolUrl,
+    };
+  } finally {
+    runLock = false;
+  }
+}
+
+async function runOncePool(c, baseResult) {
+  if (!baseResult?.ok) return baseResult;
+  const { periodId, uid, poolUrl } = baseResult;
+  const myCode = baseResult.myCode;
+
+  if (myCode) {
+    await poolRegister(c, periodId, uid, myCode, DEFAULT_CAPACITY, "created");
+  }
+
+  let myTeam = await getMyTeamInfo(c, periodId);
+  let joined = myTeam.ok ? Boolean(myTeam.joinedCode) : false;
+
+  if (myTeam.ok && myTeam.joinedCode) {
+    await poolRegister(c, periodId, uid, myTeam.joinedCode, DEFAULT_CAPACITY, "joined");
+  }
+
+  if (!joined) {
+    if (poolUrl) {
+      const pickRes = await poolJoin(c, periodId, uid);
+      if (pickRes.ok && pickRes.data?.code) {
+        const code = pickRes.data.code;
+        const codeId = pickRes.data.code_id;
+        const r = await joinTeam(c, code);
+        const bodyStatus = Number(pick(r.body, ["status"], 1));
+        const errorCode = Number(pick(r.body, ["error_code", "errcode"], 0));
+        const httpOk = r.ok && Number(r.status) < 400;
+        const bizOk = bodyStatus === 1 && errorCode === 0;
+        if (httpOk && bizOk) {
+          joined = true;
+          await poolResult(c, periodId, uid, codeId, "joined");
+          myTeam = await getMyTeamInfo(c, periodId);
+        } else {
+          const kind = classifyJoinError(r.body);
+          if (kind === "full" || kind === "invalid") {
+            await poolResult(c, periodId, uid, codeId, "invalid");
+          } else if (kind === "already_joined") {
+            joined = true;
+            myTeam = await getMyTeamInfo(c, periodId);
+          }
+          if (uiState) uiState.lastMessage = "加入队伍未成功（" + kind + "）";
+        }
+      } else {
+        if (uiState) uiState.lastMessage = "码池暂无可加入的队伍，可手动加入或等待下一轮";
+      }
+    } else {
+      if (uiState) uiState.lastMessage = "未配置码池地址，请到插件设置页填写，或者手动组队";
+    }
+  }
+
+  if (myTeam.ok && uiState) {
+    uiState.myCode = myTeam.code;
+    uiState.myMemberCount = myTeam.memberCount;
+    uiState.joinedCode = myTeam.joinedCode;
+    uiState.joinedMemberCount = myTeam.joinedMemberCount;
+    uiState.joined = Boolean(myTeam.joinedCode);
+  }
+
+  await c.storage.set("lastPeriod", {
+    periodId,
+    myCode,
+    joined,
+    updatedAt: Date.now(),
+  });
+
+  return { ok: true, myCode, joined };
+}
+
+async function runOnce(c, opts = {}) {
+  const base = await runOnceBase(c, opts);
+  if (base.ok) {
+    return runOncePool(c, base);
+  }
+  return base;
+}
+
+async function scheduleRun(c, delay = 800) {
+  if (autoTimer) clearTimeout(autoTimer);
+  autoTimer = setTimeout(async () => {
+    autoTimer = null;
+    void runOnce(c, {});
+  }, delay);
+}
+
+function clearAuto() {
+  if (autoTimer) {
+    clearTimeout(autoTimer);
+    autoTimer = null;
+  }
+}
+
+// --- Top bar button ---
+
+const TOP_BTN_CSS = `
+.atv-top-btn {
+  width: 34px; height: 34px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  transition: all 0.2s;
+  background: transparent; border: none;
+  color: var(--color-text-main); opacity: 0.6;
+  cursor: pointer; flex-shrink: 0;
+  margin-left: 2px;
+}
+.atv-top-btn:hover {
+  opacity: 1;
+  background-color: var(--control-hover-bg);
+}
+.atv-top-btn svg { width: 17px; height: 17px; }
+
+.atv-dialog-mask {
+  position: fixed; inset: 0; z-index: 9999;
+  background: rgba(0,0,0,0.35);
+  display: flex; align-items: center; justify-content: center;
+  animation: atv-fade-in 0.15s ease;
+}
+.atv-dialog {
+  background: var(--color-bg-elevated, #1e1e2e);
+  border: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
+  border-radius: 14px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.45);
+  width: 400px; max-width: calc(100vw - 48px);
+  max-height: calc(100vh - 80px);
+  overflow: auto;
+  padding: 20px;
+  animation: atv-scale-in 0.18s cubic-bezier(0.34,1.56,0.64,1);
+  position: relative;
+}
+.atv-dialog-header {
+  display: flex; align-items: center;
+  padding-right: 36px;
+  margin-bottom: 14px;
+}
+.atv-dialog-title {
+  font-size: 15px; font-weight: 700;
+  color: var(--color-text-main);
+}
+.atv-dialog-close {
+  position: absolute; top: 16px; right: 16px;
+  width: 32px; height: 32px; min-width: 0; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; background: transparent; border: none;
+  color: var(--color-text-main); opacity: 0.5;
+  cursor: pointer; z-index: 10;
+  transition: all 0.15s; font-size: 16px; line-height: 1; user-select: none;
+}
+.atv-dialog-close:hover {
+  opacity: 1;
+  background: var(--control-hover-bg, rgba(0,0,0,0.06));
+}
+@keyframes atv-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes atv-scale-in { from { opacity: 0; transform: scale(0.92); } to { opacity: 1; transform: scale(1); } }
+`;
+
+function startTopButton(c) {
+  if (topBtnCheckLoop) return;
+
+  if (!document.getElementById("atv-top-btn-style")) {
+    const s = document.createElement("style");
+    s.id = "atv-top-btn-style";
+    s.textContent = TOP_BTN_CSS;
+    document.head.appendChild(s);
+    topBtnStyle = s;
+  }
+
+  topBtnCheckLoop = setInterval(() => {
+    const nav = document.querySelector(".titlebar-nav");
+    if (!nav) return;
+    const searchBox = nav.querySelector(".tb-search");
+    if (!searchBox) return;
+    if (document.getElementById("atv-top-btn")) return;
+
+    const btn = document.createElement("button");
+    btn.id = "atv-top-btn";
+    btn.className = "atv-top-btn nav-btn";
+    btn.title = "自动组队";
+    btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>';
+    btn.addEventListener("click", () => openDialog(c));
+    searchBox.parentNode.insertBefore(btn, searchBox.nextSibling);
+    topBtn = btn;
+    clearInterval(topBtnCheckLoop);
+    topBtnCheckLoop = null;
+  }, 800);
+}
+
+function stopTopButton() {
+  if (topBtnCheckLoop) {
+    clearInterval(topBtnCheckLoop);
+    topBtnCheckLoop = null;
+  }
+  if (topBtn) {
+    topBtn.remove();
+    topBtn = null;
+  }
+  if (topBtnStyle) {
+    topBtnStyle.remove();
+    topBtnStyle = null;
+  }
+  const s = document.getElementById("atv-top-btn-style");
+  if (s) s.remove();
+  closeDialog();
+}
+
+// --- Dialog ---
+
+function openDialog(c) {
+  if (topDialogEl) return;
+  versionMismatchReported = false;
+
+  const { createApp, h, ref, reactive, onMounted, defineComponent, defineAsyncComponent } = c.vue;
+  const Button = defineAsyncComponent(c.ui.components.Button);
+  const Input = defineAsyncComponent(c.ui.components.Input);
+
+  const StatusContent = defineComponent({
+    setup() {
+      const Switch = defineAsyncComponent(c.ui.components.Switch);
+      const manualCode = ref("");
+      const autoTeam = ref(false);
+
+      c.storage.get("settings").then((saved) => {
+        if (saved && typeof saved === "object") {
+          autoTeam.value = pick(saved, ["autoEnabled"], false) !== false;
+        }
+      });
+
+      const toggleAuto = async (val) => {
+        console.log("[auto-team-vip] toggleAuto called with:", val);
+        autoTeam.value = Boolean(val);
+        const prev = await c.storage.get("settings");
+        const base = prev && typeof prev === "object" ? prev : {};
+        await c.storage.set("settings", { ...base, autoEnabled: autoTeam.value });
+        if (autoTeam.value) {
+          c.toast.info("已开启自动组队，正在执行...");
+          await runOnce(c, {});
+        } else {
+          c.toast.info("已关闭自动组队");
+        }
+      };
+
+      const copyCode = async () => {
+        if (!uiState?.myCode) {
+          c.toast.warning("暂无组队码，请先运行互助");
+          return;
+        }
+        try {
+          await navigator.clipboard.writeText(uiState.myCode);
+          c.toast.success("组队码已复制");
+        } catch {
+          c.toast.warning("复制失败");
+        }
+      };
+
+      const joinManual = async () => {
+        if (uiState?.joinedCode) {
+          try {
+            await navigator.clipboard.writeText(uiState.joinedCode);
+            c.toast.success("组队码已复制");
+          } catch {
+            c.toast.warning("复制失败");
+          }
+          return;
+        }
+        const code = String(manualCode.value || "").trim();
+        if (!code) return;
+        dlog("joinManual with code");
+        const r = await joinTeam(c, code);
+        dlog("joinManual result received");
+        const bodyStatus = Number(pick(r.body, ["status"], 1));
+        const errorCode = Number(pick(r.body, ["error_code", "errcode"], 0));
+        const errorMsg = String(pick(r.body, ["error_msg", "msg", "message"], ""));
+        const httpOk = r.ok && Number(r.status) < 400;
+        const bizOk = bodyStatus === 1 && errorCode === 0;
+        if (httpOk && bizOk) {
+          c.toast.success("已提交加入");
+          manualCode.value = "";
+          const periodId = uiState?.periodId;
+          if (periodId) {
+            const teamInfo = await getMyTeamInfo(c, periodId);
+            if (teamInfo.ok && uiState) {
+              uiState.joinedCode = teamInfo.joinedCode;
+              uiState.joinedMemberCount = teamInfo.joinedMemberCount;
+              uiState.joined = Boolean(teamInfo.joinedCode);
+              if (autoTeam.value && teamInfo.joinedCode) {
+                const uid = await getUid(c);
+                const regRes = await poolRegister(c, periodId, uid, teamInfo.joinedCode, DEFAULT_CAPACITY, "joined");
+                if (regRes.ok && regRes.code_id) {
+                  await poolResult(c, periodId, uid, regRes.code_id, "joined");
+                }
+              } else if (!autoTeam.value && teamInfo.code) {
+                const uid = await getUid(c);
+                await poolRegister(c, periodId, uid, teamInfo.code, DEFAULT_CAPACITY, "created");
+              }
+            }
+          }
+        } else {
+          const msg = errorMsg || "加入失败，请检查组队码";
+          console.warn("[auto-team-vip] joinManual failed:", msg);
+          c.toast.warning(msg);
+        }
+      };
+
+      return () =>
+        h("div", { style: "display: grid; gap: 14px;" }, [
+          h("div", {}, [
+            h("div", { style: "font-size: 13px; opacity: 0.7; margin-bottom: 6px;" },
+              "活动期次：" + (uiState?.periodName || "—") + (uiState?.periodActive ? "" : "（本期未开启）")),
+            uiState?.startTime && uiState?.endTime
+              ? h("div", { style: "font-size: 12px; opacity: 0.5; margin-bottom: 10px;" },
+                  "本期活动时间：" + uiState.startTime + " ~ " + uiState.endTime)
+              : null,
+            h("div", { style: "font-size: 13px; margin-bottom: 6px;" }, [
+              "我创建的队伍：" + (uiState?.myCode || "未创建") +
+                (uiState?.myCode ? `（${uiState?.myMemberCount}/${uiState?.targetMembers} 人）` : ""),
+            ]),
+            h("div", { style: "font-size: 13px; opacity: 0.7; margin-bottom: 10px;" }, [
+              "我加入的队伍：" + (uiState?.joinedCode
+                ? `${uiState.joinedCode}（${uiState.joinedMemberCount}/${uiState.targetMembers} 人）`
+                : "无"),
+            ]),
+            uiState?.lastMessage
+              ? h("div", { style: "font-size: 12px; color: #f0b93c; margin-bottom: 10px;" }, uiState.lastMessage)
+              : null,
+          ]),
+          h("div", { style: "display: flex; gap: 12px; align-items: center; margin-bottom: 4px;" }, [
+            h("span", { style: "font-size: 13px; font-weight: 600;" }, "自动组队"),
+            h(Switch, {
+              modelValue: autoTeam.value,
+              "onUpdate:modelValue": toggleAuto,
+            }),
+          ]),
+          h("div", { style: "display: flex; gap: 8px; align-items: center;" }, [
+            h("span", { style: "font-size: 13px; opacity: 0.7; flex-shrink: 0;" }, "我加入的队伍："),
+            h("input", {
+              value: uiState?.joinedCode || manualCode.value,
+              readonly: Boolean(uiState?.joinedCode),
+              placeholder: uiState?.joinedCode ? "" : "输入对方组队码",
+              onInput: (e) => { manualCode.value = e.target.value; },
+              style: "flex: 1; min-width: 0; height: 32px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--border-subtle, rgba(255,255,255,0.12)); background: var(--control-muted-bg, rgba(255,255,255,0.06)); color: var(--color-text-main); font-size: 13px; outline: none;",
+            }),
+            h(Button, { size: "xs", variant: "outline", onClick: joinManual, style: "white-space: nowrap; flex-shrink: 0;" }, { default: () => uiState?.joinedCode ? "复制" : "加入" }),
+          ]),
+          h("div", { style: "display: flex; gap: 8px; align-items: center;" }, [
+            h("span", { style: "font-size: 13px; opacity: 0.7; flex-shrink: 0;" }, "我创建的队伍："),
+            h("input", {
+              value: uiState?.myCode || "",
+              readonly: true,
+              style: "flex: 1; min-width: 0; height: 32px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--border-subtle, rgba(255,255,255,0.12)); background: var(--control-muted-bg, rgba(255,255,255,0.06)); color: var(--color-text-main); font-size: 13px; outline: none;",
+            }),
+            h(Button, { size: "xs", variant: "outline", onClick: copyCode, style: "white-space: nowrap; flex-shrink: 0;" }, { default: () => "复制" }),
+          ]),
+        ]);
+    },
+  });
+
+  const DialogRoot = defineComponent({
+    setup() {
+      return () =>
+        h("div", { class: "atv-dialog-mask", onClick: (e) => { if (e.target === e.currentTarget) closeDialog(); } }, [
+          h("div", { class: "atv-dialog" }, [
+            h("div", { class: "atv-dialog-header" }, [
+              h("span", { class: "atv-dialog-title" }, "自动组队领VIP"),
+              h("div", { class: "atv-dialog-close", onClick: closeDialog, style: "font-size: 18px; line-height: 1; user-select: none;" }, "✕"),
+            ]),
+            h(StatusContent),
+          ]),
+        ]);
+    },
+  });
+
+  const container = document.createElement("div");
+  container.id = "atv-dialog-root";
+  document.body.appendChild(container);
+  topDialogEl = container;
+
+  const app = createApp(DialogRoot);
+  app.use(c.pinia);
+  app.use(c.router);
+  app.component("Icon", c.vue.Icon ?? (() => null));
+  app.config.globalProperties.$echo = c.app.config.globalProperties.$echo;
+  app.mount(container);
+  topDialogApp = app;
+}
+
+function closeDialog() {
+  if (topDialogApp) {
+    try { topDialogApp.unmount(); } catch {}
+    topDialogApp = null;
+  }
+  if (topDialogEl) {
+    topDialogEl.remove();
+    topDialogEl = null;
+  }
+}
+
+// --- Settings panel (settings page) ---
+
+function createSettingsComponent(c) {
+  return c.vue.defineComponent({
+    setup() {
+      const { h, reactive, defineAsyncComponent } = c.vue;
+      const Button = defineAsyncComponent(c.ui.components.Button);
+      const Input = defineAsyncComponent(c.ui.components.Input);
+
+      const draft = reactive({ poolUrl: "" });
+      c.storage.get("settings").then((saved) => {
+        if (saved && typeof saved === "object") {
+          draft.poolUrl = String(pick(saved, ["poolUrl"], ""));
+        }
+      });
+
+      const save = async () => {
+        const url = String(draft.poolUrl || "").trim().replace(/\/+$/, "");
+        if (url && !/^https?:\/\//.test(url)) {
+          c.toast.warning("地址必须以 http:// 或 https:// 开头");
+          return;
+        }
+        const prev = await c.storage.get("settings");
+        const base = prev && typeof prev === "object" ? prev : {};
+        await c.storage.set("settings", {
+          ...base,
+          poolUrl: url,
+        });
+        c.toast.success("设置已保存");
+      };
+
+      return () =>
+        h("div", { style: "display: grid; gap: 12px;" }, [
+          h("p", { style: "font-size:12px;opacity:0.6;margin:0 0 4px;" }, "顶栏五角星按钮为快捷入口，点击弹出组队面板。3人成团（队长+2队员）。"),
+          h(Input, {
+            modelValue: draft.poolUrl,
+            placeholder: "码池 Worker 地址，如 https://xxx.workers.dev",
+            "onUpdate:modelValue": (v) => { draft.poolUrl = String(v ?? ""); },
+          }),
+          h(Button, { size: "xs", onClick: save }, { default: () => "保存" }),
+        ]);
+    },
+  });
+}
+
+// --- activate / deactivate ---
+
+export async function activate(_ctx) {
+  ctx = _ctx;
+  PLUGIN_VERSION = _ctx.manifest.version || "0.0.0";
+
+  uiState = _ctx.vue.reactive({
+    lastMessage: "",
+    periodId: "",
+    periodName: "",
+    startTime: "",
+    endTime: "",
+    periodActive: false,
+    myCode: "",
+    myMemberCount: 0,
+    targetMembers: 3,
+    joined: false,
+    joinedCode: "",
+    joinedMemberCount: 0,
+    joinState: "",
+  });
+
+  _ctx.ui.settings.define({
+    title: "自动组队领VIP",
+    description: "酷狗概念版组队瓜分畅听VIP活动自动化。顶栏五角星按钮为快捷入口。",
+    component: createSettingsComponent(_ctx),
+  });
+
+  startTopButton(_ctx);
+
+  _ctx.vue.watch(
+    () => _ctx.pinia?.state?.value?.user?.info?.token,
+    (token) => {
+      if (token) scheduleRun(_ctx, 2000);
+    },
+  );
+
+  scheduleRun(_ctx, 3000);
+
+  _ctx.dispose(() => {
+    clearAuto();
+    stopTopButton();
+    uiState = null;
+    ctx = null;
+  });
+}
+
+export async function deactivate() {
+  clearAuto();
+  stopTopButton();
+  uiState = null;
+  ctx = null;
+}
