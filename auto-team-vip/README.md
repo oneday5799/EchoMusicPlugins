@@ -54,7 +54,7 @@
 
 见 [`cloudflare/team-pool-worker/`](../cloudflare/team-pool-worker/)。
 
-- 部署后得到 Worker 地址（如 `https://echo-team-pool.oneday.vip`）。
+- 部署后得到 Worker 地址（如 `https://echo-team-pool.xxxx.workers.dev`）。
 - 在插件设置中填入该地址即可。
 
 ## 版本校验
