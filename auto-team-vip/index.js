@@ -360,7 +360,7 @@ async function runOncePool(c, baseResult) {
 
   if (myTeam.ok && myTeam.joinedCode) {
     const remaining = Math.min(DEFAULT_CAPACITY, Math.max(0, DEFAULT_CAPACITY - (myTeam.joinedMemberCount - 1)));
-    await poolSync(c, periodId, myTeam.joinedCode, [uid], remaining);
+    await poolRegister(c, periodId, myTeam.joinedCode, "unknown", [uid], remaining);
   }
 
   if (!joined) {
@@ -378,7 +378,7 @@ async function runOncePool(c, baseResult) {
           myTeam = await getMyTeamInfo(c, periodId);
           if (myTeam.ok && myTeam.joinedCode) {
             const remaining = Math.min(DEFAULT_CAPACITY, Math.max(0, DEFAULT_CAPACITY - (myTeam.joinedMemberCount - 1)));
-            await poolSync(c, periodId, myTeam.joinedCode, [uid], remaining);
+            await poolRegister(c, periodId, myTeam.joinedCode, "unknown", [uid], remaining);
           }
         } else {
           const kind = classifyJoinError(r.body);
