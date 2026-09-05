@@ -351,12 +351,14 @@ async function runOncePool(c, baseResult) {
   const { periodId, uid, poolUrl } = baseResult;
   const myCode = baseResult.myCode;
 
-  if (myCode) {
-    await poolRegister(c, periodId, myCode, uid, [], DEFAULT_CAPACITY);
-  }
-
   let myTeam = await getMyTeamInfo(c, periodId);
   let joined = myTeam.ok ? Boolean(myTeam.joinedCode) : false;
+
+  if (myCode) {
+    const mc = myTeam.ok && myTeam.code === myCode ? myTeam.memberCount : 1;
+    const remaining = Math.min(DEFAULT_CAPACITY, Math.max(0, DEFAULT_CAPACITY - (mc - 1)));
+    await poolRegister(c, periodId, myCode, uid, [], remaining);
+  }
 
   if (myTeam.ok && myTeam.joinedCode) {
     const remaining = Math.min(DEFAULT_CAPACITY, Math.max(0, DEFAULT_CAPACITY - (myTeam.joinedMemberCount - 1)));
@@ -699,7 +701,9 @@ function openDialog(c) {
                 const remaining = Math.min(DEFAULT_CAPACITY, Math.max(0, DEFAULT_CAPACITY - (teamInfo.joinedMemberCount - 1)));
                 await poolRegister(c, periodId, teamInfo.joinedCode, "unknown", [uid], remaining);
               } else if (!autoTeam.value && teamInfo.code) {
-                await poolRegister(c, periodId, teamInfo.code, uid, [], DEFAULT_CAPACITY);
+                const mc = teamInfo.memberCount || 1;
+                const remaining = Math.min(DEFAULT_CAPACITY, Math.max(0, DEFAULT_CAPACITY - (mc - 1)));
+                await poolRegister(c, periodId, teamInfo.code, uid, [], remaining);
               }
             }
           }
