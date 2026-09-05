@@ -223,16 +223,24 @@ async function poolRequestOnce(c, path, payload, method = "POST") {
   }
 }
 
-async function poolRegister(c, periodId, uid, code, capacity, type = "created") {
-  return poolRequest(c, "/pool/register", { period_id: periodId, uid, code, capacity, type });
+async function poolRegister(c, code, creator, members, remaining) {
+  return poolRequest(c, "/pool/register", { code, creator, members, remaining });
 }
 
-async function poolJoin(c, periodId, uid) {
-  return poolRequest(c, "/pool/join", { period_id: periodId, uid });
+async function poolJoin(c, uid) {
+  return poolRequest(c, "/pool/join", { uid });
 }
 
-async function poolResult(c, periodId, uid, codeId, status) {
-  return poolRequest(c, "/pool/result", { period_id: periodId, uid, code_id: codeId, status });
+async function poolReport(c, code, status) {
+  return poolRequest(c, "/pool/report", { code, status });
+}
+
+async function poolSync(c, code, members, remaining) {
+  return poolRequest(c, "/pool/sync", { code, members, remaining });
+}
+
+async function poolStats(c) {
+  return poolRequest(c, "/pool/stats", {});
 }
 
 async function getPeriodInfo(c) {
@@ -340,22 +348,22 @@ async function runOncePool(c, baseResult) {
   const myCode = baseResult.myCode;
 
   if (myCode) {
-    await poolRegister(c, periodId, uid, myCode, DEFAULT_CAPACITY, "created");
+    await poolRegister(c, myCode, uid, [], DEFAULT_CAPACITY);
   }
 
   let myTeam = await getMyTeamInfo(c, periodId);
   let joined = myTeam.ok ? Boolean(myTeam.joinedCode) : false;
 
   if (myTeam.ok && myTeam.joinedCode) {
-    await poolRegister(c, periodId, uid, myTeam.joinedCode, DEFAULT_CAPACITY, "joined");
+    const remaining = DEFAULT_CAPACITY - (myTeam.joinedMemberCount - 1);
+    await poolSync(c, myTeam.joinedCode, [uid], remaining);
   }
 
   if (!joined) {
     if (poolUrl) {
-      const pickRes = await poolJoin(c, periodId, uid);
+      const pickRes = await poolJoin(c, uid);
       if (pickRes.ok && pickRes.data?.code) {
         const code = pickRes.data.code;
-        const codeId = pickRes.data.code_id;
         const r = await joinTeam(c, code);
         const bodyStatus = Number(pick(r.body, ["status"], 1));
         const errorCode = Number(pick(r.body, ["error_code", "errcode"], 0));
@@ -363,12 +371,15 @@ async function runOncePool(c, baseResult) {
         const bizOk = bodyStatus === 1 && errorCode === 0;
         if (httpOk && bizOk) {
           joined = true;
-          await poolResult(c, periodId, uid, codeId, "joined");
           myTeam = await getMyTeamInfo(c, periodId);
+          if (myTeam.ok && myTeam.joinedCode) {
+            const remaining = DEFAULT_CAPACITY - (myTeam.joinedMemberCount - 1);
+            await poolSync(c, myTeam.joinedCode, [uid], remaining);
+          }
         } else {
           const kind = classifyJoinError(r.body);
           if (kind === "full" || kind === "invalid") {
-            await poolResult(c, periodId, uid, codeId, "invalid");
+            await poolReport(c, code, "failed");
           } else if (kind === "already_joined") {
             joined = true;
             myTeam = await getMyTeamInfo(c, periodId);
@@ -376,7 +387,7 @@ async function runOncePool(c, baseResult) {
           if (uiState) uiState.lastMessage = "加入队伍未成功（" + kind + "）";
         }
       } else {
-        if (uiState) uiState.lastMessage = "码池暂无可加入的队伍，可手动加入或等待下一轮";
+        if (uiState) uiState.lastMessage = "码池暂无可加入的队伍，可手动加入或等待下轮";
       }
     } else {
       if (uiState) uiState.lastMessage = "未配置码池地址，请到插件设置页填写，或者手动组队";
@@ -391,13 +402,7 @@ async function runOncePool(c, baseResult) {
     uiState.joined = Boolean(myTeam.joinedCode);
   }
 
-  await c.storage.set("lastPeriod", {
-    periodId,
-    myCode,
-    joined,
-    updatedAt: Date.now(),
-  });
-
+  await c.storage.set("lastPeriod", { periodId, myCode, joined, updatedAt: Date.now() });
   return { ok: true, myCode, joined };
 }
 
@@ -470,6 +475,15 @@ const TOP_BTN_CSS = `
   font-size: 15px; font-weight: 700;
   color: var(--color-text-main);
 }
+.atv-refresh-btn {
+  cursor: pointer; font-size: 13px; margin-left: 8px;
+  padding: 2px 8px; border-radius: 4px;
+  background: rgba(255,255,255,0.1);
+  user-select: none; opacity: 0.6;
+  transition: opacity 0.15s, background 0.15s;
+}
+.atv-refresh-btn:hover { opacity: 1; background: rgba(255,255,255,0.18); }
+.atv-refresh-btn:active { opacity: 0.8; }
 .atv-dialog-close {
   position: absolute; top: 16px; right: 16px;
   width: 32px; height: 32px; min-width: 0; padding: 0;
@@ -546,6 +560,64 @@ function openDialog(c) {
   const Button = defineAsyncComponent(c.ui.components.Button);
   const Input = defineAsyncComponent(c.ui.components.Input);
 
+  const refreshing = c.vue.ref(false);
+  const SYNC_THROTTLE_MS = 5000;
+  const MAX_SYNC_CODES = 5;
+  const lastSyncTime = {};
+
+  const poolSyncThrottled = async (code, members, remaining) => {
+    const now = Date.now();
+    if (lastSyncTime[code] && now - lastSyncTime[code] < SYNC_THROTTLE_MS) return;
+    lastSyncTime[code] = now;
+    return poolSync(c, code, members, remaining);
+  };
+
+  const onRefresh = async () => {
+    if (refreshing.value) return;
+    refreshing.value = true;
+    try {
+      const periodId = uiState?.periodId;
+      if (periodId) {
+        const uid = await getUid(c);
+        const statsRes = await poolStats(c);
+        if (statsRes.ok && statsRes.data?.codes) {
+          const myCodes = statsRes.data.codes.filter(
+            codeObj => codeObj.creator === uid || (codeObj.members || []).includes(uid)
+          ).slice(0, MAX_SYNC_CODES);
+          for (const codeObj of myCodes) {
+            const teamInfo = await getMyTeamInfo(c, periodId);
+            if (teamInfo.ok) {
+              const members = [];
+              if (teamInfo.joinedCode === codeObj.code) members.push(uid);
+              if (teamInfo.code === codeObj.code) members.push(uid);
+              const kugouMemberCount = teamInfo.joinedCode === codeObj.code
+                ? teamInfo.joinedMemberCount
+                : (teamInfo.code === codeObj.code ? teamInfo.memberCount : 0);
+              const remaining = DEFAULT_CAPACITY - (kugouMemberCount - 1);
+              await poolSyncThrottled(codeObj.code, members, Math.max(0, remaining));
+            }
+          }
+        }
+        const myTeam = await getMyTeamInfo(c, periodId);
+        if (myTeam.ok && uiState) {
+          uiState.myCode = myTeam.code;
+          uiState.myMemberCount = myTeam.memberCount;
+          uiState.joinedCode = myTeam.joinedCode;
+          uiState.joinedMemberCount = myTeam.joinedMemberCount;
+          uiState.joined = Boolean(myTeam.joinedCode);
+        }
+        if (!myTeam.ok || !myTeam.joinedCode) {
+          await runOnce(c, {});
+        }
+      }
+      c.toast.success("已刷新");
+    } catch (e) {
+      c.toast.warning("刷新失败");
+    } finally {
+      refreshing.value = false;
+    }
+  };
+
   const StatusContent = defineComponent({
     setup() {
       const Switch = defineAsyncComponent(c.ui.components.Switch);
@@ -597,9 +669,7 @@ function openDialog(c) {
         }
         const code = String(manualCode.value || "").trim();
         if (!code) return;
-        dlog("joinManual with code");
         const r = await joinTeam(c, code);
-        dlog("joinManual result received");
         const bodyStatus = Number(pick(r.body, ["status"], 1));
         const errorCode = Number(pick(r.body, ["error_code", "errcode"], 0));
         const errorMsg = String(pick(r.body, ["error_msg", "msg", "message"], ""));
@@ -615,21 +685,17 @@ function openDialog(c) {
               uiState.joinedCode = teamInfo.joinedCode;
               uiState.joinedMemberCount = teamInfo.joinedMemberCount;
               uiState.joined = Boolean(teamInfo.joinedCode);
+              const uid = await getUid(c);
               if (autoTeam.value && teamInfo.joinedCode) {
-                const uid = await getUid(c);
-                const regRes = await poolRegister(c, periodId, uid, teamInfo.joinedCode, DEFAULT_CAPACITY, "joined");
-                if (regRes.ok && regRes.code_id) {
-                  await poolResult(c, periodId, uid, regRes.code_id, "joined");
-                }
+                const remaining = DEFAULT_CAPACITY - (teamInfo.joinedMemberCount - 1);
+                await poolRegister(c, teamInfo.joinedCode, "unknown", [uid], remaining);
               } else if (!autoTeam.value && teamInfo.code) {
-                const uid = await getUid(c);
-                await poolRegister(c, periodId, uid, teamInfo.code, DEFAULT_CAPACITY, "created");
+                await poolRegister(c, teamInfo.code, uid, [], DEFAULT_CAPACITY);
               }
             }
           }
         } else {
           const msg = errorMsg || "加入失败，请检查组队码";
-          console.warn("[auto-team-vip] joinManual failed:", msg);
           c.toast.warning(msg);
         }
       };
@@ -694,6 +760,11 @@ function openDialog(c) {
           h("div", { class: "atv-dialog" }, [
             h("div", { class: "atv-dialog-header" }, [
               h("span", { class: "atv-dialog-title" }, "自动组队领VIP"),
+              h("span", {
+                class: "atv-refresh-btn",
+                onClick: onRefresh,
+                title: "刷新组队状态",
+              }, "刷新"),
               h("div", { class: "atv-dialog-close", onClick: closeDialog, style: "font-size: 18px; line-height: 1; user-select: none;" }, "✕"),
             ]),
             h(StatusContent),
