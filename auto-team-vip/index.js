@@ -133,10 +133,12 @@ function normalizeTeam(body) {
   const code = created ? pick(created, ["team_code", "code", "teamCode"], "") : "";
   const members = created && Array.isArray(created?.member_list) ? created.member_list.length : 0;
   const memberCount = created ? Number(pick(created, ["member_count", "count", "members_count", "current_count"], members)) : 0;
+  const vipDesc = created ? pick(created, ["vip_desc"], "") : "";
   const joinedCode = joined ? pick(joined, ["team_code", "code", "teamCode"], "") : "";
   const joinedMembers = joined && Array.isArray(joined?.member_list) ? joined.member_list.length : 0;
   const joinedMemberCount = joined ? Number(pick(joined, ["member_count", "count", "members_count", "current_count"], joinedMembers)) : 0;
-  return { code, memberCount, joinedCode, joinedMemberCount, raw: d };
+  const joinedVipDesc = joined ? pick(joined, ["vip_desc"], "") : "";
+  return { code, memberCount, vipDesc, joinedCode, joinedMemberCount, joinedVipDesc, raw: d };
 }
 
 function classifyJoinError(body) {
@@ -319,14 +321,16 @@ async function runOnceBase(c, opts = {}) {
     if (uiState) {
       uiState.myCode = myCode;
       uiState.myMemberCount = myMemberCount;
+      uiState.myVipDesc = myTeam.ok ? myTeam.vipDesc : "";
       uiState.targetMembers = period.totalMembers;
       uiState.joinedCode = joinedCode;
       uiState.joinedMemberCount = joinedMemberCount;
+      uiState.joinedVipDesc = myTeam.ok ? myTeam.joinedVipDesc : "";
       uiState.joined = Boolean(joinedCode);
     }
 
     if (myCode && myMemberCount >= period.totalMembers) {
-      notify("自己的队伍已成团，队长 VIP 达成");
+      notify("本期组队已完成，期待下一次组队");
     }
 
     return {
@@ -397,8 +401,10 @@ async function runOncePool(c, baseResult) {
   if (myTeam.ok && uiState) {
     uiState.myCode = myTeam.code;
     uiState.myMemberCount = myTeam.memberCount;
+    uiState.myVipDesc = myTeam.vipDesc;
     uiState.joinedCode = myTeam.joinedCode;
     uiState.joinedMemberCount = myTeam.joinedMemberCount;
+    uiState.joinedVipDesc = myTeam.joinedVipDesc;
     uiState.joined = Boolean(myTeam.joinedCode);
   }
 
@@ -602,8 +608,10 @@ function openDialog(c) {
         if (myTeam.ok && uiState) {
           uiState.myCode = myTeam.code;
           uiState.myMemberCount = myTeam.memberCount;
+          uiState.myVipDesc = myTeam.vipDesc;
           uiState.joinedCode = myTeam.joinedCode;
           uiState.joinedMemberCount = myTeam.joinedMemberCount;
+          uiState.joinedVipDesc = myTeam.joinedVipDesc;
           uiState.joined = Boolean(myTeam.joinedCode);
         }
         if (!myTeam.ok || !myTeam.joinedCode) {
@@ -684,6 +692,7 @@ function openDialog(c) {
             if (teamInfo.ok && uiState) {
               uiState.joinedCode = teamInfo.joinedCode;
               uiState.joinedMemberCount = teamInfo.joinedMemberCount;
+              uiState.joinedVipDesc = teamInfo.joinedVipDesc;
               uiState.joined = Boolean(teamInfo.joinedCode);
               const uid = await getUid(c);
               if (autoTeam.value && teamInfo.joinedCode) {
@@ -711,11 +720,13 @@ function openDialog(c) {
               : null,
             h("div", { style: "font-size: 13px; margin-bottom: 6px;" }, [
               "我创建的队伍：" + (uiState?.myCode || "未创建") +
-                (uiState?.myCode ? `（${uiState?.myMemberCount}/${uiState?.targetMembers} 人）` : ""),
+                (uiState?.myCode ? `（${uiState?.myMemberCount}/${uiState?.targetMembers} 人）` : "") +
+                (uiState?.myCode && uiState?.myVipDesc ? `  ${uiState.myVipDesc}` : ""),
             ]),
             h("div", { style: "font-size: 13px; opacity: 0.7; margin-bottom: 10px;" }, [
               "我加入的队伍：" + (uiState?.joinedCode
-                ? `${uiState.joinedCode}（${uiState.joinedMemberCount}/${uiState.targetMembers} 人）`
+                ? `${uiState.joinedCode}（${uiState.joinedMemberCount}/${uiState.targetMembers} 人）` +
+                  (uiState?.joinedVipDesc ? `  ${uiState.joinedVipDesc}` : "")
                 : "无"),
             ]),
             uiState?.lastMessage
@@ -858,10 +869,12 @@ export async function activate(_ctx) {
     periodActive: false,
     myCode: "",
     myMemberCount: 0,
+    myVipDesc: "",
     targetMembers: 3,
     joined: false,
     joinedCode: "",
     joinedMemberCount: 0,
+    joinedVipDesc: "",
     joinState: "",
   });
 
