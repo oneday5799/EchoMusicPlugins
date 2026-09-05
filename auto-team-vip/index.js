@@ -359,7 +359,7 @@ async function runOncePool(c, baseResult) {
   let joined = myTeam.ok ? Boolean(myTeam.joinedCode) : false;
 
   if (myTeam.ok && myTeam.joinedCode) {
-    const remaining = DEFAULT_CAPACITY - (myTeam.joinedMemberCount - 1);
+    const remaining = Math.min(DEFAULT_CAPACITY, Math.max(0, DEFAULT_CAPACITY - (myTeam.joinedMemberCount - 1)));
     await poolSync(c, periodId, myTeam.joinedCode, [uid], remaining);
   }
 
@@ -377,7 +377,7 @@ async function runOncePool(c, baseResult) {
           joined = true;
           myTeam = await getMyTeamInfo(c, periodId);
           if (myTeam.ok && myTeam.joinedCode) {
-            const remaining = DEFAULT_CAPACITY - (myTeam.joinedMemberCount - 1);
+            const remaining = Math.min(DEFAULT_CAPACITY, Math.max(0, DEFAULT_CAPACITY - (myTeam.joinedMemberCount - 1)));
             await poolSync(c, periodId, myTeam.joinedCode, [uid], remaining);
           }
         } else {
@@ -590,17 +590,17 @@ function openDialog(c) {
           const myCodes = statsRes.data.codes.filter(
             codeObj => codeObj.creator === uid || (codeObj.members || []).includes(uid)
           ).slice(0, MAX_SYNC_CODES);
-          for (const codeObj of myCodes) {
-            const teamInfo = await getMyTeamInfo(c, periodId);
-            if (teamInfo.ok) {
+          const teamInfo = await getMyTeamInfo(c, periodId);
+          if (teamInfo.ok) {
+            for (const codeObj of myCodes) {
               const members = [];
               if (teamInfo.joinedCode === codeObj.code) members.push(uid);
-              if (teamInfo.code === codeObj.code) members.push(uid);
+              else if (teamInfo.code === codeObj.code) members.push(uid);
               const kugouMemberCount = teamInfo.joinedCode === codeObj.code
                 ? teamInfo.joinedMemberCount
                 : (teamInfo.code === codeObj.code ? teamInfo.memberCount : 0);
-              const remaining = DEFAULT_CAPACITY - (kugouMemberCount - 1);
-              await poolSyncThrottled(periodId, codeObj.code, members, Math.max(0, remaining));
+              const remaining = Math.min(DEFAULT_CAPACITY, Math.max(0, DEFAULT_CAPACITY - (kugouMemberCount - 1)));
+              await poolSyncThrottled(periodId, codeObj.code, members, remaining);
             }
           }
         }
@@ -696,7 +696,7 @@ function openDialog(c) {
               uiState.joined = Boolean(teamInfo.joinedCode);
               const uid = await getUid(c);
               if (autoTeam.value && teamInfo.joinedCode) {
-                const remaining = DEFAULT_CAPACITY - (teamInfo.joinedMemberCount - 1);
+                const remaining = Math.min(DEFAULT_CAPACITY, Math.max(0, DEFAULT_CAPACITY - (teamInfo.joinedMemberCount - 1)));
                 await poolRegister(c, periodId, teamInfo.joinedCode, "unknown", [uid], remaining);
               } else if (!autoTeam.value && teamInfo.code) {
                 await poolRegister(c, periodId, teamInfo.code, uid, [], DEFAULT_CAPACITY);
