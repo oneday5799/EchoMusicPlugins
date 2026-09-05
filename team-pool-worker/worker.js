@@ -79,8 +79,8 @@ var PeriodPool = class extends DurableObject {
         const existingMembers = JSON.parse(existing[0].members ?? "[]");
         const merged = [...new Set([...existingMembers, ...members])];
         this.ctx.storage.sql.exec(
-          `UPDATE codes SET members = ?, updated_at = ? WHERE code = ?`,
-          JSON.stringify(merged), now, code
+          `UPDATE codes SET members = ?, remaining = ?, updated_at = ? WHERE code = ?`,
+          JSON.stringify(merged), remaining, now, code
         );
       } else {
         this.ctx.storage.sql.exec(
