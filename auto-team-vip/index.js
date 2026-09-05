@@ -225,24 +225,24 @@ async function poolRequestOnce(c, path, payload, method = "POST") {
   }
 }
 
-async function poolRegister(c, code, creator, members, remaining) {
-  return poolRequest(c, "/pool/register", { code, creator, members, remaining });
+async function poolRegister(c, periodId, code, creator, members, remaining) {
+  return poolRequest(c, "/pool/register", { period_id: periodId, code, creator, members, remaining });
 }
 
-async function poolJoin(c, uid) {
-  return poolRequest(c, "/pool/join", { uid });
+async function poolJoin(c, periodId, uid) {
+  return poolRequest(c, "/pool/join", { period_id: periodId, uid });
 }
 
-async function poolReport(c, code, status) {
-  return poolRequest(c, "/pool/report", { code, status });
+async function poolReport(c, periodId, code, status) {
+  return poolRequest(c, "/pool/report", { period_id: periodId, code, status });
 }
 
-async function poolSync(c, code, members, remaining) {
-  return poolRequest(c, "/pool/sync", { code, members, remaining });
+async function poolSync(c, periodId, code, members, remaining) {
+  return poolRequest(c, "/pool/sync", { period_id: periodId, code, members, remaining });
 }
 
-async function poolStats(c) {
-  return poolRequest(c, "/pool/stats", {});
+async function poolStats(c, periodId) {
+  return poolRequest(c, "/pool/stats", { period_id: periodId });
 }
 
 async function getPeriodInfo(c) {
@@ -352,7 +352,7 @@ async function runOncePool(c, baseResult) {
   const myCode = baseResult.myCode;
 
   if (myCode) {
-    await poolRegister(c, myCode, uid, [], DEFAULT_CAPACITY);
+    await poolRegister(c, periodId, myCode, uid, [], DEFAULT_CAPACITY);
   }
 
   let myTeam = await getMyTeamInfo(c, periodId);
@@ -360,12 +360,12 @@ async function runOncePool(c, baseResult) {
 
   if (myTeam.ok && myTeam.joinedCode) {
     const remaining = DEFAULT_CAPACITY - (myTeam.joinedMemberCount - 1);
-    await poolSync(c, myTeam.joinedCode, [uid], remaining);
+    await poolSync(c, periodId, myTeam.joinedCode, [uid], remaining);
   }
 
   if (!joined) {
     if (poolUrl) {
-      const pickRes = await poolJoin(c, uid);
+      const pickRes = await poolJoin(c, periodId, uid);
       if (pickRes.ok && pickRes.data?.code) {
         const code = pickRes.data.code;
         const r = await joinTeam(c, code);
@@ -378,12 +378,12 @@ async function runOncePool(c, baseResult) {
           myTeam = await getMyTeamInfo(c, periodId);
           if (myTeam.ok && myTeam.joinedCode) {
             const remaining = DEFAULT_CAPACITY - (myTeam.joinedMemberCount - 1);
-            await poolSync(c, myTeam.joinedCode, [uid], remaining);
+            await poolSync(c, periodId, myTeam.joinedCode, [uid], remaining);
           }
         } else {
           const kind = classifyJoinError(r.body);
           if (kind === "full" || kind === "invalid") {
-            await poolReport(c, code, "failed");
+            await poolReport(c, periodId, code, "failed");
           } else if (kind === "already_joined") {
             joined = true;
             myTeam = await getMyTeamInfo(c, periodId);
@@ -571,11 +571,11 @@ function openDialog(c) {
   const MAX_SYNC_CODES = 5;
   const lastSyncTime = {};
 
-  const poolSyncThrottled = async (code, members, remaining) => {
+  const poolSyncThrottled = async (periodId, code, members, remaining) => {
     const now = Date.now();
     if (lastSyncTime[code] && now - lastSyncTime[code] < SYNC_THROTTLE_MS) return;
     lastSyncTime[code] = now;
-    return poolSync(c, code, members, remaining);
+    return poolSync(c, periodId, code, members, remaining);
   };
 
   const onRefresh = async () => {
@@ -585,7 +585,7 @@ function openDialog(c) {
       const periodId = uiState?.periodId;
       if (periodId) {
         const uid = await getUid(c);
-        const statsRes = await poolStats(c);
+        const statsRes = await poolStats(c, periodId);
         if (statsRes.ok && statsRes.data?.codes) {
           const myCodes = statsRes.data.codes.filter(
             codeObj => codeObj.creator === uid || (codeObj.members || []).includes(uid)
@@ -600,7 +600,7 @@ function openDialog(c) {
                 ? teamInfo.joinedMemberCount
                 : (teamInfo.code === codeObj.code ? teamInfo.memberCount : 0);
               const remaining = DEFAULT_CAPACITY - (kugouMemberCount - 1);
-              await poolSyncThrottled(codeObj.code, members, Math.max(0, remaining));
+              await poolSyncThrottled(periodId, codeObj.code, members, Math.max(0, remaining));
             }
           }
         }
@@ -697,9 +697,9 @@ function openDialog(c) {
               const uid = await getUid(c);
               if (autoTeam.value && teamInfo.joinedCode) {
                 const remaining = DEFAULT_CAPACITY - (teamInfo.joinedMemberCount - 1);
-                await poolRegister(c, teamInfo.joinedCode, "unknown", [uid], remaining);
+                await poolRegister(c, periodId, teamInfo.joinedCode, "unknown", [uid], remaining);
               } else if (!autoTeam.value && teamInfo.code) {
-                await poolRegister(c, teamInfo.code, uid, [], DEFAULT_CAPACITY);
+                await poolRegister(c, periodId, teamInfo.code, uid, [], DEFAULT_CAPACITY);
               }
             }
           }
