@@ -2,7 +2,7 @@
   "id": "auto-team-vip",
   "name": "自动组队领VIP",
   "version": "1.0.6",
-  "description": "自动参加概念版官方活动“组队瓜分酷狗概念版畅听VIP”并自动组队，活动详情请自行查看官方说明。",
+  "description": "自动参加概念版官方活动“组队瓜分酷狗概念版畅听VIP”并组队，插件入口在软件顶部⭐。",
   "author": "Oneday5799",
   "icon": "icon.svg",
   "main": "index.js",
