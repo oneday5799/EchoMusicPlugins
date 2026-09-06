@@ -418,7 +418,7 @@ async function runOncePool(c, baseResult) {
           if (uiState) uiState.lastMessage = "加入队伍未成功（" + kind + "）";
         }
       } else {
-        if (uiState) uiState.lastMessage = "码池暂无可加入的队伍，可手动加入或等待下轮";
+        if (uiState) uiState.lastMessage = "暂无可加入的队伍，可手动组队或耐心等待";
       }
     }
   }
@@ -659,7 +659,11 @@ function openDialog(c) {
         autoTeam.value = Boolean(val);
         await updateSettings(c, { autoEnabled: autoTeam.value });
         if (autoTeam.value) {
-          c.toast.info("已开启自动组队，正在执行...");
+          if (!settings.poolUrl) {
+            c.toast.warning("自动组队需填写码池地址~~~");
+            return;
+          }
+          c.toast.info("已开启自动组队，正在执行~~~");
           await runOnce(c, {});
         } else {
           c.toast.info("已关闭自动组队");
