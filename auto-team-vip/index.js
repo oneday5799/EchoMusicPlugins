@@ -395,8 +395,6 @@ async function runOncePool(c, baseResult) {
       } else {
         if (uiState) uiState.lastMessage = "码池暂无可加入的队伍，可手动加入或等待下轮";
       }
-    } else {
-      if (uiState) uiState.lastMessage = "未配置码池地址，请到插件设置页填写，或者手动组队";
     }
   }
 
@@ -758,7 +756,7 @@ function openDialog(c) {
               "onUpdate:modelValue": toggleAuto,
             }),
           ]),
-          h("div", { style: "display: flex; gap: 8px; align-items: center;" }, [
+          autoTeam.value ? h("div", { style: "display: flex; gap: 8px; align-items: center;" }, [
             h("span", { style: "font-size: 13px; opacity: 0.7; flex-shrink: 0;" }, "填写码池地址："),
             h("input", {
               value: poolUrlDraft.value,
@@ -767,7 +765,7 @@ function openDialog(c) {
               style: "flex: 1; min-width: 0; height: 32px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--border-subtle, rgba(255,255,255,0.12)); background: var(--control-muted-bg, rgba(255,255,255,0.06)); color: var(--color-text-main); font-size: 13px; outline: none;",
             }),
             h(Button, { size: "xs", variant: "outline", onClick: savePoolUrl, style: "white-space: nowrap; flex-shrink: 0;" }, { default: () => "保存" }),
-          ]),
+          ]) : null,
           h("div", { style: "display: flex; gap: 8px; align-items: center;" }, [
             h("span", { style: "font-size: 13px; opacity: 0.7; flex-shrink: 0;" }, "我加入的队伍："),
             h("input", {
