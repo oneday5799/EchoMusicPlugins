@@ -3,7 +3,7 @@
 自动参加酷狗概念版官方活动「组队瓜分酷狗概念版畅听VIP」并自动组队（3 人成团：队长 + 2 队员）。
 
 - 插件名：自动组队领VIP
-- 版本：1.0.2
+- 版本：1.0.5
 - 作者：Oneday5799
 - 依赖：EchoMusic `>=2.3.0`（需已内置 `server/module/team_*.js` 组队接口）
 
@@ -32,10 +32,10 @@
 
 1. **获取活动信息**：调用 `GET /team/period/info` 获取当前期次
 2. **获取/创建队伍**：调用 `GET /team/my/info`，如无队伍则自动创建
-3. **注册码池**：将自己创建的队伍码（type=created）和加入的队伍码（type=joined）上传到 Worker
+3. **注册码池**：将自己创建的队伍码（creator=己方uid）和加入的队伍码（creator="unknown"）上传到 Worker
 4. **分配加入**：调用 `POST /pool/join` 获取一个可加入的队伍码
 5. **加入队伍**：调用 `POST /team/join` 加入获取到的队伍
-6. **上报结果**：加入成功上报 `joined`，失败上报 `invalid`
+6. **上报结果**：加入成功上报 `joined`，失败上报 `failed`
 
 关闭开关后，插件仅执行步骤 1-2（获取活动信息和创建队伍），不参与码池分配。
 
@@ -52,7 +52,7 @@
 
 ## 码池部署
 
-见 [`cloudflare/team-pool-worker/`](../cloudflare/team-pool-worker/)。
+见 [`team-pool-worker/`](../team-pool-worker/)。
 
 - 部署后得到 Worker 地址（如 `https://echo-team-pool.xxxx.workers.dev`）。
 - 在插件设置中填入该地址即可。
@@ -63,7 +63,7 @@
 - 缺失版本头 → 返回 403 `version_missing`
 - 低于最低版本 → 返回 403 `version_mismatch`，提示更新
 
-**最低兼容版本：1.0.1**
+**最低兼容版本：1.0.3**
 
 升级 Worker 时只需修改 `worker.js` 顶部的 `MIN_CLIENT_VERSION` 常量（同步修改客户端 `manifest.json` 的 `version`）。
 
@@ -73,7 +73,7 @@ Worker 对每个 uid 限速 **1 req/second**（仅 join/result 接口），防�
 
 ## 防御性修复
 
-服务端 `register` 接口具备防御性逻辑：当用户注册 `type=joined` 时，若其 uid 不在 `joined[]` 数组中，会自动添加。这确保手动加入的队伍码能被其他用户正确识别为"有空间"。
+服务端 `register` 接口具备防御性逻辑：当用户注册已存在的码时，会将新 uid 合并到 `members` JSON 数组中（自动去重），同时更新 `remaining` 计数。这确保手动加入的队伍码能被其他用户正确识别为"有空间"。
 
 ## 免责声明
 
