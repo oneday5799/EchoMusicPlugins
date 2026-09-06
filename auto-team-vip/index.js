@@ -659,7 +659,7 @@ function openDialog(c) {
         autoTeam.value = Boolean(val);
         await updateSettings(c, { autoEnabled: autoTeam.value });
         if (autoTeam.value) {
-          if (!settings.poolUrl) {
+          if (!poolUrlDraft.value) {
             c.toast.warning("自动组队需填写码池地址~~~");
             return;
           }
