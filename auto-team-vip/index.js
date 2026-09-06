@@ -633,12 +633,26 @@ function openDialog(c) {
       const Switch = defineAsyncComponent(c.ui.components.Switch);
       const manualCode = ref("");
       const autoTeam = ref(false);
+      const poolUrlDraft = ref("");
 
       c.storage.get("settings").then((saved) => {
         if (saved && typeof saved === "object") {
           autoTeam.value = pick(saved, ["autoEnabled"], false) !== false;
+          poolUrlDraft.value = String(pick(saved, ["poolUrl"], ""));
         }
       });
+
+      const savePoolUrl = async () => {
+        const url = String(poolUrlDraft.value || "").trim().replace(/\/+$/, "");
+        if (url && !/^https?:\/\//.test(url)) {
+          c.toast.warning("地址必须以 http:// 或 https:// 开头");
+          return;
+        }
+        const prev = await c.storage.get("settings");
+        const base = prev && typeof prev === "object" ? prev : {};
+        await c.storage.set("settings", { ...base, poolUrl: url });
+        c.toast.success("码池地址已保存");
+      };
 
       const toggleAuto = async (val) => {
         console.log("[auto-team-vip] toggleAuto called with:", val);
@@ -745,6 +759,16 @@ function openDialog(c) {
             }),
           ]),
           h("div", { style: "display: flex; gap: 8px; align-items: center;" }, [
+            h("span", { style: "font-size: 13px; opacity: 0.7; flex-shrink: 0;" }, "填写码池地址："),
+            h("input", {
+              value: poolUrlDraft.value,
+              placeholder: "码池地址请加echomusic群获取",
+              onInput: (e) => { poolUrlDraft.value = e.target.value; },
+              style: "flex: 1; min-width: 0; height: 32px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--border-subtle, rgba(255,255,255,0.12)); background: var(--control-muted-bg, rgba(255,255,255,0.06)); color: var(--color-text-main); font-size: 13px; outline: none;",
+            }),
+            h(Button, { size: "xs", variant: "outline", onClick: savePoolUrl, style: "white-space: nowrap; flex-shrink: 0;" }, { default: () => "保存" }),
+          ]),
+          h("div", { style: "display: flex; gap: 8px; align-items: center;" }, [
             h("span", { style: "font-size: 13px; opacity: 0.7; flex-shrink: 0;" }, "我加入的队伍："),
             h("input", {
               value: uiState?.joinedCode || manualCode.value,
@@ -813,51 +837,6 @@ function closeDialog() {
   }
 }
 
-// --- Settings panel (settings page) ---
-
-function createSettingsComponent(c) {
-  return c.vue.defineComponent({
-    setup() {
-      const { h, reactive, defineAsyncComponent } = c.vue;
-      const Button = defineAsyncComponent(c.ui.components.Button);
-      const Input = defineAsyncComponent(c.ui.components.Input);
-
-      const draft = reactive({ poolUrl: "" });
-      c.storage.get("settings").then((saved) => {
-        if (saved && typeof saved === "object") {
-          draft.poolUrl = String(pick(saved, ["poolUrl"], ""));
-        }
-      });
-
-      const save = async () => {
-        const url = String(draft.poolUrl || "").trim().replace(/\/+$/, "");
-        if (url && !/^https?:\/\//.test(url)) {
-          c.toast.warning("地址必须以 http:// 或 https:// 开头");
-          return;
-        }
-        const prev = await c.storage.get("settings");
-        const base = prev && typeof prev === "object" ? prev : {};
-        await c.storage.set("settings", {
-          ...base,
-          poolUrl: url,
-        });
-        c.toast.success("设置已保存");
-      };
-
-      return () =>
-        h("div", { style: "display: grid; gap: 12px;" }, [
-          h("p", { style: "font-size:12px;opacity:0.6;margin:0 0 4px;" }, "顶栏五角星按钮为快捷入口，点击弹出组队面板。3人成团（队长+2队员）。"),
-          h(Input, {
-            modelValue: draft.poolUrl,
-            placeholder: "码池 Worker 地址，如 https://xxx.workers.dev",
-            "onUpdate:modelValue": (v) => { draft.poolUrl = String(v ?? ""); },
-          }),
-          h(Button, { size: "xs", onClick: save }, { default: () => "保存" }),
-        ]);
-    },
-  });
-}
-
 // --- activate / deactivate ---
 
 export async function activate(_ctx) {
@@ -880,12 +859,6 @@ export async function activate(_ctx) {
     joinedMemberCount: 0,
     joinedVipDesc: "",
     joinState: "",
-  });
-
-  _ctx.ui.settings.define({
-    title: "自动组队领VIP",
-    description: "酷狗概念版组队瓜分畅听VIP活动自动化。顶栏五角星按钮为快捷入口。",
-    component: createSettingsComponent(_ctx),
   });
 
   startTopButton(_ctx);
