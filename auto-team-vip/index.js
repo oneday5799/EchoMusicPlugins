@@ -1,18 +1,17 @@
 const DEFAULT_CAPACITY = 2;
+const SYNC_THROTTLE_MS = 5000;
+const MAX_SYNC_CODES = 5;
+const INPUT_STYLE = "flex: 1; min-width: 0; height: 32px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--border-subtle, rgba(255,255,255,0.12)); background: var(--control-muted-bg, rgba(255,255,255,0.06)); color: var(--color-text-main); font-size: 13px; outline: none;";
 let PLUGIN_VERSION = "0.0.0";
 
 const _DEBUG = false;
 function dlog(...args) {
   if (_DEBUG) console.log("[auto-team-vip]", ...args);
 }
-function dwarn(...args) {
-  if (_DEBUG) console.warn("[auto-team-vip]", ...args);
-}
 
 let autoTimer = null;
 let runLock = false;
 let uiState = null;
-let ctx = null;
 let versionMismatchReported = false;
 
 // --- top bar button ---
@@ -21,7 +20,6 @@ let topBtnStyle = null;
 let topBtnCheckLoop = null;
 let topDialogEl = null;
 let topDialogApp = null;
-let topDialogStyle = null;
 
 function pick(obj, keys, fallback) {
   if (!obj || typeof obj !== "object") return fallback;
@@ -32,12 +30,34 @@ function pick(obj, keys, fallback) {
   return fallback;
 }
 
-function asBool(value) {
-  if (value === undefined || value === null) return false;
-  if (typeof value === "boolean") return value;
-  if (typeof value === "number") return value !== 0;
-  const s = String(value).trim().toLowerCase();
-  return s !== "" && s !== "0" && s !== "false" && s !== "no" && s !== "off";
+function calcRemaining(memberCount) {
+  return Math.min(DEFAULT_CAPACITY, Math.max(0, DEFAULT_CAPACITY - (memberCount - 1)));
+}
+
+function applyTeamInfoToState(myTeam) {
+  if (!uiState || !myTeam.ok) return;
+  uiState.myCode = myTeam.code;
+  uiState.myMemberCount = myTeam.memberCount;
+  uiState.myVipDesc = myTeam.vipDesc;
+  uiState.joinedCode = myTeam.joinedCode;
+  uiState.joinedMemberCount = myTeam.joinedMemberCount;
+  uiState.joinedVipDesc = myTeam.joinedVipDesc;
+  uiState.joined = Boolean(myTeam.joinedCode);
+}
+
+async function updateSettings(c, patch) {
+  const prev = await c.storage.get("settings");
+  const base = prev && typeof prev === "object" ? prev : {};
+  await c.storage.set("settings", { ...base, ...patch });
+}
+
+async function copyToClipboard(c, text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    c.toast.success("组队码已复制");
+  } catch {
+    c.toast.warning("复制失败");
+  }
 }
 
 function readAuth(c) {
@@ -356,12 +376,12 @@ async function runOncePool(c, baseResult) {
 
   if (myCode) {
     const mc = myTeam.ok && myTeam.code === myCode ? myTeam.memberCount : 1;
-    const remaining = Math.min(DEFAULT_CAPACITY, Math.max(0, DEFAULT_CAPACITY - (mc - 1)));
+    const remaining = calcRemaining(mc);
     await poolRegister(c, periodId, myCode, uid, [], remaining);
   }
 
   if (myTeam.ok && myTeam.joinedCode) {
-    const remaining = Math.min(DEFAULT_CAPACITY, Math.max(0, DEFAULT_CAPACITY - (myTeam.joinedMemberCount - 1)));
+    const remaining = calcRemaining(myTeam.joinedMemberCount);
     await poolRegister(c, periodId, myTeam.joinedCode, "unknown", [uid], remaining);
   }
 
@@ -379,7 +399,7 @@ async function runOncePool(c, baseResult) {
           joined = true;
           myTeam = await getMyTeamInfo(c, periodId);
           if (myTeam.ok && myTeam.joinedCode) {
-            const remaining = Math.min(DEFAULT_CAPACITY, Math.max(0, DEFAULT_CAPACITY - (myTeam.joinedMemberCount - 1)));
+            const remaining = calcRemaining(myTeam.joinedMemberCount);
             await poolRegister(c, periodId, myTeam.joinedCode, "unknown", [uid], remaining);
           }
         } else {
@@ -399,13 +419,7 @@ async function runOncePool(c, baseResult) {
   }
 
   if (myTeam.ok && uiState) {
-    uiState.myCode = myTeam.code;
-    uiState.myMemberCount = myTeam.memberCount;
-    uiState.myVipDesc = myTeam.vipDesc;
-    uiState.joinedCode = myTeam.joinedCode;
-    uiState.joinedMemberCount = myTeam.joinedMemberCount;
-    uiState.joinedVipDesc = myTeam.joinedVipDesc;
-    uiState.joined = Boolean(myTeam.joinedCode);
+    applyTeamInfoToState(myTeam);
   }
 
   await c.storage.set("lastPeriod", { periodId, myCode, joined, updatedAt: Date.now() });
@@ -564,11 +578,8 @@ function openDialog(c) {
 
   const { createApp, h, ref, reactive, onMounted, defineComponent, defineAsyncComponent } = c.vue;
   const Button = defineAsyncComponent(c.ui.components.Button);
-  const Input = defineAsyncComponent(c.ui.components.Input);
 
   const refreshing = c.vue.ref(false);
-  const SYNC_THROTTLE_MS = 5000;
-  const MAX_SYNC_CODES = 5;
   const lastSyncTime = {};
 
   const poolSyncThrottled = async (periodId, code, members, remaining) => {
@@ -585,12 +596,12 @@ function openDialog(c) {
       const periodId = uiState?.periodId;
       if (periodId) {
         const uid = await getUid(c);
+        const teamInfo = await getMyTeamInfo(c, periodId);
         const statsRes = await poolStats(c, periodId);
         if (statsRes.ok && statsRes.data?.codes) {
           const myCodes = statsRes.data.codes.filter(
             codeObj => codeObj.creator === uid || (codeObj.members || []).includes(uid)
           ).slice(0, MAX_SYNC_CODES);
-          const teamInfo = await getMyTeamInfo(c, periodId);
           if (teamInfo.ok) {
             for (const codeObj of myCodes) {
               const members = [];
@@ -599,22 +610,15 @@ function openDialog(c) {
               const kugouMemberCount = teamInfo.joinedCode === codeObj.code
                 ? teamInfo.joinedMemberCount
                 : (teamInfo.code === codeObj.code ? teamInfo.memberCount : 0);
-              const remaining = Math.min(DEFAULT_CAPACITY, Math.max(0, DEFAULT_CAPACITY - (kugouMemberCount - 1)));
+              const remaining = calcRemaining(kugouMemberCount);
               await poolSyncThrottled(periodId, codeObj.code, members, remaining);
             }
           }
         }
-        const myTeam = await getMyTeamInfo(c, periodId);
-        if (myTeam.ok && uiState) {
-          uiState.myCode = myTeam.code;
-          uiState.myMemberCount = myTeam.memberCount;
-          uiState.myVipDesc = myTeam.vipDesc;
-          uiState.joinedCode = myTeam.joinedCode;
-          uiState.joinedMemberCount = myTeam.joinedMemberCount;
-          uiState.joinedVipDesc = myTeam.joinedVipDesc;
-          uiState.joined = Boolean(myTeam.joinedCode);
+        if (teamInfo.ok && uiState) {
+          applyTeamInfoToState(teamInfo);
         }
-        if (!myTeam.ok || !myTeam.joinedCode) {
+        if (!teamInfo.ok || !teamInfo.joinedCode) {
           await runOnce(c, {});
         }
       }
@@ -646,18 +650,14 @@ function openDialog(c) {
           c.toast.warning("地址必须以 http:// 或 https:// 开头");
           return;
         }
-        const prev = await c.storage.get("settings");
-        const base = prev && typeof prev === "object" ? prev : {};
-        await c.storage.set("settings", { ...base, poolUrl: url });
+        await updateSettings(c, { poolUrl: url });
         c.toast.success("码池地址已保存");
       };
 
       const toggleAuto = async (val) => {
         console.log("[auto-team-vip] toggleAuto called with:", val);
         autoTeam.value = Boolean(val);
-        const prev = await c.storage.get("settings");
-        const base = prev && typeof prev === "object" ? prev : {};
-        await c.storage.set("settings", { ...base, autoEnabled: autoTeam.value });
+        await updateSettings(c, { autoEnabled: autoTeam.value });
         if (autoTeam.value) {
           c.toast.info("已开启自动组队，正在执行...");
           await runOnce(c, {});
@@ -671,22 +671,12 @@ function openDialog(c) {
           c.toast.warning("暂无组队码，请先运行互助");
           return;
         }
-        try {
-          await navigator.clipboard.writeText(uiState.myCode);
-          c.toast.success("组队码已复制");
-        } catch {
-          c.toast.warning("复制失败");
-        }
+        await copyToClipboard(c, uiState.myCode);
       };
 
       const joinManual = async () => {
         if (uiState?.joinedCode) {
-          try {
-            await navigator.clipboard.writeText(uiState.joinedCode);
-            c.toast.success("组队码已复制");
-          } catch {
-            c.toast.warning("复制失败");
-          }
+          await copyToClipboard(c, uiState.joinedCode);
           return;
         }
         const code = String(manualCode.value || "").trim();
@@ -710,11 +700,11 @@ function openDialog(c) {
               uiState.joined = Boolean(teamInfo.joinedCode);
               const uid = await getUid(c);
               if (autoTeam.value && teamInfo.joinedCode) {
-                const remaining = Math.min(DEFAULT_CAPACITY, Math.max(0, DEFAULT_CAPACITY - (teamInfo.joinedMemberCount - 1)));
+                const remaining = calcRemaining(teamInfo.joinedMemberCount);
                 await poolRegister(c, periodId, teamInfo.joinedCode, "unknown", [uid], remaining);
               } else if (!autoTeam.value && teamInfo.code) {
                 const mc = teamInfo.memberCount || 1;
-                const remaining = Math.min(DEFAULT_CAPACITY, Math.max(0, DEFAULT_CAPACITY - (mc - 1)));
+                const remaining = calcRemaining(mc);
                 await poolRegister(c, periodId, teamInfo.code, uid, [], remaining);
               }
             }
@@ -762,7 +752,7 @@ function openDialog(c) {
               value: poolUrlDraft.value,
               placeholder: "码池地址请加echomusic群获取",
               onInput: (e) => { poolUrlDraft.value = e.target.value; },
-              style: "flex: 1; min-width: 0; height: 32px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--border-subtle, rgba(255,255,255,0.12)); background: var(--control-muted-bg, rgba(255,255,255,0.06)); color: var(--color-text-main); font-size: 13px; outline: none;",
+              style: INPUT_STYLE,
             }),
             h(Button, { size: "xs", variant: "outline", onClick: savePoolUrl, style: "white-space: nowrap; flex-shrink: 0;" }, { default: () => "保存" }),
           ]) : null,
@@ -773,7 +763,7 @@ function openDialog(c) {
               readonly: Boolean(uiState?.joinedCode),
               placeholder: uiState?.joinedCode ? "" : "输入对方组队码",
               onInput: (e) => { manualCode.value = e.target.value; },
-              style: "flex: 1; min-width: 0; height: 32px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--border-subtle, rgba(255,255,255,0.12)); background: var(--control-muted-bg, rgba(255,255,255,0.06)); color: var(--color-text-main); font-size: 13px; outline: none;",
+              style: INPUT_STYLE,
             }),
             h(Button, { size: "xs", variant: "outline", onClick: joinManual, style: "white-space: nowrap; flex-shrink: 0;" }, { default: () => uiState?.joinedCode ? "复制" : "加入" }),
           ]),
@@ -782,7 +772,7 @@ function openDialog(c) {
             h("input", {
               value: uiState?.myCode || "",
               readonly: true,
-              style: "flex: 1; min-width: 0; height: 32px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--border-subtle, rgba(255,255,255,0.12)); background: var(--control-muted-bg, rgba(255,255,255,0.06)); color: var(--color-text-main); font-size: 13px; outline: none;",
+              style: INPUT_STYLE,
             }),
             h(Button, { size: "xs", variant: "outline", onClick: copyCode, style: "white-space: nowrap; flex-shrink: 0;" }, { default: () => "复制" }),
           ]),
@@ -838,7 +828,6 @@ function closeDialog() {
 // --- activate / deactivate ---
 
 export async function activate(_ctx) {
-  ctx = _ctx;
   PLUGIN_VERSION = _ctx.manifest.version || "0.0.0";
 
   uiState = _ctx.vue.reactive({
@@ -856,7 +845,6 @@ export async function activate(_ctx) {
     joinedCode: "",
     joinedMemberCount: 0,
     joinedVipDesc: "",
-    joinState: "",
   });
 
   startTopButton(_ctx);
@@ -874,7 +862,6 @@ export async function activate(_ctx) {
     clearAuto();
     stopTopButton();
     uiState = null;
-    ctx = null;
   });
 }
 
@@ -882,5 +869,4 @@ export async function deactivate() {
   clearAuto();
   stopTopButton();
   uiState = null;
-  ctx = null;
 }
