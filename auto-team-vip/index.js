@@ -1,4 +1,4 @@
-const DEFAULT_CAPACITY = 2;
+const DEFAULT_CAPACITY = 2; // 3人组队：队长 + 2队员
 const SYNC_THROTTLE_MS = 5000;
 const MAX_SYNC_CODES = 5;
 const INPUT_STYLE = "flex: 1; min-width: 0; height: 32px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--border-subtle, rgba(255,255,255,0.12)); background: var(--control-muted-bg, rgba(255,255,255,0.06)); color: var(--color-text-main); font-size: 13px; outline: none;";
@@ -16,7 +16,6 @@ let versionMismatchReported = false;
 
 // --- top bar button ---
 let topBtn = null;
-let topBtnStyle = null;
 let topBtnCheckLoop = null;
 let topDialogEl = null;
 let topDialogApp = null;
@@ -174,6 +173,15 @@ function classifyJoinError(body) {
   if (msg.includes("满") || msg.includes("full")) return "full";
   if (msg.includes("已加入") || msg.includes("joined")) return "already_joined";
   return "invalid";
+}
+
+function parseJoinResponse(r) {
+  const bodyStatus = Number(pick(r.body, ["status"], 1));
+  const errorCode = Number(pick(r.body, ["error_code", "errcode"], 0));
+  const errorMsg = String(pick(r.body, ["error_msg", "msg", "message"], ""));
+  const httpOk = r.ok && Number(r.status) < 400;
+  const bizOk = bodyStatus === 1 && errorCode === 0;
+  return { httpOk, bizOk, errorCode, errorMsg };
 }
 
 async function getUid(c) {
@@ -391,10 +399,7 @@ async function runOncePool(c, baseResult) {
       if (pickRes.ok && pickRes.data?.code) {
         const code = pickRes.data.code;
         const r = await joinTeam(c, code);
-        const bodyStatus = Number(pick(r.body, ["status"], 1));
-        const errorCode = Number(pick(r.body, ["error_code", "errcode"], 0));
-        const httpOk = r.ok && Number(r.status) < 400;
-        const bizOk = bodyStatus === 1 && errorCode === 0;
+        const { httpOk, bizOk } = parseJoinResponse(r);
         if (httpOk && bizOk) {
           joined = true;
           myTeam = await getMyTeamInfo(c, periodId);
@@ -529,7 +534,6 @@ function startTopButton(c) {
     s.id = "atv-top-btn-style";
     s.textContent = TOP_BTN_CSS;
     document.head.appendChild(s);
-    topBtnStyle = s;
   }
 
   topBtnCheckLoop = setInterval(() => {
@@ -560,10 +564,6 @@ function stopTopButton() {
   if (topBtn) {
     topBtn.remove();
     topBtn = null;
-  }
-  if (topBtnStyle) {
-    topBtnStyle.remove();
-    topBtnStyle = null;
   }
   const s = document.getElementById("atv-top-btn-style");
   if (s) s.remove();
@@ -682,11 +682,7 @@ function openDialog(c) {
         const code = String(manualCode.value || "").trim();
         if (!code) return;
         const r = await joinTeam(c, code);
-        const bodyStatus = Number(pick(r.body, ["status"], 1));
-        const errorCode = Number(pick(r.body, ["error_code", "errcode"], 0));
-        const errorMsg = String(pick(r.body, ["error_msg", "msg", "message"], ""));
-        const httpOk = r.ok && Number(r.status) < 400;
-        const bizOk = bodyStatus === 1 && errorCode === 0;
+        const { httpOk, bizOk, errorMsg } = parseJoinResponse(r);
         if (httpOk && bizOk) {
           c.toast.success("已提交加入");
           manualCode.value = "";
@@ -694,10 +690,7 @@ function openDialog(c) {
           if (periodId) {
             const teamInfo = await getMyTeamInfo(c, periodId);
             if (teamInfo.ok && uiState) {
-              uiState.joinedCode = teamInfo.joinedCode;
-              uiState.joinedMemberCount = teamInfo.joinedMemberCount;
-              uiState.joinedVipDesc = teamInfo.joinedVipDesc;
-              uiState.joined = Boolean(teamInfo.joinedCode);
+              applyTeamInfoToState(teamInfo);
               const uid = await getUid(c);
               if (autoTeam.value && teamInfo.joinedCode) {
                 const remaining = calcRemaining(teamInfo.joinedMemberCount);
