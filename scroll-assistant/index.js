@@ -52,6 +52,12 @@ const STYLE = `
   --echo-scroll-assistant-hover-y: -1px;
 }
 
+/* A page-owned button must not show through a transparent lyric overlay,
+   including its enter/leave animation. */
+body:has(.lyric-page) .echo-scroll-assistant-button {
+  display: none;
+}
+
 .echo-scroll-assistant-button:active {
   --echo-scroll-assistant-active-scale: 0.96;
 }
@@ -176,7 +182,12 @@ const saveSettings = () => {
 };
 
 const isVisibleElement = (element) => {
-  if (!element) return false;
+  if (!element || !document.contains(element)) return false;
+  if (
+    element.checkVisibility &&
+    !element.checkVisibility({ checkVisibilityCSS: true, checkOpacity: true })
+  )
+    return false;
   const rect = element.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) return false;
   const style = window.getComputedStyle(element);
@@ -229,23 +240,24 @@ const shouldHandleBackToTopMutation = (mutation) => {
   if (mutation.type === "attributes") {
     return isBackToTopNode(mutation.target);
   }
-  return [...mutation.addedNodes, ...mutation.removedNodes].some(isBackToTopNode);
+  return [...mutation.addedNodes, ...mutation.removedNodes].some(
+    isBackToTopNode,
+  );
 };
 
 const isUsableContainer = (ctx, element) => {
-  if (!element || !document.contains(element)) return false;
-  const rect = element.getBoundingClientRect();
-  if (rect.width <= 0 || rect.height <= 0) return false;
+  if (!isVisibleElement(element)) return false;
   return ctx.scroll.getState(element).canScroll;
 };
 
 const pickContainer = (ctx) => {
+  if (
+    ctx.stores.player.isLyricViewOpen ||
+    document.querySelector(".lyric-page")
+  )
+    return null;
   const containers = ctx.scroll.queryContainers({ visible: true });
-  return (
-    containers.find((element) => isUsableContainer(ctx, element)) ||
-    containers[0] ||
-    null
-  );
+  return containers.find((element) => isUsableContainer(ctx, element)) || null;
 };
 
 const createFloatingButton = (ctx) => {
@@ -257,6 +269,8 @@ const createFloatingButton = (ctx) => {
     onMounted,
     ref,
     resolveComponent,
+    nextTick,
+    watch,
   } = ctx.vue;
 
   return defineComponent({
@@ -282,12 +296,19 @@ const createFloatingButton = (ctx) => {
       let unwatchRoute = null;
       let unwatchContainers = null;
       let backToTopObserver = null;
+      let unwatchLyric = null;
+      let stopped = false;
+
+      const setContainer = (target) => {
+        if (target === container.value) return;
+        container.value?.removeEventListener("scroll", scheduleUpdate);
+        container.value = target;
+        target?.addEventListener("scroll", scheduleUpdate, { passive: true });
+      };
 
       const updateMetrics = () => {
-        const target = container.value;
-        if (!target || !isUsableContainer(ctx, target)) {
-          container.value = pickContainer(ctx);
-        }
+        if (stopped) return;
+        setContainer(pickContainer(ctx));
 
         if (!container.value) {
           metrics.value = {
@@ -311,6 +332,7 @@ const createFloatingButton = (ctx) => {
       };
 
       const scheduleUpdate = () => {
+        if (stopped) return;
         if (frame) window.cancelAnimationFrame(frame);
         frame = window.requestAnimationFrame(() => {
           frame = 0;
@@ -319,17 +341,20 @@ const createFloatingButton = (ctx) => {
       };
 
       const bindContainer = () => {
-        container.value?.removeEventListener("scroll", scheduleUpdate);
-        container.value = pickContainer(ctx);
-        container.value?.addEventListener("scroll", scheduleUpdate, {
-          passive: true,
-        });
-        scheduleUpdate();
+        setContainer(null);
+        metrics.value = {
+          ...metrics.value,
+          canScroll: false,
+          distanceToBottom: 0,
+        };
+        // Wait for Vue to replace/reactivate the route DOM, not a fixed timeout.
+        void nextTick(scheduleUpdate);
       };
 
       const visible = computed(
         () =>
           state.settings.enabled &&
+          !ctx.stores.player.isLyricViewOpen &&
           metrics.value.canScroll &&
           metrics.value.distanceToBottom > state.settings.bottomThreshold,
       );
@@ -359,20 +384,43 @@ const createFloatingButton = (ctx) => {
       });
 
       const scrollToBottom = () => {
+        updateMetrics();
+        if (!container.value) return;
         ctx.scroll.scrollToBottom(container.value, { behavior: "auto" });
       };
 
       onMounted(() => {
         bindContainer();
         window.addEventListener("resize", scheduleUpdate);
-        unwatchRoute = ctx.router.afterEach(() => {
-          window.setTimeout(bindContainer, 80);
-        });
-        unwatchContainers = ctx.scroll.observeContainers(() => {
-          window.setTimeout(bindContainer, 80);
-        });
+        unwatchRoute = ctx.router.afterEach(bindContainer);
+        unwatchContainers = ctx.scroll.observeContainers(bindContainer);
+        unwatchLyric = watch(
+          () => ctx.stores.player.isLyricViewOpen,
+          bindContainer,
+          { flush: "sync" },
+        );
         backToTopObserver = new MutationObserver((mutations) => {
-          if (mutations.some(shouldHandleBackToTopMutation)) scheduleUpdate();
+          if (
+            mutations.some(
+              (mutation) =>
+                shouldHandleBackToTopMutation(mutation) ||
+                [
+                  ...mutation.addedNodes,
+                  ...mutation.removedNodes,
+                  mutation.target,
+                ].some(
+                  (node) =>
+                    node instanceof Element &&
+                    (node.matches(
+                      ".lyric-page, [data-echo-scroll-container]",
+                    ) ||
+                      node.querySelector(
+                        ".lyric-page, [data-echo-scroll-container]",
+                      )),
+                ),
+            )
+          )
+            scheduleUpdate();
         });
         backToTopObserver.observe(document.body, {
           childList: true,
@@ -383,18 +431,24 @@ const createFloatingButton = (ctx) => {
       });
 
       onBeforeUnmount(() => {
+        stopped = true;
         if (frame) window.cancelAnimationFrame(frame);
         container.value?.removeEventListener("scroll", scheduleUpdate);
         window.removeEventListener("resize", scheduleUpdate);
         unwatchRoute?.();
         unwatchContainers?.();
+        unwatchLyric?.();
         backToTopObserver?.disconnect();
       });
 
       return () =>
         h(
           ctx.vue.Transition,
-          { name: "echo-scroll-assistant-fade" },
+          {
+            name: "echo-scroll-assistant-fade",
+            // A route switch must discard the outgoing button, not fade it over the next page.
+            key: ctx.router.currentRoute?.value?.fullPath,
+          },
           {
             default: () =>
               visible.value
