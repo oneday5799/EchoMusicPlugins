@@ -198,7 +198,7 @@ test("plugin package exposes the fog mode as a feature release", async () => {
     "utf8",
   );
 
-  assert.equal(manifest.version, "1.1.0");
+  assert.equal(manifest.version, "1.2.0");
   assert.match(manifest.description, /雾状/);
   assert.match(readme, /雾化柔度/);
   assert.match(readme, /中心频谱/);
@@ -209,4 +209,319 @@ test("plugin package exposes the fog mode as a feature release", async () => {
   assert.doesNotMatch(source, /echo-spectrum-mist-note/);
   assert.equal(typeof plugin.activate, "function");
   assert.equal(typeof plugin.deactivate, "function");
+});
+
+test("HDR is opt-in across all enabled positions and modes", () => {
+  assert.equal(plugin.normalizeSettings({}).hdrHighlights, false);
+  assert.equal(
+    plugin.normalizeSettings({ hdrIntensity: 900 }).hdrIntensity,
+    100,
+  );
+  assert.equal(plugin.normalizeSettings({ hdrIntensity: -1 }).hdrIntensity, 0);
+  const settings = plugin.normalizeSettings({
+    mode: "centered",
+    hdrHighlights: true,
+  });
+  assert.equal(plugin.shouldUseHdrLayer("lyric", settings), true);
+  for (const kind of ["playerbar", "mini", "lyric"]) {
+    for (const mode of ["bars", "wave", "hybrid", "mist", "centered"]) {
+      assert.equal(
+        plugin.shouldUseHdrLayer(kind, {
+          ...settings,
+          mode,
+          showPlayerBar: true,
+          showMiniPlayer: true,
+        }),
+        true,
+      );
+    }
+  }
+  assert.equal(plugin.shouldUseHdrLayer("mini", settings), false);
+  assert.equal(plugin.shouldUseHdrLayer("playerbar", settings), false);
+  for (const patch of [
+    { enabled: false },
+    { showLyricControls: false },
+    { hdrHighlights: false },
+    { hdrIntensity: 0 },
+  ]) {
+    assert.equal(
+      plugin.shouldUseHdrLayer("lyric", { ...settings, ...patch }),
+      false,
+    );
+  }
+});
+
+test("HDR peak smoothing ignores quiet bins and remains stable across frame rates", () => {
+  assert.deepEqual(plugin.updateHdrLevels(null, [0, 0.1, 0.35]), [0, 0, 0]);
+  const a = plugin.updateHdrLevels(null, [1], 100);
+  const b = plugin.updateHdrLevels(
+    plugin.updateHdrLevels(null, [1], 50),
+    [1],
+    50,
+  );
+  assert.ok(Math.abs(a[0] - b[0]) < 1e-8);
+  const falling = plugin.updateHdrLevels(a, [0], 100)[0];
+  assert.ok(falling > 0 && falling < a[0]);
+});
+
+const hdrSettings = plugin.normalizeSettings({
+  mode: "centered",
+  hdrHighlights: true,
+});
+const entryForHdr = () => ({
+  kind: "lyric",
+  layer: { isConnected: true, dataset: {}, appendChild() {} },
+});
+const deferred = () => {
+  let resolve;
+  const promise = new Promise((r) => (resolve = r));
+  return { promise, resolve };
+};
+
+function mockSurface(pipelinePromise) {
+  let status = { status: "ready", dynamicRange: "hdr" };
+  let listener;
+  const buffers = [];
+  const surface = {
+    canvas: {},
+    disposed: 0,
+    unsubscribed: 0,
+    device: {
+      createShaderModule: () => ({}),
+      createRenderPipelineAsync: () =>
+        pipelinePromise || Promise.resolve({ getBindGroupLayout: () => ({}) }),
+      createBuffer: () => {
+        const buffer = {
+          destroyed: 0,
+          destroy() {
+            this.destroyed++;
+          },
+        };
+        buffers.push(buffer);
+        return buffer;
+      },
+      createBindGroup: () => ({}),
+    },
+    getState: () => status,
+    onStateChanged(cb) {
+      listener = cb;
+      cb(status);
+      return () => surface.unsubscribed++;
+    },
+    change(next) {
+      status = next;
+      listener?.(next);
+    },
+    dispose() {
+      this.disposed++;
+    },
+    buffers,
+  };
+  return surface;
+}
+
+test("late HDR initialization cannot resurrect a disabled or removed layer", async () => {
+  for (const duringPipeline of [false, true]) {
+    const pending = deferred();
+    const entry = entryForHdr();
+    const surface = mockSurface(duringPipeline ? pending.promise : undefined);
+    const task = plugin.syncHdrLayer(
+      entry,
+      hdrSettings,
+      {
+        createCanvas: () =>
+          duringPipeline ? Promise.resolve(surface) : pending.promise,
+      },
+      () => {},
+    );
+    await Promise.resolve();
+    plugin.releaseHdrLayer(entry);
+    pending.resolve(duringPipeline ? {} : surface);
+    await task;
+    assert.equal(surface.disposed, 1);
+    assert.equal(entry.hdrSurface, null);
+    assert.equal(entry.layer.dataset.hdr, undefined);
+  }
+});
+
+test("HDR surface changes and device loss restore SDR and release resources", async () => {
+  const oldUsage = globalThis.GPUBufferUsage;
+  globalThis.GPUBufferUsage = { UNIFORM: 1, COPY_DST: 2, STORAGE: 4 };
+  try {
+    const entry = entryForHdr();
+    const surface = mockSurface();
+    await plugin.syncHdrLayer(
+      entry,
+      hdrSettings,
+      { createCanvas: async () => surface },
+      () => {},
+    );
+    assert.equal(entry.layer.dataset.hdr, "true");
+    surface.change({ status: "ready", dynamicRange: "sdr" });
+    assert.equal(entry.layer.dataset.hdr, undefined);
+    assert.equal(surface.canvas.hidden, true);
+    surface.change({ status: "lost", dynamicRange: "sdr" });
+    assert.equal(entry.hdrSurface, null);
+    assert.equal(entry.hdrUnavailable, true);
+    assert.equal(surface.disposed, 1);
+    assert.ok(surface.buffers.every((b) => b.destroyed === 1));
+    plugin.releaseHdrLayer(entry);
+    assert.equal(surface.disposed, 1);
+  } finally {
+    if (oldUsage === undefined) delete globalThis.GPUBufferUsage;
+    else globalThis.GPUBufferUsage = oldUsage;
+  }
+});
+
+test("idle audio clears previous highlights without rendering another GPU frame", () => {
+  const entry = entryForHdr();
+  entry.hdrSurface = mockSurface();
+  entry.hdrSurface.render = () => assert.fail("idle should not render");
+  entry.hdrFrame = { active: true };
+  entry.hdrLevels = [1];
+  plugin.drawHdrHighlights(
+    entry,
+    100,
+    80,
+    { state: "idle" },
+    hdrSettings,
+    ["white"],
+    100,
+  );
+  assert.equal(entry.hdrFrame.active, false);
+  assert.equal(entry.hdrSurface.canvas.hidden, true);
+  assert.equal(entry.hdrLevels, null);
+});
+
+test("HDR geometry follows SDR bar baselines at every position", () => {
+  for (const kind of ["lyric", "playerbar", "mini"]) {
+    const entry = { kind, centeredDisplay: [1, 0.5] };
+    const bottom = 80 - (kind === "lyric" ? 4 : 8);
+    const settings = plugin.normalizeSettings({ fill: 50 });
+    const bars = plugin.buildHdrGeometry(
+      entry,
+      100,
+      80,
+      { bins: [1, 0] },
+      settings,
+      0,
+    );
+    assert.equal(bars.ys[0], bottom - 40);
+    assert.equal(bars.ys[1], bottom - 2);
+    assert.equal(bars.mode, 0);
+    const centered = plugin.buildHdrGeometry(
+      entry,
+      100,
+      80,
+      {},
+      { ...settings, mode: "centered" },
+      0,
+    );
+    assert.equal(centered.ys[0], bottom - 40);
+    assert.equal(centered.ys[1], bottom - 20);
+    const hybrid = plugin.buildHdrGeometry(
+      entry,
+      100,
+      80,
+      { bins: [1, 0] },
+      { ...settings, mode: "hybrid" },
+      0,
+    );
+    assert.deepEqual(hybrid, bars);
+  }
+});
+
+test("wave highlighter follows waveform sign, amplitude and empty-data state", () => {
+  const settings = plugin.normalizeSettings({ mode: "wave", fill: 50 });
+  const geometry = plugin.buildHdrGeometry(
+    { kind: "lyric" },
+    100,
+    80,
+    { waveform: [0, 1, -1, 0] },
+    settings,
+    0,
+  );
+  assert.deepEqual(geometry.ys, [40, 50, 30, 40]);
+  assert.deepEqual(geometry.levels, [1, 1, 1]);
+  assert.equal(geometry.mode, 1);
+  assert.equal(
+    plugin.buildHdrGeometry({ kind: "mini" }, 100, 80, {}, settings, 0).count,
+    0,
+  );
+});
+
+test("fog highlighter has finite bounded geometry and tracks original drift", () => {
+  const settings = plugin.normalizeSettings({ mode: "mist" });
+  for (const kind of ["lyric", "playerbar", "mini"]) {
+    const build = (time) =>
+      plugin.buildHdrGeometry(
+        { kind },
+        600,
+        80,
+        { bins: [0.1, 0.8, 1, 0.6, 0.2], rms: 0.5 },
+        settings,
+        time,
+      );
+    const first = build(0),
+      later = build(1000);
+    assert.equal(first.mode, 2);
+    assert.ok(first.count <= 256);
+    assert.equal(first.ys.length, first.count + 1);
+    assert.ok(first.ys.every(Number.isFinite));
+    assert.ok(first.levels.every((value) => value >= 0 && value <= 1));
+    assert.notDeepEqual(first.ys, later.ys);
+  }
+});
+
+test("all HDR modes upload matching geometry and use the host render submission", () => {
+  for (const mode of ["centered", "bars", "hybrid", "wave", "mist"]) {
+    const entry = entryForHdr();
+    const settings = plugin.normalizeSettings({ mode, hdrHighlights: true });
+    const writes = [];
+    let draws = 0;
+    entry.hdrSurface = mockSurface();
+    entry.hdrUniform = {};
+    entry.hdrBuffer = {};
+    entry.hdrPipeline = {};
+    entry.hdrBindGroup = {};
+    entry.centeredDisplay = Array(20).fill(0.9);
+    entry.hdrColorCache = { cssColor: "white", color: [1, 1, 1] };
+    entry.hdrSurface.render = (draw) =>
+      draw({
+        device: {
+          queue: {
+            writeBuffer: (_buffer, _offset, data) => writes.push(data.slice()),
+          },
+        },
+        encoder: {
+          beginRenderPass: () => ({
+            setPipeline() {},
+            setBindGroup() {},
+            draw() {
+              draws++;
+            },
+            end() {},
+          }),
+        },
+        view: {},
+        width: 200,
+        height: 160,
+      });
+    plugin.drawHdrHighlights(
+      entry,
+      100,
+      80,
+      { state: "playing", bins: [0.9, 1, 0.8], waveform: [0, 1, -1, 0] },
+      settings,
+      ["white"],
+      100,
+    );
+    assert.equal(draws, 1);
+    assert.equal(entry.hdrSurface.canvas.hidden, false);
+    const [params, geometry] = writes;
+    assert.equal(params.byteLength, 48);
+    assert.equal(new Uint32Array(params.buffer)[9] * 4, geometry.length);
+    assert.equal(params[11], mode === "wave" ? 1 : mode === "mist" ? 2 : 0);
+    assert.ok(geometry.every(Number.isFinite));
+  }
 });

@@ -2,6 +2,8 @@
 
 本文档说明 EchoMusic 插件的 Manifest、生命周期、宿主 API、安全边界和完整接入示例。官方插件源和示例插件位于 [EchoMusicPlugins 仓库](../README.md)。
 
+通用 WebGPU 绘图、动画、画布生命周期及可选 HDR 输出见 [Graphics 插件绘图 API](graphics.md)。
+
 ## 插件系统定位
 
 EchoMusic 内置一套面向本地桌面应用的定制插件运行时。它与 Chromium 浏览器扩展的设计不同，不兼容 Chrome 插件规范，也不提供浏览器扩展级别的进程与权限沙盒。
@@ -327,6 +329,7 @@ export default {
 | `ctx.lyric` / `ctx.settings`                                          | 歌词 store 与设置 store 的快捷引用，等价于 `ctx.stores.lyric` / `ctx.stores.settings`                                                                                                                                                                                                                                                                                                                         |
 | `ctx.lyrics`                                                          | 歌词稳定 API：`registerResolver(options)` 注册自定义歌词解析器（要求 `capabilities.lyrics: true`）、`getSnapshot()`、`onSnapshot(handler)`、`command(command)`                                                                                                                                                                                                                                                |
 | `ctx.lyricEffects`                                                    | 歌词动效 API：`register(options)` 注册页面歌词或桌面歌词视觉效果（要求 `capabilities.lyricEffects: true`），支持注入 CSS class、挂载 overlay 装饰层、订阅歌词播放快照                                                                                                                                                                                                                                        |
+| `ctx.graphics` | 通用 WebGPU 绘图、动画与尺寸管理、Canvas2D 回退及可选 HDR 输出；见 [Graphics 绘图 API](graphics.md) |
 | `ctx.appearance`                                                      | 外观快照 API：`getSnapshot()` / `onSnapshot(handler)`，读取深浅色、主题色和字体信息                                                                                                                                                                                                                                                                                                                           |
 | `ctx.fonts`                                                           | 系统字体 API：`getAll()` 获取字体名列表、`getOptions(options?)` 获取可直接传给宿主 `Select` 的选项、`buildFamily(fontName)` 构建 CSS `font-family` 字符串                                                                                                                                                                                                                                                     |
 | `ctx.kugou`                                                           | 调用 EchoMusic 内置酷狗业务接口，要求 manifest 声明 `capabilities.kugouApi: true`；鉴权信息由宿主自动注入                                                                                                                                                                                                                                                                                                     |
