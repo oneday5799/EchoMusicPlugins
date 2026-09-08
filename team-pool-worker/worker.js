@@ -204,17 +204,17 @@ var PeriodPool = class extends DurableObject {
 };
 
 // worker.js
-var MIN_CLIENT_VERSION = "1.0.6";
 var MAX_BODY_SIZE = 4096;
 var worker_default = {
   async fetch(request, env) {
+    const minVersion = env.MIN_CLIENT_VERSION || "1.0.6";
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
     if (path === "/") return json({ name: "echo-team-pool", ok: true });
     const v = request.headers.get("X-Plugin-Version") || "";
     if (!v) return err("version_missing", "\u7F3A\u5C11\u63D2\u4EF6\u7248\u672C\u4FE1\u606F\uFF0C\u8BF7\u66F4\u65B0\u63D2\u4EF6\u540E\u91CD\u8BD5", 403);
-    if (!versionGte(v, MIN_CLIENT_VERSION)) {
-      return err("version_mismatch", `\u63D2\u4EF6\u7248\u672C\u8FC7\u4F4E\uFF08${v}\uFF09\uFF0C\u8BF7\u66F4\u65B0\u81F3 ${MIN_CLIENT_VERSION} \u6216\u66F4\u9AD8\u7248\u672C`, 403);
+    if (!versionGte(v, minVersion)) {
+      return err("version_mismatch", `\u63D2\u4EF6\u7248\u672C\u8FC7\u4F4E\uFF08${v}\uFF09\uFF0C\u8BF7\u66F4\u65B0\u81F3 ${minVersion} \u6216\u66F4\u9AD8\u7248\u672C`, 403);
     }
     const cl = Number(request.headers.get("content-length") || 0);
     if (cl > MAX_BODY_SIZE) return err("payload_too_large", "\u8BF7\u6C42\u4F53\u8D85\u8FC7 4KB", 413);
