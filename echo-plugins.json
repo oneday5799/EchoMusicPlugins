@@ -414,6 +414,21 @@
         "team",
 		"vip"
       ]
+    },
+    {
+      "id": "settings-simplifier",
+      "name": "设置简化器",
+      "description": "简化主应用设置页，通过开关控制每个设置分组及其子项的显示与隐藏。",
+      "author": "Oneday5799",
+      "path": "settings-simplifier",
+      "repo": "https://github.com/oneday5799/EchoMusicPlugins",
+      "homepage": "https://github.com/oneday5799/EchoMusicPlugins/tree/main/settings-simplifier",
+      "tags": [
+        "settings",
+        "simplify",
+        "ui",
+        "appearance"
+      ]
     }
   ]
 }
