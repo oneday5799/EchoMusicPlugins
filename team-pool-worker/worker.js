@@ -76,7 +76,7 @@ var PeriodPool = class extends DurableObject {
       ).toArray();
       const now = Date.now();
       if (existing.length > 0) {
-        const existingMembers = JSON.parse(existing[0].members ?? "[]");
+        const existingMembers = JSON.parse(String(existing[0].members ?? "[]"));
         const merged = [...new Set([...existingMembers, ...members])];
         this.ctx.storage.sql.exec(
           `UPDATE codes SET members = ?, remaining = ?, updated_at = ? WHERE code = ?`,
@@ -108,12 +108,11 @@ var PeriodPool = class extends DurableObject {
       ).toArray();
       if (cur.length === 0) return { ok: true, code: null };
       const code = cur[0].code;
-      const result = this.ctx.storage.sql.exec(
+      this.ctx.storage.sql.exec(
         `UPDATE codes SET remaining = remaining - 1, updated_at = ?
          WHERE code = ? AND remaining > 0`,
         Date.now(), code
       );
-      if (result.meta?.changes === 0) return { ok: true, code: null };
       return { ok: true, code };
     } catch (e) {
       return { ok: false, error: "internal", message: String(e?.message) };
@@ -145,7 +144,7 @@ var PeriodPool = class extends DurableObject {
         `SELECT members FROM codes WHERE code = ?`, code
       ).toArray();
       if (rows.length === 0) return { ok: false, error: "code_not_found" };
-      const existingMembers = JSON.parse(rows[0].members ?? "[]");
+      const existingMembers = JSON.parse(String(rows[0].members ?? "[]"));
       const merged = [...new Set([...existingMembers, ...members])];
       this.ctx.storage.sql.exec(
         `UPDATE codes SET members = ?, remaining = ?, updated_at = ? WHERE code = ?`,
