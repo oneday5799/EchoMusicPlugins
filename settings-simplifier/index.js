@@ -352,48 +352,47 @@ const createSettingsComponent = (ctx) =>
       const importSettings = async () => {
         const input = document.createElement('input');
         input.type = 'file';
-        input.accept = '.json';
+        input.accept = '.json,.txt';
 
         input.onchange = async (e) => {
           const file = e.target.files[0];
           if (!file) return;
 
+          let config;
           try {
-            const text = await file.text();
-            const config = JSON.parse(text);
+            const text = (await file.text()).replace(/^\uFEFF/, '').trim();
+            config = JSON.parse(text);
+          } catch (err) {
+            ctx.toast.danger(`导入失败：${err?.message || '文件内容不是有效的JSON'}`);
+            return;
+          }
 
-            if (!config.version) {
-              ctx.toast.error('无效的配置格式：缺少 version 字段');
-              return;
-            }
-            if (!config.sections || typeof config.sections !== 'object') {
-              ctx.toast.error('无效的配置格式：缺少 sections 字段');
-              return;
-            }
-            if (config.items && typeof config.items !== 'object') {
-              ctx.toast.error('无效的配置格式：items 字段必须是对象');
-              return;
-            }
+          if (!config.version) {
+            ctx.toast.danger('无效的配置格式：缺少 version 字段');
+            return;
+          }
+          if (!config.sections || typeof config.sections !== 'object') {
+            ctx.toast.danger('无效的配置格式：缺少 sections 字段');
+            return;
+          }
+          if (config.items && typeof config.items !== 'object') {
+            ctx.toast.danger('无效的配置格式：items 字段必须是对象');
+            return;
+          }
 
-            const sectionCount = Object.keys(config.sections).length;
-            const itemCount = Object.keys(config.items || {}).length;
+          const sectionCount = Object.keys(config.sections).length;
+          const itemCount = Object.keys(config.items || {}).length;
 
-            const confirmed = await ctx.ui.dialog.confirm({
-              title: '导入配置',
-              content: `即将导入配置：${sectionCount}个分组，${itemCount}个子项。这将覆盖当前设置，是否继续？`
-            });
-
-            if (!confirmed) return;
-
+          try {
             await applySettingsMutation(() => {
               settings.value = {
                 sections: { ...config.sections },
                 items: { ...config.items || {} }
               };
             });
-            ctx.toast.success('配置已导入');
-          } catch (e) {
-            ctx.toast.error('导入失败：文件内容不是有效的JSON');
+            ctx.toast.success(`配置已导入：${sectionCount}个分组，${itemCount}个子项`);
+          } catch (err) {
+            ctx.toast.danger(`导入失败：${err?.message || '应用配置时出错'}`);
           }
         };
 
