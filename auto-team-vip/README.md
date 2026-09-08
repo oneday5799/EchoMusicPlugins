@@ -63,7 +63,7 @@
 - 缺失版本头 → 返回 403 `version_missing`
 - 低于最低版本 → 返回 403 `version_mismatch`，提示更新
 
-**最低兼容版本：1.0.3**
+**最低兼容版本：1.0.6**
 
 升级 Worker 时只需修改 `worker.js` 顶部的 `MIN_CLIENT_VERSION` 常量（同步修改客户端 `manifest.json` 的 `version`）。
 

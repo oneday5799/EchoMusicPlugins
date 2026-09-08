@@ -204,7 +204,7 @@ var PeriodPool = class extends DurableObject {
 };
 
 // worker.js
-var MIN_CLIENT_VERSION = "1.0.3";
+var MIN_CLIENT_VERSION = "1.0.6";
 var MAX_BODY_SIZE = 4096;
 var worker_default = {
   async fetch(request, env) {
