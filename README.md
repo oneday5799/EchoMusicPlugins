@@ -18,6 +18,7 @@ https://github.com/hoowhoami/EchoMusicPlugins
 - [独立浮窗与 Now Playing](docs/floating-windows.md)：浮窗声明、播放快照、宿主窗口控制、拖动与缩放。
 - [任务中心 API](docs/tasks.md)：后台任务、进度、中止信号与终态保留策略。
 - [备份与恢复 API](docs/backups.md)：命令式备份操作、存储提供方注册与 WebDAV 示例。
+- [Graphics 绘图 API](/docs/graphics.md)：为插件提供绘图能力。
 - [`webdav-backup`](webdav-backup)：将主程序备份与恢复界面接入用户自己的 WebDAV 存储。
 - [`example-plugin`](example-plugin)：覆盖常用宿主能力的综合示例。
 

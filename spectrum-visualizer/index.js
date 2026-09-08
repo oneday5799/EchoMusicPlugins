@@ -21,6 +21,8 @@ const DEFAULT_SETTINGS = {
   mistSoftness: 72,
   mistMotion: 42,
   centeredBarWidth: 2,
+  hdrHighlights: false,
+  hdrIntensity: 45,
 };
 
 const PALETTES = {
@@ -61,6 +63,12 @@ const normalizeSettings = (value) => {
   return {
     ...DEFAULT_SETTINGS,
     ...source,
+    hdrHighlights: source.hdrHighlights === true,
+    hdrIntensity: clamp(
+      source.hdrIntensity ?? DEFAULT_SETTINGS.hdrIntensity,
+      0,
+      100,
+    ),
     enabled: source.enabled ?? DEFAULT_SETTINGS.enabled,
     showPlayerBar: source.showPlayerBar ?? DEFAULT_SETTINGS.showPlayerBar,
     showMiniPlayer: source.showMiniPlayer ?? DEFAULT_SETTINGS.showMiniPlayer,
@@ -237,9 +245,463 @@ const setLayerVariables = (entry) => {
   }
 };
 
+const shouldUseHdrLayer = (kind, settings) =>
+  getLayerAllowed(kind, settings) &&
+  settings.hdrHighlights === true &&
+  settings.hdrIntensity > 0;
+
+// All positions share the SDR geometry; only the crest receives extended luminance.
+const buildHdrGeometry = (entry, width, height, frame, settings, time) => {
+  const fill = (height * settings.fill) / 100;
+  const bottom = height - (entry.kind === "lyric" ? 4 : 8);
+  if (settings.mode === "centered") {
+    const layout = getCenteredBarLayout(width, settings.centeredBarWidth);
+    return {
+      mode: 0,
+      count: layout.count,
+      thickness: layout.barWidth,
+      levels: Array.from(
+        { length: layout.count },
+        (_, i) => entry.centeredDisplay?.[i] || 0,
+      ),
+      ys: Array.from(
+        { length: layout.count },
+        (_, i) => bottom - (entry.centeredDisplay?.[i] || 0) * fill,
+      ),
+    };
+  }
+  if (settings.mode === "wave") {
+    const waveform = frame?.waveform || [];
+    if (waveform.length < 2) return { count: 0 };
+    const count = Math.min(512, waveform.length - 1);
+    const samples = Array.from({ length: count + 1 }, (_, i) => {
+      const position = (i / count) * (waveform.length - 1);
+      const lower = Math.floor(position),
+        upper = Math.min(waveform.length - 1, lower + 1);
+      return clamp(
+        waveform[lower] +
+          (waveform[upper] - waveform[lower]) * (position - lower),
+        -1,
+        1,
+      );
+    });
+    return {
+      mode: 1,
+      count,
+      thickness: 1,
+      levels: samples
+        .slice(0, count)
+        .map((value, i) => Math.max(Math.abs(value), Math.abs(samples[i + 1]))),
+      ys: samples.map((value) => height * 0.5 + value * fill * 0.25),
+    };
+  }
+  if (settings.mode === "mist") {
+    const profile = buildMistProfile(
+      frame?.bins,
+      Math.round(clamp(width / 18, 18, 44)),
+    );
+    const layer = getMistRenderLayers(
+      settings,
+      clamp(frame?.rms ?? 0, 0, 1),
+    )[2];
+    const motion =
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches
+        ? 0
+        : settings.mistMotion / 100;
+    // Sample the very same quadratic outline used by the SDR fog.
+    const points = [];
+    let current;
+    const collector = {
+      beginPath() {},
+      moveTo(x, y) {
+        current = { x, y };
+      },
+      lineTo(x, y) {
+        current = { x, y };
+        if (!points.length) points.push(current);
+      },
+      quadraticCurveTo(cx, cy, x, y) {
+        const from = current;
+        for (let i = 1; i <= 12; i++) {
+          const t = i / 12,
+            u = 1 - t;
+          points.push({
+            x: u * u * from.x + 2 * u * t * cx + t * t * x,
+            y: u * u * from.y + 2 * u * t * cy + t * t * y,
+          });
+        }
+        current = { x, y };
+      },
+      closePath() {},
+    };
+    appendMistPath(
+      collector,
+      profile,
+      width,
+      height + (entry.kind === "lyric" ? 4 : 8),
+      fill,
+      layer,
+      (time / 1000) * motion * 0.9,
+      motion,
+      false,
+    );
+    const count = Math.min(256, Math.max(16, Math.ceil(width / 4)));
+    let cursor = 0;
+    const ys = Array.from({ length: count + 1 }, (_, i) => {
+      const x = (i / count) * width;
+      while (cursor < points.length - 2 && points[cursor + 1].x < x) cursor++;
+      const a = points[cursor],
+        b = points[cursor + 1];
+      return (
+        a.y + (b.y - a.y) * clamp((x - a.x) / Math.max(0.001, b.x - a.x), 0, 1)
+      );
+    });
+    const padding = Math.max(18, width * 0.035);
+    const levels = Array.from({ length: count }, (_, i) => {
+      const position =
+        (((i / count) * width + padding) / (width + padding * 2)) *
+        (profile.length - 1);
+      const lower = Math.floor(position),
+        upper = Math.min(profile.length - 1, lower + 1);
+      return (
+        profile[lower] + (profile[upper] - profile[lower]) * (position - lower)
+      );
+    });
+    return { mode: 2, count, ys, levels, thickness: layer.blur };
+  }
+  // Hybrid highlights the bar peaks so the underlying waveform stays readable.
+  const bins = frame?.bins || [];
+  const count = Math.min(512, bins.length);
+  if (!count) return { count: 0 };
+  const slot = width / count;
+  const gap = Math.max(1.1, Math.min(4, slot * 0.22));
+  const top = Math.max(entry.kind === "lyric" ? 8 : 10, bottom - fill);
+  const levels = Array.from(bins)
+    .slice(0, count)
+    .map((value) => Math.pow(clamp(value, 0, 1), 1.35));
+  return {
+    mode: 0,
+    count,
+    thickness: Math.max(2, slot - gap),
+    levels,
+    ys: levels.map((value) => bottom - Math.max(2, value * (bottom - top))),
+  };
+};
+
+const updateHdrLevels = (previous, values, elapsedMs = 1000 / 15) => {
+  const dt = clamp(elapsedMs, 1, 200);
+  return values.map((value, index) => {
+    const t = clamp((value - 0.35) / 0.5, 0, 1);
+    const target = t * t * (3 - 2 * t);
+    const before = clamp(previous?.[index] ?? 0, 0, 1);
+    const rate = 1 - Math.exp(-dt / (target > before ? 75 : 240));
+    return before + (target - before) * rate;
+  });
+};
+
+const HDR_PEAK_SHADER = `
+struct Params {
+  viewport: vec2f, size: vec2f, color: vec4f,
+  strength: f32, count: u32, opacity: f32, padding: f32,
+}
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> bars: array<vec4f>;
+@vertex fn vertex(@builtin(vertex_index) index: u32) -> @builtin(position) vec4f {
+  let x = f32((index << 1u) & 2u);
+  let y = f32(index & 2u);
+  return vec4f(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
+}
+@fragment fn fragment(@builtin(position) pixel: vec4f) -> @location(0) vec4f {
+  let point = pixel.xy * params.size / params.viewport;
+  let index = i32(clamp(floor(point.x / params.size.x * f32(params.count)), 0.0, f32(params.count - 1u)));
+  var sum = vec3f(0.0);
+  var weight = 0.0;
+  for (var offset = -1; offset <= 1; offset++) {
+    let n = index + offset;
+    if (n < 0 || n >= i32(params.count)) { continue; }
+    let bar = bars[u32(n)];
+    if (bar.z < 0.001) { continue; }
+    let slot = params.size.x / f32(params.count);
+    var distance = 0.0;
+    if (params.padding < 0.5) {
+      let radius = min(1.0, bar.w * 0.5);
+      let q = abs(point - vec2f((f32(n) + 0.5) * slot, bar.x + 1.25)) - vec2f(bar.w * 0.5 - radius, 1.25 - radius);
+      distance = length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0) - radius;
+    } else {
+      let a = vec2f(f32(n) * slot, bar.x);
+      let b = vec2f(f32(n + 1) * slot, bar.y);
+      let ab = b - a;
+      let t = clamp(dot(point - a, ab) / max(dot(ab, ab), 0.0001), 0.0, 1.0);
+      distance = length(point - a - t * ab) - 0.8;
+    }
+    var alpha = (1.0 - smoothstep(-0.3, 0.7, distance)) * 0.8 + exp(-max(distance, 0.0) * 1.2) * 0.14;
+    if (params.padding > 1.5) {
+      alpha = exp(-pow(max(distance, 0.0) / max(bar.w, 1.0), 2.0)) * 0.3;
+    }
+    alpha *= bar.z;
+    let light = params.color.rgb * (1.0 + 6.0 * params.strength * bar.z);
+    sum += light * alpha;
+    weight += alpha;
+  }
+  let edge = smoothstep(0.0, 0.12, point.x / params.size.x) * smoothstep(0.0, 0.12, 1.0 - point.x / params.size.x);
+  // The host expects straight-alpha linear RGB, and performs final encoding.
+  return vec4f(sum / max(weight, 0.00001), min(weight, 0.95) * edge * params.opacity);
+}`;
+
+const releaseHdrLayer = (entry) => {
+  entry.hdrRequest = null;
+  entry.hdrOff?.();
+  entry.hdrOff = null;
+  entry.hdrBuffer?.destroy();
+  entry.hdrUniform?.destroy();
+  entry.hdrSurface?.dispose();
+  entry.hdrSurface = null;
+  entry.hdrBuffer = null;
+  entry.hdrUniform = null;
+  entry.hdrPipeline = null;
+  entry.hdrBindGroup = null;
+  entry.hdrLevels = null;
+  entry.hdrFrame = null;
+  entry.hdrColorCache = null;
+  entry.hdrLastTime = 0;
+  if (entry.layer?.dataset) delete entry.layer.dataset.hdr;
+};
+
+const syncHdrLayer = async (
+  entry,
+  settings,
+  graphics = runtimeCtx?.graphics,
+  onStatus = (value) => {
+    if (state) state.hdrStatus = value;
+  },
+) => {
+  if (!shouldUseHdrLayer(entry.kind, settings)) {
+    releaseHdrLayer(entry);
+    entry.hdrUnavailable = false;
+    return;
+  }
+  if (
+    entry.removed ||
+    entry.hdrRequest ||
+    entry.hdrSurface ||
+    entry.hdrUnavailable
+  )
+    return;
+  if (!graphics?.createCanvas) {
+    onStatus("unsupported");
+    return;
+  }
+  const request = {};
+  entry.hdrRequest = request;
+  const valid = () =>
+    entry.hdrRequest === request && !entry.removed && entry.layer.isConnected;
+  let surface = null;
+  onStatus("loading");
+  try {
+    surface = await graphics.createCanvas({
+      dynamicRange: "auto",
+      alphaMode: "premultiplied",
+      maxDimension: 4096,
+    });
+    if (!valid()) {
+      surface.dispose();
+      return;
+    }
+    if (!surface.device || surface.getState().status !== "ready")
+      throw new Error("WebGPU unavailable");
+    const device = surface.device;
+    const module = device.createShaderModule({ code: HDR_PEAK_SHADER });
+    const pipeline = await device.createRenderPipelineAsync({
+      layout: "auto",
+      vertex: { module, entryPoint: "vertex" },
+      fragment: {
+        module,
+        entryPoint: "fragment",
+        targets: [{ format: "rgba16float" }],
+      },
+      primitive: { topology: "triangle-list" },
+    });
+    if (!valid()) {
+      surface.dispose();
+      return;
+    }
+    entry.hdrSurface = surface;
+    entry.hdrPipeline = pipeline;
+    entry.hdrUniform = device.createBuffer({
+      size: 48,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    entry.hdrBuffer = device.createBuffer({
+      size: 512 * 16,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    entry.hdrBindGroup = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: entry.hdrUniform } },
+        { binding: 1, resource: { buffer: entry.hdrBuffer } },
+      ],
+    });
+    surface.canvas.className = "echo-spectrum-hdr";
+    surface.canvas.hidden = true;
+    entry.layer.appendChild(surface.canvas);
+    const unsubscribe = surface.onStateChanged((status) => {
+      if (!valid()) return;
+      if (status.status === "lost") {
+        releaseHdrLayer(entry);
+        entry.hdrUnavailable = true;
+        onStatus("unavailable");
+        return;
+      }
+      const active = status.status === "ready" && status.dynamicRange === "hdr";
+      if (active) entry.layer.dataset.hdr = "true";
+      else delete entry.layer.dataset.hdr;
+      surface.canvas.hidden = !active || !entry.hdrFrame?.active;
+      onStatus(active ? "ready" : "sdr");
+    });
+    if (valid()) entry.hdrOff = unsubscribe;
+    else unsubscribe();
+  } catch (error) {
+    surface?.dispose();
+    if (valid()) {
+      releaseHdrLayer(entry);
+      entry.hdrUnavailable = true;
+      onStatus("unavailable");
+      console.warn(
+        "[spectrum-visualizer] HDR unavailable, retaining SDR spectrum",
+        error,
+      );
+    }
+  }
+};
+
+const getHdrColor = (entry, cssColor) => {
+  if (entry.hdrColorCache?.cssColor === cssColor)
+    return entry.hdrColorCache.color;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 1;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) return [1, 1, 1];
+  context.fillStyle = "#ffffff";
+  context.fillStyle = cssColor;
+  context.fillRect(0, 0, 1, 1);
+  const bytes = context.getImageData(0, 0, 1, 1).data;
+  const linear = Array.from(bytes.slice(0, 3), (byte) => {
+    const value = byte / 255;
+    return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  });
+  const peak = Math.max(...linear, 0.001);
+  const color = linear.map((value) => 0.12 + (0.88 * value) / peak);
+  entry.hdrColorCache = { cssColor, color };
+  return color;
+};
+
+const drawHdrHighlights = (
+  entry,
+  width,
+  height,
+  frame,
+  settings,
+  colors,
+  time,
+) => {
+  const surface = entry.hdrSurface;
+  if (!surface) return;
+  if (
+    !shouldUseHdrLayer(entry.kind, settings) ||
+    !frame ||
+    frame.state === "idle" ||
+    surface.getState().dynamicRange !== "hdr"
+  ) {
+    entry.hdrFrame = { active: false };
+    surface.canvas.hidden = true;
+    entry.hdrLevels = null;
+    entry.hdrLastTime = 0;
+    return;
+  }
+  const geometry = buildHdrGeometry(
+    entry,
+    width,
+    height,
+    frame,
+    settings,
+    time,
+  );
+  if (!geometry.count) {
+    entry.hdrFrame = { active: false };
+    surface.canvas.hidden = true;
+    entry.hdrLevels = null;
+    return;
+  }
+  if (entry.hdrMode !== settings.mode) entry.hdrLevels = null;
+  entry.hdrMode = settings.mode;
+  entry.hdrLevels = updateHdrLevels(
+    entry.hdrLevels,
+    geometry.levels,
+    entry.hdrLastTime ? time - entry.hdrLastTime : 1000 / settings.fps,
+  );
+  entry.hdrLastTime = time;
+  const data = new Float32Array(geometry.count * 4);
+  for (let index = 0; index < geometry.count; index++) {
+    data.set(
+      [
+        geometry.ys[index],
+        geometry.ys[index + 1] ?? geometry.ys[index],
+        entry.hdrLevels[index] || 0,
+        geometry.thickness,
+      ],
+      index * 4,
+    );
+  }
+  entry.hdrFrame = {
+    active: true,
+    width,
+    height,
+    data,
+    count: geometry.count,
+    mode: geometry.mode,
+    color: getHdrColor(entry, colors[0]),
+    strength: settings.hdrIntensity / 100,
+    opacity: settings.opacity / 100,
+  };
+  surface.canvas.hidden = false;
+  surface.render(
+    ({ device, encoder, view, width: pixelsWide, height: pixelsHigh }) => {
+      const data = entry.hdrFrame;
+      if (!data?.active || !entry.hdrUniform || !entry.hdrBuffer) return;
+      const params = new Float32Array([
+        pixelsWide,
+        pixelsHigh,
+        data.width,
+        data.height,
+        ...data.color,
+        1,
+        data.strength,
+        0,
+        data.opacity,
+        data.mode,
+      ]);
+      new Uint32Array(params.buffer)[9] = data.count;
+      device.queue.writeBuffer(entry.hdrUniform, 0, params);
+      device.queue.writeBuffer(entry.hdrBuffer, 0, data.data);
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [
+          { view, loadOp: "clear", clearValue: [0, 0, 0, 0], storeOp: "store" },
+        ],
+      });
+      pass.setPipeline(entry.hdrPipeline);
+      pass.setBindGroup(0, entry.hdrBindGroup);
+      pass.draw(3);
+      pass.end();
+    },
+  );
+};
+
 const releaseLayerResources = (entry) => {
   if (!entry || entry.resourcesReleased) return false;
   entry.resourcesReleased = true;
+  releaseHdrLayer(entry);
   entry.centeredDisplay = null;
   entry.paletteCache = null;
   if (entry.canvas) {
@@ -276,6 +738,7 @@ const updateMountedLayers = () => {
     }
     setLayerVariables(entry);
     entry.layer.hidden = !getLayerAllowed(entry.kind, settings);
+    void syncHdrLayer(entry, settings);
   }
   updateRuntimeActivity();
 };
@@ -722,6 +1185,7 @@ const drawLayer = (entry, time) => {
   const settings = state?.settings ?? DEFAULT_SETTINGS;
   if (!getLayerAllowed(entry.kind, settings) || entry.layer.hidden) return;
 
+  void syncHdrLayer(entry, settings);
   const rect = resizeCanvas(entry.canvas, entry.context);
   const width = rect.width;
   const height = rect.height;
@@ -797,6 +1261,7 @@ const drawLayer = (entry, time) => {
   } else if (settings.mode !== "centered") {
     drawIdle(entry.context, width, height, settings, time, colors);
   }
+  drawHdrHighlights(entry, width, height, frame, settings, colors, time);
 };
 
 const draw = (time) => {
@@ -1000,7 +1465,7 @@ const createSettingsComponent = (ctx) =>
           "onUpdate:modelValue": (value) => patch({ [key]: value }),
         });
 
-      const range = (key, min, max, step = 1, suffix = "") =>
+      const range = (key, min, max, step = 1, suffix = "", disabled = false) =>
         h(
           "div",
           { class: "echo-spectrum-slider" },
@@ -1011,18 +1476,18 @@ const createSettingsComponent = (ctx) =>
             step,
             showValue: true,
             valueSuffix: suffix,
-            disabled: busy.value,
+            disabled: busy.value || disabled,
             "onUpdate:modelValue": (value) => setLocalValue(key, Number(value)),
             onValueCommit: (value) => patch({ [key]: Number(value) }),
           }),
         );
 
-      const toggle = (key, label, hint = "") =>
+      const toggle = (key, label, hint = "", disabled = false) =>
         h("div", { class: "echo-spectrum-switch" }, [
           copy(label, hint),
           h(Switch, {
             modelValue: Boolean(settings.value[key]),
-            disabled: busy.value,
+            disabled: busy.value || disabled,
             "onUpdate:modelValue": (value) => patch({ [key]: Boolean(value) }),
           }),
         ]);
@@ -1112,6 +1577,33 @@ const createSettingsComponent = (ctx) =>
             ),
           );
         }
+
+        visualFields.push(
+          toggle(
+            "hdrHighlights",
+            "HDR 峰值高光",
+            !ctx.graphics?.createCanvas
+              ? "当前主程序不支持，请升级后使用"
+              : state?.hdrStatus === "sdr"
+                ? "当前显示环境使用普通频谱"
+                : state?.hdrStatus === "unavailable"
+                  ? "高光暂不可用，保留普通频谱；可关闭后重试"
+                  : "默认关闭；增强已开启显示位置的频谱峰值",
+            !ctx.graphics?.createCanvas,
+          ),
+          field(
+            "高光强度",
+            range(
+              "hdrIntensity",
+              0,
+              100,
+              5,
+              "%",
+              !settings.value.hdrHighlights,
+            ),
+            "增强柱顶、波形峰值或雾带亮边，保留普通频谱主体",
+          ),
+        );
 
         return h("div", { class: "echo-spectrum-settings" }, [
           h("section", { class: "echo-spectrum-overview" }, [
@@ -1252,6 +1744,7 @@ export async function activate(ctx) {
   state = ctx.vue.reactive({
     settings: normalizeSettings(await ctx.storage.get(STORAGE_KEY)),
     spectrumStatus: null,
+    hdrStatus: "waiting",
   });
 
   setupSettingsChannel();
@@ -1466,6 +1959,24 @@ export async function activate(ctx) {
   opacity: var(--echo-spectrum-opacity);
 }
 
+
+.echo-spectrum-hdr {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.echo-spectrum-hdr[hidden] { display: none !important; }
+/* Keep HDR out of the SDR layer's CSS opacity group. Its alpha is set in the shader. */
+.echo-spectrum-layer[data-hdr="true"] { opacity: 1; }
+.echo-spectrum-layer[data-hdr="true"] > .echo-spectrum-canvas,
+.echo-spectrum-layer[data-hdr="true"]::before,
+.echo-spectrum-layer[data-hdr="true"]::after { opacity: var(--echo-spectrum-opacity); }
+.echo-spectrum-lyric[data-hdr="true"][data-backdrop="true"] {
+  background: linear-gradient(180deg, transparent 0%, rgb(0 0 0 / calc(0.1 * var(--echo-spectrum-opacity))) 100%);
+}
+
 .echo-spectrum-canvas {
   display: block;
   width: 100%;
@@ -1500,8 +2011,8 @@ export async function activate(ctx) {
   z-index: 0;
 }
 
-.echo-spectrum-playerbar[data-backdrop="true"] canvas,
-.echo-spectrum-mini[data-backdrop="true"] canvas {
+.echo-spectrum-playerbar[data-backdrop="true"] > .echo-spectrum-canvas,
+.echo-spectrum-mini[data-backdrop="true"] > .echo-spectrum-canvas {
   background:
     linear-gradient(180deg, rgba(8, 12, 22, 0.18), rgba(8, 12, 22, 0.04)),
     transparent;
@@ -1638,6 +2149,12 @@ export function deactivate() {
 }
 
 export {
+  buildHdrGeometry,
+  shouldUseHdrLayer,
+  updateHdrLevels,
+  syncHdrLayer,
+  releaseHdrLayer,
+  drawHdrHighlights,
   DEFAULT_SETTINGS,
   buildMistProfile,
   buildCenteredProfile,
