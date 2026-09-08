@@ -78,15 +78,17 @@ var PeriodPool = class extends DurableObject {
       if (existing.length > 0) {
         const existingMembers = JSON.parse(String(existing[0].members ?? "[]"));
         const merged = [...new Set([...existingMembers, ...members])];
+        const realRemaining = Math.max(0, 2 - merged.length);
         this.ctx.storage.sql.exec(
           `UPDATE codes SET members = ?, remaining = ?, updated_at = ? WHERE code = ?`,
-          JSON.stringify(merged), remaining, now, code
+          JSON.stringify(merged), realRemaining, now, code
         );
       } else {
+        const realRemaining = Math.max(0, 2 - members.length);
         this.ctx.storage.sql.exec(
           `INSERT INTO codes (code, creator, members, remaining, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?)`,
-          code, creator, JSON.stringify(members), remaining, now, now
+          code, creator, JSON.stringify(members), realRemaining, now, now
         );
       }
       return { ok: true };
@@ -146,9 +148,10 @@ var PeriodPool = class extends DurableObject {
       if (rows.length === 0) return { ok: false, error: "code_not_found" };
       const existingMembers = JSON.parse(String(rows[0].members ?? "[]"));
       const merged = [...new Set([...existingMembers, ...members])];
+      const realRemaining = Math.max(0, 2 - merged.length);
       this.ctx.storage.sql.exec(
         `UPDATE codes SET members = ?, remaining = ?, updated_at = ? WHERE code = ?`,
-        JSON.stringify(merged), remaining, Date.now(), code
+        JSON.stringify(merged), realRemaining, Date.now(), code
       );
       return { ok: true };
     } catch (e) {
