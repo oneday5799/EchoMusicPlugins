@@ -403,7 +403,7 @@
 	{
       "id": "auto-team-vip",
       "name": "自动组队领VIP",
-      "description": "自动参加概念版官方活动“组队瓜分酷狗概念版畅听VIP”并自动组队，活动详情请自行查看官方说明。",
+      "description": "自动参加概念版官方活动"组队瓜分酷狗概念版畅听VIP"并自动组队，活动详情请自行查看官方说明。",
       "author": "Oneday5799",
       "path": "auto-team-vip",
       "repo": "https://github.com/oneday5799/EchoMusicPlugins",
@@ -413,6 +413,20 @@
         "claim",
         "team",
 		"vip"
+      ]
+    },
+    {
+      "id": "settings-simplifier",
+      "name": "设置简化器",
+      "description": "简化主应用设置页，通过开关控制每个设置分组及其子项的显示与隐藏。",
+      "author": "Oneday5799",
+      "path": "settings-simplifier",
+      "repo": "https://github.com/oneday5799/EchoMusicPlugins",
+      "homepage": "https://github.com/oneday5799/EchoMusicPlugins/tree/main/settings-simplifier",
+      "tags": [
+        "settings",
+        "simplify",
+        "ui"
       ]
     }
   ]
