@@ -331,12 +331,83 @@ const createSettingsComponent = (ctx) =>
         };
       };
 
+      const exportSettings = async () => {
+        const config = {
+          version: '1.0',
+          plugin: 'settings-simplifier',
+          sections: { ...settings.value.sections },
+          items: { ...settings.value.items }
+        };
+        const text = JSON.stringify(config, null, 2);
+        const blob = new Blob([text], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'settings-simplifier.json';
+        a.click();
+        URL.revokeObjectURL(url);
+        ctx.toast.success('配置已导出');
+      };
+
+      const importSettings = async () => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.json';
+
+        input.onchange = async (e) => {
+          const file = e.target.files[0];
+          if (!file) return;
+
+          try {
+            const text = await file.text();
+            const config = JSON.parse(text);
+
+            if (!config.version) {
+              ctx.toast.error('无效的配置格式：缺少 version 字段');
+              return;
+            }
+            if (!config.sections || typeof config.sections !== 'object') {
+              ctx.toast.error('无效的配置格式：缺少 sections 字段');
+              return;
+            }
+            if (config.items && typeof config.items !== 'object') {
+              ctx.toast.error('无效的配置格式：items 字段必须是对象');
+              return;
+            }
+
+            const sectionCount = Object.keys(config.sections).length;
+            const itemCount = Object.keys(config.items || {}).length;
+
+            const confirmed = await ctx.ui.dialog.confirm({
+              title: '导入配置',
+              content: `即将导入配置：${sectionCount}个分组，${itemCount}个子项。这将覆盖当前设置，是否继续？`
+            });
+
+            if (!confirmed) return;
+
+            await applySettingsMutation(() => {
+              settings.value = {
+                sections: { ...config.sections },
+                items: { ...config.items || {} }
+              };
+            });
+            ctx.toast.success('配置已导入');
+          } catch (e) {
+            ctx.toast.error('导入失败：文件内容不是有效的JSON');
+          }
+        };
+
+        input.click();
+      };
+
       const renderHeader = () =>
         h("div", { style: STYLES.header }, [
           h("div", { style: STYLES.buttonGroup }, [
             h(Button, { size: "xs", onClick: async () => { await refreshSections(); await updateCSS(); }, disabled: isBusy.value }, { default: () => "刷新" }),
             h(Button, { size: "xs", onClick: () => setAllSections(true), disabled: isBusy.value }, { default: () => "全部显示" }),
             h(Button, { size: "xs", onClick: () => setAllSections(false), disabled: isBusy.value }, { default: () => "全部隐藏" }),
+            h(Button, { size: "xs", onClick: exportSettings, disabled: isBusy.value }, { default: () => "导出设置" }),
+            h(Button, { size: "xs", onClick: importSettings, disabled: isBusy.value }, { default: () => "导入设置" }),
             h(Button, { size: "xs", onClick: resetAll, disabled: isBusy.value }, { default: () => "恢复默认" })
           ])
         ]);
