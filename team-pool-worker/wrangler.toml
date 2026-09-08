@@ -1,0 +1,26 @@
+name = "echo-team-pool"
+main = "worker.js"
+compatibility_date = "2026-09-04"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = false
+preview_urls = false
+
+routes = [
+  { pattern = "echo-team-pool.oneday.vip", zone_name = "oneday.vip", custom_domain = true, enabled = true, previews_enabled = false }
+]
+
+[vars]
+MIN_CLIENT_VERSION = "1.0.6"
+
+[durable_objects]
+bindings = [
+  { name = "PERIOD_POOL", class_name = "PeriodPool" }
+]
+
+[observability]
+logs = { enabled = true }
+traces = { enabled = true }
+
+[exports.PeriodPool]
+type = "durable-object"
+storage = "sqlite"
