@@ -115,6 +115,7 @@ var PeriodPool = class extends DurableObject {
          WHERE code = ? AND remaining > 0`,
         Date.now(), code
       );
+      console.log("join:", uid, "->", code);
       return { ok: true, code };
     } catch (e) {
       return { ok: false, error: "internal", message: String(e?.message) };
