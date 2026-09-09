@@ -1,6 +1,7 @@
 const DEFAULT_CAPACITY = 2; // 3人组队：队长 + 2队员
 const SYNC_THROTTLE_MS = 5000;
 const MAX_SYNC_CODES = 5;
+const POOL_URL = "https://echo-team-pool.oneday.vip";
 const INPUT_STYLE = "flex: 1; min-width: 0; height: 32px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--border-subtle, rgba(255,255,255,0.12)); background: var(--control-muted-bg, rgba(255,255,255,0.06)); color: var(--color-text-main); font-size: 13px; outline: none;";
 let PLUGIN_VERSION = "0.0.0";
 
@@ -197,7 +198,7 @@ async function getUid(c) {
 async function getSettings(c) {
   const saved = await c.storage.get("settings");
   return {
-    poolUrl: pick(saved, ["poolUrl"], ""),
+    poolUrl: POOL_URL,
     ...(saved && typeof saved === "object" ? saved : {}),
   };
 }
@@ -633,34 +634,18 @@ function openDialog(c) {
       const Switch = defineAsyncComponent(c.ui.components.Switch);
       const manualCode = ref("");
       const autoTeam = ref(false);
-      const poolUrlDraft = ref("");
 
       c.storage.get("settings").then((saved) => {
         if (saved && typeof saved === "object") {
           autoTeam.value = pick(saved, ["autoEnabled"], false) !== false;
-          poolUrlDraft.value = String(pick(saved, ["poolUrl"], ""));
         }
       });
-
-      const savePoolUrl = async () => {
-        const url = String(poolUrlDraft.value || "").trim().replace(/\/+$/, "");
-        if (url && !/^https?:\/\//.test(url)) {
-          c.toast.warning("地址必须以 http:// 或 https:// 开头");
-          return;
-        }
-        await updateSettings(c, { poolUrl: url });
-        c.toast.success("码池地址已保存");
-      };
 
       const toggleAuto = async (val) => {
         console.log("[auto-team-vip] toggleAuto called with:", val);
         autoTeam.value = Boolean(val);
         await updateSettings(c, { autoEnabled: autoTeam.value });
         if (autoTeam.value) {
-          if (!poolUrlDraft.value) {
-            c.toast.warning("自动组队需填写码池地址~~~");
-            return;
-          }
           c.toast.info("已开启自动组队，正在执行~~~");
           const base = await runOnceBase(c, {});
           if (base.ok) {
@@ -744,16 +729,6 @@ function openDialog(c) {
               "onUpdate:modelValue": toggleAuto,
             }),
           ]),
-          autoTeam.value ? h("div", { style: "display: flex; gap: 8px; align-items: center;" }, [
-            h("span", { style: "font-size: 13px; opacity: 0.7; flex-shrink: 0;" }, "填写码池地址："),
-            h("input", {
-              value: poolUrlDraft.value,
-              placeholder: "码池地址请加echomusic群获取",
-              onInput: (e) => { poolUrlDraft.value = e.target.value; },
-              style: INPUT_STYLE,
-            }),
-            h(Button, { size: "xs", variant: "outline", onClick: savePoolUrl, style: "white-space: nowrap; flex-shrink: 0;" }, { default: () => "保存" }),
-          ]) : null,
           h("div", { style: "display: flex; gap: 8px; align-items: center;" }, [
             h("span", { style: "font-size: 13px; opacity: 0.7; flex-shrink: 0;" }, "我加入的队伍："),
             h("input", {
