@@ -513,6 +513,7 @@ export function deactivate() {
 
   document.querySelectorAll('.settings-anchor-item, [data-settings-item], [data-settings-divider-before], [data-settings-divider-after]').forEach(el => {
     el.style.display = '';
+    el.removeAttribute('data-settings-item');
     el.removeAttribute('data-settings-divider-before');
     el.removeAttribute('data-settings-divider-after');
   });
