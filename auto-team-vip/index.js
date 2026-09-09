@@ -431,19 +431,11 @@ async function runOncePool(c, baseResult) {
   return { ok: true, myCode, joined };
 }
 
-async function runOnce(c, opts = {}) {
-  const base = await runOnceBase(c, opts);
-  if (base.ok) {
-    return runOncePool(c, base);
-  }
-  return base;
-}
-
 async function scheduleRun(c, delay = 800) {
   if (autoTimer) clearTimeout(autoTimer);
   autoTimer = setTimeout(async () => {
     autoTimer = null;
-    void runOnce(c, {});
+    await runOnceBase(c, {});
   }, delay);
 }
 
@@ -618,7 +610,10 @@ function openDialog(c) {
           applyTeamInfoToState(teamInfo);
         }
         if (!teamInfo.ok || !teamInfo.joinedCode) {
-          await runOnce(c, {});
+          const base = await runOnceBase(c, {});
+          if (base.ok && autoTeam.value) {
+            await runOncePool(c, base);
+          }
         }
       }
       c.toast.success("已刷新");
@@ -663,7 +658,10 @@ function openDialog(c) {
             return;
           }
           c.toast.info("已开启自动组队，正在执行~~~");
-          await runOnce(c, {});
+          const base = await runOnceBase(c, {});
+          if (base.ok) {
+            await runOncePool(c, base);
+          }
         } else {
           c.toast.info("已关闭自动组队");
         }
