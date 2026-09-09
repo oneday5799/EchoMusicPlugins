@@ -197,10 +197,8 @@ async function getUid(c) {
 
 async function getSettings(c) {
   const saved = await c.storage.get("settings");
-  return {
-    poolUrl: POOL_URL,
-    ...(saved && typeof saved === "object" ? saved : {}),
-  };
+  const { poolUrl: _, ...rest } = (saved && typeof saved === "object") ? saved : {};
+  return { poolUrl: POOL_URL, ...rest };
 }
 
 async function poolRequest(c, path, payload, method = "POST") {
@@ -368,7 +366,6 @@ async function runOnceBase(c, opts = {}) {
       periodId,
       uid,
       totalMembers: period.totalMembers,
-      poolUrl: settings.poolUrl,
     };
   } finally {
     runLock = false;
@@ -377,7 +374,7 @@ async function runOnceBase(c, opts = {}) {
 
 async function runOncePool(c, baseResult) {
   if (!baseResult?.ok) return baseResult;
-  const { periodId, uid, poolUrl } = baseResult;
+  const { periodId, uid } = baseResult;
   const myCode = baseResult.myCode;
 
   let myTeam = await getMyTeamInfo(c, periodId);
@@ -395,32 +392,30 @@ async function runOncePool(c, baseResult) {
   }
 
   if (!joined) {
-    if (poolUrl) {
-      const pickRes = await poolJoin(c, periodId, uid);
-      if (pickRes.ok && pickRes.data?.code) {
-        const code = pickRes.data.code;
-        const r = await joinTeam(c, code);
-        const { httpOk, bizOk } = parseJoinResponse(r);
-        if (httpOk && bizOk) {
-          joined = true;
-          myTeam = await getMyTeamInfo(c, periodId);
-          if (myTeam.ok && myTeam.joinedCode) {
-            const remaining = calcRemaining(myTeam.joinedMemberCount);
-            await poolRegister(c, periodId, myTeam.joinedCode, "unknown", [uid], remaining);
-          }
-        } else {
-          const kind = classifyJoinError(r.body);
-          if (kind === "full" || kind === "invalid") {
-            await poolReport(c, periodId, code, "failed");
-          } else if (kind === "already_joined") {
-            joined = true;
-            myTeam = await getMyTeamInfo(c, periodId);
-          }
-          if (uiState) uiState.lastMessage = "加入队伍未成功（" + kind + "）";
+    const pickRes = await poolJoin(c, periodId, uid);
+    if (pickRes.ok && pickRes.data?.code) {
+      const code = pickRes.data.code;
+      const r = await joinTeam(c, code);
+      const { httpOk, bizOk } = parseJoinResponse(r);
+      if (httpOk && bizOk) {
+        joined = true;
+        myTeam = await getMyTeamInfo(c, periodId);
+        if (myTeam.ok && myTeam.joinedCode) {
+          const remaining = calcRemaining(myTeam.joinedMemberCount);
+          await poolRegister(c, periodId, myTeam.joinedCode, "unknown", [uid], remaining);
         }
       } else {
-        if (uiState) uiState.lastMessage = "暂无可加入的队伍，可手动组队或耐心等待";
+        const kind = classifyJoinError(r.body);
+        if (kind === "full" || kind === "invalid") {
+          await poolReport(c, periodId, code, "failed");
+        } else if (kind === "already_joined") {
+          joined = true;
+          myTeam = await getMyTeamInfo(c, periodId);
+        }
+        if (uiState) uiState.lastMessage = "加入队伍未成功（" + kind + "）";
       }
+    } else {
+      if (uiState) uiState.lastMessage = "暂无可加入的队伍，可手动组队或耐心等待";
     }
   }
 
@@ -573,7 +568,7 @@ function openDialog(c) {
   if (topDialogEl) return;
   versionMismatchReported = false;
 
-  const { createApp, h, ref, reactive, onMounted, defineComponent, defineAsyncComponent } = c.vue;
+  const { createApp, h, ref, defineComponent, defineAsyncComponent } = c.vue;
   const Button = defineAsyncComponent(c.ui.components.Button);
 
   const refreshing = c.vue.ref(false);
