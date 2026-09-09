@@ -130,11 +130,7 @@ const generateCSS = (settings, sections) => {
 
   if (hiddenItems.length > 0) {
     const itemSelector = hiddenItems
-      .map(id => [
-        `[data-settings-item="${id}"]`,
-        `[data-settings-divider-before="${id}"]`,
-        `[data-settings-divider-after="${id}"]`
-      ].join(', '))
+      .map(id => `[data-settings-item="${id}"]`)
       .join(', ');
     rules.push(`${itemSelector} { display: none !important; }`);
   }
@@ -147,6 +143,38 @@ const updateAnchorBar = (settings, sections) => {
     const text = btn.textContent?.trim();
     const hidden = sections.some(s => settings.sections[s.id] === false && s.label === text);
     btn.style.display = hidden ? 'none' : '';
+  });
+};
+
+const updateDividers = (settings) => {
+  document.querySelectorAll('.settings-card').forEach(card => {
+    const children = Array.from(card.children);
+
+    children.forEach(child => {
+      if (child.classList.contains('settings-divider')) {
+        child.style.display = 'none';
+      }
+    });
+
+    let lastVisible = null;
+    children.forEach(child => {
+      if (!child.classList.contains('settings-item')) return;
+      const itemId = child.getAttribute('data-settings-item');
+      const isVisible = !itemId || settings.items[itemId] !== false;
+      if (!isVisible) return;
+
+      if (lastVisible) {
+        let el = lastVisible.nextElementSibling;
+        while (el && el !== child) {
+          if (el.classList.contains('settings-divider')) {
+            el.style.display = '';
+            break;
+          }
+          el = el.nextElementSibling;
+        }
+      }
+      lastVisible = child;
+    });
   });
 };
 
@@ -173,16 +201,6 @@ const scanSectionsFromDOM = () => {
         const itemId = seenCount === 1 ? baseId : `${baseId}_${seenCount}`;
         items.push({ id: itemId, label: itemLabel, sectionId: id });
         child.setAttribute('data-settings-item', itemId);
-
-        const prevSibling = child.previousElementSibling;
-        if (prevSibling?.classList.contains('settings-divider')) {
-          prevSibling.setAttribute('data-settings-divider-before', itemId);
-        }
-
-        const nextSibling = child.nextElementSibling;
-        if (nextSibling?.classList.contains('settings-divider')) {
-          nextSibling.setAttribute('data-settings-divider-after', itemId);
-        }
       });
     }
 
@@ -226,6 +244,7 @@ const delayedScan = (ctx) => {
       if (css) { styleDispose = ctx.css.inject(css, { id: "settings-simplifier-style" }); }
       updateAnchorBar(state.settings, allSections);
     }
+    updateDividers(state.settings);
     scanTimer = null;
   }, 300);
 };
@@ -262,6 +281,7 @@ const createSettingsComponent = (ctx) =>
         const css = generateCSS(settings.value, sections.value);
         if (css) { styleDispose = ctx.css.inject(css, { id: "settings-simplifier-style" }); }
         updateAnchorBar(settings.value, sections.value);
+        updateDividers(settings.value);
       };
 
       const applySettingsMutation = async (mutator) => {
@@ -494,6 +514,7 @@ export async function activate(ctx) {
   const css = generateCSS(state.settings, allSections);
   if (css) { styleDispose = ctx.css.inject(css, { id: "settings-simplifier-style" }); }
   updateAnchorBar(state.settings, allSections);
+  updateDividers(state.settings);
 
   domObserver = ctx.dom.observe('.settings-anchor-bar', () => {
     updateAnchorBar(state.settings, allSections);
@@ -511,11 +532,9 @@ export async function activate(ctx) {
 export function deactivate() {
   if (scanTimer) { clearTimeout(scanTimer); scanTimer = null; }
 
-  document.querySelectorAll('.settings-anchor-item, [data-settings-item], [data-settings-divider-before], [data-settings-divider-after]').forEach(el => {
+  document.querySelectorAll('.settings-anchor-item, [data-settings-item], .settings-divider').forEach(el => {
     el.style.display = '';
     el.removeAttribute('data-settings-item');
-    el.removeAttribute('data-settings-divider-before');
-    el.removeAttribute('data-settings-divider-after');
   });
 
   if (settingsDispose) { settingsDispose(); settingsDispose = null; }
