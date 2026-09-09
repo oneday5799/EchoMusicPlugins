@@ -606,7 +606,6 @@ function openDialog(c) {
             for (const codeObj of myCodes) {
               const members = [];
               if (teamInfo.joinedCode === codeObj.code) members.push(uid);
-              else if (teamInfo.code === codeObj.code) members.push(uid);
               const kugouMemberCount = teamInfo.joinedCode === codeObj.code
                 ? teamInfo.joinedMemberCount
                 : (teamInfo.code === codeObj.code ? teamInfo.memberCount : 0);

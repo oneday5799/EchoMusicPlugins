@@ -77,18 +77,19 @@ var PeriodPool = class extends DurableObject {
       const now = Date.now();
       if (existing.length > 0) {
         const existingMembers = JSON.parse(String(existing[0].members ?? "[]"));
-        const merged = [...new Set([...existingMembers, ...members])];
+        const merged = [...new Set([...existingMembers, ...members].filter(m => m !== creator))];
         const realRemaining = Math.max(0, 2 - merged.length);
         this.ctx.storage.sql.exec(
           `UPDATE codes SET members = ?, remaining = ?, updated_at = ? WHERE code = ?`,
           JSON.stringify(merged), realRemaining, now, code
         );
       } else {
-        const realRemaining = Math.max(0, 2 - members.length);
+        const filtered = members.filter(m => m !== creator);
+        const realRemaining = Math.max(0, 2 - filtered.length);
         this.ctx.storage.sql.exec(
           `INSERT INTO codes (code, creator, members, remaining, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?)`,
-          code, creator, JSON.stringify(members), realRemaining, now, now
+          code, creator, JSON.stringify(filtered), realRemaining, now, now
         );
       }
       return { ok: true };
@@ -144,11 +145,12 @@ var PeriodPool = class extends DurableObject {
     await this._ready;
     try {
       const rows = this.ctx.storage.sql.exec(
-        `SELECT members FROM codes WHERE code = ?`, code
+        `SELECT members, creator FROM codes WHERE code = ?`, code
       ).toArray();
       if (rows.length === 0) return { ok: false, error: "code_not_found" };
       const existingMembers = JSON.parse(String(rows[0].members ?? "[]"));
-      const merged = [...new Set([...existingMembers, ...members])];
+      const creator = String(rows[0].creator ?? "");
+      const merged = [...new Set([...existingMembers, ...members].filter(m => m !== creator))];
       const realRemaining = Math.max(0, 2 - merged.length);
       this.ctx.storage.sql.exec(
         `UPDATE codes SET members = ?, remaining = ?, updated_at = ? WHERE code = ?`,
