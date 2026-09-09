@@ -53,6 +53,7 @@ async function runSync(task) {
 
 任务状态包括：
 
+- `pending`：等待用户操作，不自动清理；可以提供“开始”“稍后”等按钮。
 - `running`：任务正在执行。
 - `completed`：任务成功结束。
 - `error`：任务失败。
@@ -62,10 +63,11 @@ async function runSync(task) {
 
 - `register()` 创建一轮新任务并返回 handle。
 - `update()` 只更新当前运行，不允许改变状态。
-- `finish()` 是从 `running` 进入终态的唯一方式。
+- `start(patch?)` 将 `pending` 变为 `running`，保留同一个 handle 和 signal。
+- `finish()` 是从 `pending` 或 `running` 进入终态的唯一方式。
 - 重试或重新运行必须再次调用 `register()`，获得新的 handle。
 - 同一插件使用相同 ID 重新注册时，旧 handle 和旧定时器立即失效。
-- handle 失效后，`update()`、`finish()`、`cancel()` 和 `dismiss()` 返回 `false`。
+- handle 失效后，`start()`、`update()`、`finish()`、`cancel()` 和 `dismiss()` 返回 `false`。
 - 任务被替换、关闭、自动清理或插件停用时，`task.signal` 会触发 abort。
 - `finish("aborted")` 会立即触发 abort，并按保留策略展示中止状态。
 
@@ -135,9 +137,18 @@ task.signal;
 if (!task.active || task.signal.aborted) return;
 ```
 
+### start(patch?)
+
+将待操作任务开始执行。只有未取消且仍有效的 `pending` handle 返回 `true`；重复开始、终态、已取消或失效的 handle 返回 `false`。业务执行前应检查返回值，防止连点重复启动：
+
+```js
+if (!task.start({ actions: [], progress: { label: "执行中" } })) return;
+await runWork(task.signal);
+```
+
 ### update(patch)
 
-更新名称、图标、优先级、进度、错误文本或 actions。普通更新不会延长终态清理时间。
+更新名称、图标、优先级、进度、错误文本、`items` 明细或 `actions`。普通更新不会延长终态清理时间。
 
 ```js
 task.update({
@@ -202,6 +213,7 @@ Action 字段：
 - `label`：按钮文字。
 - `variant`：`ghost`、`primary` 或 `danger`，只控制视觉层级。
 - `closePanel`：触发后是否关闭任务中心面板。
+- `disabled`：禁用按钮；宿主也会阻止禁用操作的回调执行。
 - `onClick`：同步或异步回调。
 
 `variant` 不影响保留策略，Action 失败也不会自动改变任务状态。
@@ -214,3 +226,68 @@ Action 字段：
 - 插件开始停用时，任务会话会先失效，所有任务被移除，迟到的异步回调无法重新创建或更新旧任务。
 
 这是破坏性的新任务 API，不提供旧版按 ID `ctx.tasks.update(id, patch)` / `ctx.tasks.dismiss(id)` 兼容层。
+
+
+## 待操作任务与明细行（EchoMusic 2.3.2-beta.1 起）
+
+新增能力兼容现有 `running` 任务。使用 `pending`、`start()`、`items` 或 `disabled` 的插件应将 manifest 的 `requires.echoMusicVersion` 最低版本设为 `>=2.3.2-beta.1`。`pending` 不是终态，`retention` 只控制结束后的保留时间。宿主不会自动给待操作任务增加“关闭”按钮，可用自定义操作调用 `dismiss()`。
+
+```js
+export function activate(ctx) {
+  const task = ctx.tasks.register({
+    id: `${ctx.id}:apply-changes`,
+    name: "发现可同步内容",
+    status: "pending",
+    retention: "transient",
+    items: [
+      {
+        id: "library",
+        name: "媒体库",
+        description: "发现 12 条变更",
+        statusLabel: "待同步",
+        actions: [{ id: "sync", label: "同步", onClick: run }],
+      },
+    ],
+    actions: [
+      { id: "later", label: "稍后", onClick: () => task.dismiss() },
+      { id: "all", label: "立即同步", variant: "primary", onClick: run },
+    ],
+  });
+
+  async function run() {
+    if (!task.start({
+      actions: [],
+      items: [{ id: "library", name: "媒体库", statusLabel: "同步中…" }],
+    })) return;
+    try {
+      // 在这里调用插件自己的同步实现，并传入 task.signal。
+      await syncLibrary({ signal: task.signal });
+      if (task.signal.aborted) return;
+      task.finish("completed", {
+        items: [{ id: "library", name: "媒体库", statusLabel: "已同步" }],
+        progress: { label: "同步完成" },
+      });
+    } catch (error) {
+      if (task.signal.aborted) return;
+      task.finish("error", { error: String(error) });
+    }
+  }
+}
+```
+
+`items` 是可选的 `TaskItem[]`：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | `string` | 同一任务内稳定且唯一的明细 ID |
+| `name` | `string` | 明细名称 |
+| `description` | `string?` | 辅助说明，例如版本变化 |
+| `statusLabel` | `string?` | 该行的状态文字 |
+| `error` | `string?` | 该行的错误原因 |
+| `actions` | `TaskAction[]?` | 该行的操作按钮，与任务级按钮遵守相同规则 |
+
+- `task.update({ items })` 替换整份明细数组；传入 `[]` 清空。
+- 明细只负责展示，不拥有独立 handle、signal 或保留策略；整张任务统一结束和清理。
+- 行内回调同样通过插件运行时执行，受到插件回调错误处理机制管理。
+- `disabled` 仅阻止该按钮触发，不会取消已经开始的工作。异步操作还应使用 `start()` 或业务锁防止重复执行。
+- 关闭任务中心面板不会取消任务；删除任务条目、停用插件才会中止其 signal。需要“稍后不再提醒”时，插件应自行记住已忽略的内容。
