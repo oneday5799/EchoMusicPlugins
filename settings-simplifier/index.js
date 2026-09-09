@@ -2,146 +2,6 @@
 const STORAGE_KEY = "settings";
 const STORAGE_KEY_SECTIONS = "discoveredSections";
 
-const RECOMMENDED_SETTINGS = {
-  sections: {
-    appearance: true,
-    interface: false,
-    window: true,
-    font: true,
-    playback: true,
-    spatialAudio: true,
-    player: false,
-    network: true,
-    pageLyric: false,
-    desktopLyric: true,
-    shortcuts: true,
-    audioDevice: true,
-    experimental: true,
-    plugins: true,
-    data: true,
-    about: true
-  },
-  items: {
-    appearance_0: true,
-    appearance_1: true,
-    appearance_2: true,
-    appearance_3: true,
-    appearance_4: true,
-    appearance_5: true,
-    appearance_6: true,
-    appearance_7: true,
-    appearance_8: true,
-    appearance_9: true,
-    interface_0: true,
-    interface_1: true,
-    interface_2: true,
-    interface_3: true,
-    interface_4: true,
-    window_0: false,
-    window_1: false,
-    window_2: true,
-    window_3: true,
-    window_4: true,
-    window_5: true,
-    window_6: false,
-    font_0: true,
-    font_1: true,
-    font_2: true,
-    playback_0: false,
-    playback_1: false,
-    playback_2: true,
-    playback_3: false,
-    playback_4: false,
-    playback_5: false,
-    playback_6: false,
-    playback_7: true,
-    playback_8: true,
-    playback_9: false,
-    playback_10: false,
-    playback_11: false,
-    spatialAudio_0: true,
-    spatialAudio_1: true,
-    player_0: true,
-    player_1: true,
-    player_2: true,
-    player_3: true,
-    player_4: true,
-    player_5: true,
-    player_6: true,
-    player_7: true,
-    player_8: true,
-    player_9: true,
-    player_10: true,
-    player_11: true,
-    player_12: true,
-    player_13: true,
-    player_14: true,
-    network_0: false,
-    network_1: false,
-    network_2: true,
-    network_3: false,
-    network_4: false,
-    network_5: false,
-    pageLyric_0: true,
-    pageLyric_1: true,
-    pageLyric_2: true,
-    pageLyric_3: true,
-    pageLyric_4: true,
-    pageLyric_5: true,
-    pageLyric_6: true,
-    pageLyric_7: true,
-    pageLyric_8: true,
-    pageLyric_9: true,
-    pageLyric_10: true,
-    pageLyric_11: true,
-    pageLyric_12: true,
-    pageLyric_13: true,
-    pageLyric_14: true,
-    pageLyric_15: true,
-    desktopLyric_0: true,
-    desktopLyric_1: true,
-    desktopLyric_2: true,
-    desktopLyric_3: true,
-    desktopLyric_4: true,
-    desktopLyric_5: true,
-    desktopLyric_6: true,
-    desktopLyric_7: true,
-    desktopLyric_8: true,
-    desktopLyric_9: true,
-    desktopLyric_10: true,
-    desktopLyric_11: true,
-    desktopLyric_12: true,
-    shortcuts_0: true,
-    shortcuts_1: false,
-    shortcuts_2: true,
-    audioDevice_0: true,
-    audioDevice_1: true,
-    audioDevice_2: true,
-    audioDevice_3: true,
-    experimental_0: false,
-    experimental_1: false,
-    experimental_2: true,
-    experimental_3: true,
-    experimental_4: true,
-    experimental_5: false,
-    experimental_6: false,
-    experimental_7: false,
-    experimental_8: false,
-    experimental_9: false,
-    plugins_0: true,
-    plugins_1: true,
-    data_0: true,
-    data_1: true,
-    data_2: true,
-    about_0: true,
-    about_1: true,
-    about_2: true,
-    about_3: true,
-    about_4: true,
-    about_5: true
-  }
-};
-
 const BUILTIN_SECTIONS = [
   { id: 'appearance', label: '主题与外观' },
   { id: 'interface', label: '界面显示' },
@@ -235,16 +95,17 @@ let scanTimer = null;
 // ── Utility Functions ──────────────────────
 const normalizeSettings = (rawSettings, sections) => {
   const source = (rawSettings && typeof rawSettings === "object") ? rawSettings : {};
-  const result = {
-    sections: source.sections || {},
-    items: source.items || {}
-  };
+  const currentItems = {};
   sections.forEach(s => {
-    if (result.sections[s.id] === undefined) {
-      result.sections[s.id] = true;
-    }
+    (s.items || []).forEach(item => {
+      const old = (source.items || {})[item.id];
+      currentItems[item.id] = old !== undefined ? old : true;
+    });
   });
-  return result;
+  return {
+    sections: { ...(source.sections || {}) },
+    items: currentItems
+  };
 };
 
 const generateCSS = (settings, sections) => {
@@ -303,10 +164,13 @@ const scanSectionsFromDOM = () => {
     const items = [];
     const settingsCard = el.querySelector('.settings-card');
     if (settingsCard) {
+      const seenIds = {};
       settingsCard.querySelectorAll('.settings-item').forEach((child, index) => {
         const h3 = child.querySelector('h3');
         const itemLabel = h3?.textContent?.trim() || `子项 ${index + 1}`;
-        const itemId = `${id}_${index}`;
+        const baseId = `${id}_${itemLabel}`;
+        const seenCount = (seenIds[baseId] = (seenIds[baseId] || 0) + 1);
+        const itemId = seenCount === 1 ? baseId : `${baseId}_${seenCount}`;
         items.push({ id: itemId, label: itemLabel, sectionId: id });
         child.setAttribute('data-settings-item', itemId);
 
@@ -452,12 +316,22 @@ const createSettingsComponent = (ctx) =>
       };
 
       const applyRecommended = async () => {
-        await applySettingsMutation(() => {
-          settings.value = {
-            sections: { ...RECOMMENDED_SETTINGS.sections },
-            items: { ...RECOMMENDED_SETTINGS.items }
-          };
-        });
+        try {
+          const pluginDir = await ctx.electron.plugins.getDirectory();
+          const filePath = `${pluginDir}/${ctx.id}/recommended-settings.json`;
+          const result = await ctx.fs.readTextFile(filePath);
+          if (!result.ok) throw new Error('读取文件失败');
+          const raw = result.text ?? result.content ?? result.data ?? result;
+          const config = typeof raw === 'string' ? JSON.parse(raw) : raw;
+          await applySettingsMutation(() => {
+            settings.value = {
+              sections: { ...config.sections },
+              items: { ...config.items || {} }
+            };
+          });
+        } catch (err) {
+          ctx.toast.danger(`加载推荐配置失败：${err?.message || '未知错误'}`);
+        }
       };
 
       const refreshSections = async () => {
@@ -625,9 +499,13 @@ export async function activate(ctx) {
     updateAnchorBar(state.settings, allSections);
   });
 
-  sectionObserver = ctx.dom.observe('[data-section]', () => {
+  sectionObserver = ctx.dom.observe('[data-section], .settings-item', () => {
     delayedScan(ctx);
   });
+
+  if (document.querySelector('[data-section]')) {
+    delayedScan(ctx);
+  }
 }
 
 export function deactivate() {

@@ -4,5 +4,8 @@
   "version": "1.0.0",
   "description": "简化主应用设置页，通过开关控制每个设置分组及其子项的显示与隐藏。",
   "author": "Oneday5799",
-  "icon": "icon.svg"
+  "icon": "icon.svg",
+  "capabilities": {
+    "localFiles": true
+  }
 }
