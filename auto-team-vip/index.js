@@ -435,7 +435,11 @@ async function scheduleRun(c, delay = 800) {
   if (autoTimer) clearTimeout(autoTimer);
   autoTimer = setTimeout(async () => {
     autoTimer = null;
-    await runOnceBase(c, {});
+    const base = await runOnceBase(c, {});
+    const settings = await getSettings(c);
+    if (base.ok && settings.autoEnabled) {
+      await runOncePool(c, base);
+    }
   }, delay);
 }
 
