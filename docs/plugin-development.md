@@ -102,7 +102,8 @@ EchoMusic 支持在线插件源和本地插件。用户可以在"插件管理"�
 
 扩展文档：
 
-- [任务中心 API](tasks.md)：注册后台任务、更新进度、处理中止信号，并定义完成、失败和中止后的保留策略。
+- [标题栏更多菜单 API](more-menu.md)：注册全局菜单入口，支持排序、动态显示与禁用、异步操作和自动清理。
+- [任务中心 API](tasks.md)：注册后台任务或待操作任务、展示明细与操作按钮、更新进度、处理中止信号，并定义完成、失败和中止后的保留策略。
 - [独立浮窗与 Now Playing](floating-windows.md)：声明独立桌面浮窗、订阅当前播放/歌词快照、发送播放与歌词命令，并接入统一拖动与缩放交互。
 - [备份与恢复 API](backups.md)：创建、检查和恢复备份，以及将 WebDAV 等存储提供方接入主程序设置页。
 - `water-lyrics`：页面歌词动效示例，演示 `ctx.lyricEffects.register()` 的 style/decorator 接入方式。
@@ -130,7 +131,7 @@ EchoMusic --safe-mode
 pnpm exec electron . --safe-mode
 ```
 
-插件禁用或卸载时，运行时会先使 `ctx.tasks` 任务会话失效并移除任务，再调用插件的 `deactivate(ctx)`，随后清理通过宿主 API 注册的页面、统一设置、歌曲菜单、命令、事件监听、应用内快捷键、系统级全局快捷键、`ctx.css.inject` 样式、manifest 样式、`ctx.lyricEffects` 歌词动效、`ctx.ui.mount` / `ctx.ui.teleport` 挂载组件和 `ctx.dom.observe` 监听。插件如果直接修改 DOM 或注册了宿主无法感知的全局副作用，应通过 `ctx.dispose(() => ...)` 或 `deactivate(ctx)` 自行归还。
+插件禁用或卸载时，运行时会先使 `ctx.tasks` 任务会话失效并移除任务，再调用插件的 `deactivate(ctx)`，随后清理通过宿主 API 注册的页面、统一设置、歌曲菜单、标题栏更多菜单、命令、事件监听、应用内快捷键、系统级全局快捷键、`ctx.css.inject` 样式、manifest 样式、`ctx.lyricEffects` 歌词动效、`ctx.ui.mount` / `ctx.ui.teleport` 挂载组件和 `ctx.dom.observe` 监听。插件如果直接修改 DOM 或注册了宿主无法感知的全局副作用，应通过 `ctx.dispose(() => ...)` 或 `deactivate(ctx)` 自行归还。
 
 卸载插件会删除插件目录、移除启用状态、清除已追踪的插件私有 KV 数据，并清除与该插件相关的最近故障记录。
 
@@ -383,6 +384,7 @@ export default {
 | `ctx.dom.observe(selector, handler)`                                  | 监听动态出现的 DOM，禁用插件时自动断开                                                                                                                                                                                                                                                                                                                                                                        |
 | `ctx.ui.settings.define(options)`                                     | 声明插件设置入口，必须提供自定义 Vue 组件                                                                                                                                                                                                                                                                                                                                                                     |
 | `ctx.ui.sidebar.addItem(item)`                                        | 注册正式侧边栏导航入口，支持路由匹配、高亮和折叠侧栏图标                                                                                                                                                                                                                                                                                                                                                      |
+| `ctx.ui.moreMenu.addItem(item)` | 注册标题栏更多菜单入口；返回清理函数，详见 [更多菜单 API](more-menu.md) |
 | `ctx.ui.cover.setFallback(resolver)`                                  | 设置无封面或封面加载失败时的兜底图片 URL，resolver 必须同步返回字符串；resolver 会收到包含尺寸、来源信息和当前主题色的 `context`，详见下文「封面兜底」                                                                                                                                                                                                                                                                                                         |
 | `ctx.ui.components`                                                   | 异步加载宿主 UI 组件，键为文件名（不含扩展名）；目前覆盖 `ui/`（基础控件）、`music/`（音乐业务组件）、`player/`（播放器弹层）三类，后续新增自动出现。调用方式：`defineAsyncComponent(ctx.ui.components.Button)` 或 `await ctx.ui.components.Button()`。同名组件按目录优先级合并：`ui` > `music` > `player`。                                                                                                      |
 | `ctx.icons`                                                           | 宿主图标库（Iconify 格式）                                                                                                                                                                                                                                                                                                                                                                                    |
