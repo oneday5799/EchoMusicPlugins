@@ -15,9 +15,7 @@ let runLock = false;
 let uiState = null;
 let versionMismatchReported = false;
 
-// --- top bar button ---
-let topBtn = null;
-let topBtnCheckLoop = null;
+// --- Dialog ---
 let topDialogEl = null;
 let topDialogApp = null;
 
@@ -482,25 +480,9 @@ function clearAuto() {
   }
 }
 
-// --- Top bar button ---
+// --- Dialog ---
 
-const TOP_BTN_CSS = `
-.atv-top-btn {
-  width: 34px; height: 34px;
-  display: flex; align-items: center; justify-content: center;
-  border-radius: 50%;
-  transition: all 0.2s;
-  background: transparent; border: none;
-  color: var(--color-text-main); opacity: 0.6;
-  cursor: pointer; flex-shrink: 0;
-  margin-left: 2px;
-}
-.atv-top-btn:hover {
-  opacity: 1;
-  background-color: var(--control-hover-bg);
-}
-.atv-top-btn svg { width: 17px; height: 17px; }
-
+const DIALOG_CSS = `
 .atv-dialog-mask {
   position: fixed; inset: 0; z-index: 9999;
   background: rgba(0,0,0,0.35);
@@ -554,55 +536,18 @@ const TOP_BTN_CSS = `
 @keyframes atv-scale-in { from { opacity: 0; transform: scale(0.92); } to { opacity: 1; transform: scale(1); } }
 `;
 
-function startTopButton(c) {
-  if (topBtnCheckLoop) return;
-
-  if (!document.getElementById("atv-top-btn-style")) {
-    const s = document.createElement("style");
-    s.id = "atv-top-btn-style";
-    s.textContent = TOP_BTN_CSS;
-    document.head.appendChild(s);
-  }
-
-  topBtnCheckLoop = setInterval(() => {
-    const nav = document.querySelector(".titlebar-nav");
-    if (!nav) return;
-    const searchBox = nav.querySelector(".tb-search");
-    if (!searchBox) return;
-    if (document.getElementById("atv-top-btn")) return;
-
-    const btn = document.createElement("button");
-    btn.id = "atv-top-btn";
-    btn.className = "atv-top-btn nav-btn";
-    btn.title = "自动组队";
-    btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>';
-    btn.addEventListener("click", () => openDialog(c));
-    searchBox.parentNode.insertBefore(btn, searchBox.nextSibling);
-    topBtn = btn;
-    clearInterval(topBtnCheckLoop);
-    topBtnCheckLoop = null;
-  }, 800);
-}
-
-function stopTopButton() {
-  if (topBtnCheckLoop) {
-    clearInterval(topBtnCheckLoop);
-    topBtnCheckLoop = null;
-  }
-  if (topBtn) {
-    topBtn.remove();
-    topBtn = null;
-  }
-  const s = document.getElementById("atv-top-btn-style");
-  if (s) s.remove();
-  closeDialog();
-}
-
 // --- Dialog ---
 
 function openDialog(c) {
   if (topDialogEl) return;
   versionMismatchReported = false;
+
+  if (!document.getElementById("atv-dialog-style")) {
+    const s = document.createElement("style");
+    s.id = "atv-dialog-style";
+    s.textContent = DIALOG_CSS;
+    document.head.appendChild(s);
+  }
 
   const { createApp, h, ref, defineComponent, defineAsyncComponent } = c.vue;
   const Button = defineAsyncComponent(c.ui.components.Button);
@@ -843,9 +788,13 @@ function closeDialog() {
     topDialogEl.remove();
     topDialogEl = null;
   }
+  const s = document.getElementById("atv-dialog-style");
+  if (s) s.remove();
 }
 
 // --- activate / deactivate ---
+
+let moreMenuDispose = null;
 
 export async function activate(_ctx) {
   PLUGIN_VERSION = _ctx.manifest.version || "0.0.0";
@@ -868,7 +817,17 @@ export async function activate(_ctx) {
     joinedVipDesc: "",
   });
 
-  startTopButton(_ctx);
+  if (_ctx.ui?.titlebar?.register) {
+    moreMenuDispose = _ctx.ui.titlebar.register({
+      id: "auto-team-vip",
+      title: "自动组队",
+      icon: "tabler:star",
+      tooltip: "自动组队",
+      defaultPlacement: "toolbar",
+      order: 100,
+      onClick: () => openDialog(_ctx),
+    });
+  }
 
   _ctx.vue.watch(
     () => _ctx.pinia?.state?.value?.user?.info?.token,
@@ -880,14 +839,16 @@ export async function activate(_ctx) {
   scheduleRun(_ctx, 3000);
 
   _ctx.dispose(() => {
+    if (moreMenuDispose) { moreMenuDispose(); moreMenuDispose = null; }
     clearAuto();
-    stopTopButton();
+    closeDialog();
     uiState = null;
   });
 }
 
 export async function deactivate() {
+  if (moreMenuDispose) { moreMenuDispose(); moreMenuDispose = null; }
   clearAuto();
-  stopTopButton();
+  closeDialog();
   uiState = null;
 }
