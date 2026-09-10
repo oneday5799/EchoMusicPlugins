@@ -506,7 +506,7 @@ const applyCoverToContainer = (container, covers) => {
 const patchDetailCoverDom = (covers) => {
   const detailPage = pmCtx?.dom?.query(".playlist-detail-page");
   if (!detailPage) return;
-  const firstContainer = detailPage.querySelector(".cover-container");
+  const firstContainer = detailPage.querySelector(".page-sticky-layer .cover-container");
   if (firstContainer) applyCoverToContainer(firstContainer, covers);
 };
 
