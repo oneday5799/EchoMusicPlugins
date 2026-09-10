@@ -21,8 +21,9 @@ let runLock = false;
 let uiState = null;
 let versionMismatchReported = false;
 
-let topDialogEl = null;
-let topDialogApp = null;
+let dialogOpen = null;
+let cssDispose = null;
+let teleportDispose = null;
 
 function pick(obj, keys, fallback) {
   if (!obj || typeof obj !== "object") return fallback;
@@ -542,36 +543,68 @@ const DIALOG_CSS = `
 @keyframes atv-scale-in { from { opacity: 0; transform: scale(0.92); } to { opacity: 1; transform: scale(1); } }
 `;
 
-function openDialog(c) {
-  if (topDialogEl) return;
+function openDialog() {
+  if (!dialogOpen || dialogOpen.value) return;
   versionMismatchReported = false;
+  dialogOpen.value = true;
+}
 
-  if (!document.getElementById("atv-dialog-style")) {
-    const s = document.createElement("style");
-    s.id = "atv-dialog-style";
-    s.textContent = DIALOG_CSS;
-    document.head.appendChild(s);
-  }
+function closeDialog() {
+  if (dialogOpen) dialogOpen.value = false;
+}
 
-  const { createApp, h, ref, defineComponent, defineAsyncComponent } = c.vue;
-  const Button = defineAsyncComponent(c.ui.components.Button);
+// --- activate / deactivate ---
 
-  const refreshing = c.vue.ref(false);
+let moreMenuDispose = null;
+
+export async function activate(_ctx) {
+  PLUGIN_VERSION = _ctx.manifest.version || "0.0.0";
+
+  uiState = _ctx.vue.reactive({
+    lastMessage: "",
+    lastError: null,
+    periodId: "",
+    periodName: "",
+    startTime: "",
+    endTime: "",
+    periodActive: false,
+    myCode: "",
+    myMemberCount: 0,
+    myVipDesc: "",
+    targetMembers: 3,
+    joined: false,
+    joinedCode: "",
+    joinedMemberCount: 0,
+    joinedVipDesc: "",
+  });
+
+  dialogOpen = _ctx.vue.ref(false);
+  const refreshing = _ctx.vue.ref(false);
+  const autoTeam = _ctx.vue.ref(false);
   let lastRefreshTime = 0;
   const lastSyncTime = {};
+
+  _ctx.storage.get("settings").then((saved) => {
+    if (saved && typeof saved === "object") {
+      autoTeam.value = pick(saved, ["autoEnabled"], false) !== false;
+    }
+  });
+
+  const { h, ref, defineComponent, defineAsyncComponent } = _ctx.vue;
+  const Button = defineAsyncComponent(_ctx.ui.components.Button);
 
   const poolSyncThrottled = async (periodId, code, members, remaining) => {
     const now = Date.now();
     if (lastSyncTime[code] && now - lastSyncTime[code] < SYNC_THROTTLE_MS) return;
     lastSyncTime[code] = now;
-    return poolSync(c, periodId, code, members, remaining);
+    return poolSync(_ctx, periodId, code, members, remaining);
   };
 
   const onRefresh = async () => {
     if (refreshing.value) return;
     const now = Date.now();
     if (now - lastRefreshTime < REFRESH_THROTTLE_MS) {
-      c.toast.info("刷新过于频繁，请稍后再试");
+      _ctx.toast.info("刷新过于频繁，请稍后再试");
       return;
     }
     lastRefreshTime = now;
@@ -579,9 +612,9 @@ function openDialog(c) {
     try {
       const periodId = uiState?.periodId;
       if (periodId) {
-        const uid = await getUid(c);
-        const teamInfo = await getMyTeamInfo(c, periodId);
-        const statsRes = await poolStats(c, periodId);
+        const uid = await getUid(_ctx);
+        const teamInfo = await getMyTeamInfo(_ctx, periodId);
+        const statsRes = await poolStats(_ctx, periodId);
         if (statsRes.ok && statsRes.data?.codes) {
           const myCodes = statsRes.data.codes.filter(
             codeObj => codeObj.creator === uid || (codeObj.members || []).includes(uid)
@@ -602,15 +635,15 @@ function openDialog(c) {
           applyTeamInfoToState(teamInfo);
         }
         if (!teamInfo.ok || !teamInfo.joinedCode) {
-          const base = await runOnceBase(c, {});
+          const base = await runOnceBase(_ctx, {});
           if (base.ok && autoTeam.value) {
-            await runOncePool(c, base);
+            await runOncePool(_ctx, base);
           }
         }
       }
-      c.toast.success("已刷新");
+      _ctx.toast.success("已刷新");
     } catch (e) {
-      c.toast.warning("刷新失败");
+      _ctx.toast.warning("刷新失败");
     } finally {
       refreshing.value = false;
     }
@@ -618,71 +651,64 @@ function openDialog(c) {
 
   const StatusContent = defineComponent({
     setup() {
-      const Switch = defineAsyncComponent(c.ui.components.Switch);
+      const Switch = defineAsyncComponent(_ctx.ui.components.Switch);
       const manualCode = ref("");
-      const autoTeam = ref(false);
-
-      c.storage.get("settings").then((saved) => {
-        if (saved && typeof saved === "object") {
-          autoTeam.value = pick(saved, ["autoEnabled"], false) !== false;
-        }
-      });
 
       const toggleAuto = async (val) => {
         dlog("toggleAuto called with:", val);
         autoTeam.value = Boolean(val);
-        await updateSettings(c, { autoEnabled: autoTeam.value });
+        await updateSettings(_ctx, { autoEnabled: autoTeam.value });
         if (autoTeam.value) {
-          c.toast.info("已开启自动组队，正在执行~~~");
-          const base = await runOnceBase(c, {});
+          _ctx.toast.info("已开启自动组队，正在执行~~~");
+          const base = await runOnceBase(_ctx, {});
           if (base.ok) {
-            await runOncePool(c, base);
+            await runOncePool(_ctx, base);
           }
         } else {
-          c.toast.info("已关闭自动组队");
+          _ctx.toast.info("已关闭自动组队");
         }
       };
 
       const copyCode = async () => {
         if (!uiState?.myCode) {
-          c.toast.warning("暂无组队码，请先运行互助");
+          _ctx.toast.warning("暂无组队码，请先运行互助");
           return;
         }
-        await copyToClipboard(c, uiState.myCode);
+        await copyToClipboard(_ctx, uiState.myCode);
       };
 
       const joinManual = async () => {
         if (uiState?.joinedCode) {
-          await copyToClipboard(c, uiState.joinedCode);
+          await copyToClipboard(_ctx, uiState.joinedCode);
           return;
         }
         const code = String(manualCode.value || "").trim();
         if (!code) return;
-        const r = await joinTeam(c, code);
+        const r = await joinTeam(_ctx, code);
         const { httpOk, bizOk, errorMsg } = parseJoinResponse(r);
         if (httpOk && bizOk) {
-          c.toast.success("已提交加入");
+          _ctx.toast.success("已提交加入");
           manualCode.value = "";
           const periodId = uiState?.periodId;
           if (periodId) {
-            const teamInfo = await getMyTeamInfo(c, periodId);
+            const teamInfo = await getMyTeamInfo(_ctx, periodId);
             if (teamInfo.ok && uiState) {
               applyTeamInfoToState(teamInfo);
-              const uid = await getUid(c);
+              const uid = await getUid(_ctx);
               if (autoTeam.value && teamInfo.joinedCode) {
                 const remaining = calcRemaining(teamInfo.joinedMemberCount);
-                await poolRegister(c, periodId, teamInfo.joinedCode, JOINED_CREATOR, [uid], remaining);
+                await poolRegister(_ctx, periodId, teamInfo.joinedCode, JOINED_CREATOR, [uid], remaining);
               } else if (!autoTeam.value && teamInfo.code) {
                 const mc = teamInfo.memberCount || 1;
                 const remaining = calcRemaining(mc);
-                await poolRegister(c, periodId, teamInfo.code, uid, [], remaining);
+                await poolRegister(_ctx, periodId, teamInfo.code, uid, [], remaining);
               }
             }
           }
         } else {
           const msg = errorMsg || "加入失败，请检查组队码";
           setLastError(msg, "manual_join_failed", { code, errorMsg });
-          c.toast.warning(msg);
+          _ctx.toast.warning(msg);
         }
       };
 
@@ -712,7 +738,7 @@ function openDialog(c) {
                   uiState?.lastError
                     ? h("span", {
                         style: "font-size: 11px; padding: 2px 6px; border-radius: 4px; background: rgba(255,185,60,0.15); color: #f0b93c; cursor: pointer; flex-shrink: 0; white-space: nowrap;",
-                        onClick: () => copyErrorDetail(c),
+                        onClick: () => copyErrorDetail(_ctx),
                       }, "复制")
                     : null,
                 ])
@@ -752,74 +778,27 @@ function openDialog(c) {
   const DialogRoot = defineComponent({
     setup() {
       return () =>
-        h("div", { class: "atv-dialog-mask", onClick: (e) => { if (e.target === e.currentTarget) closeDialog(); } }, [
-          h("div", { class: "atv-dialog" }, [
-            h("div", { class: "atv-dialog-header" }, [
-              h("span", { class: "atv-dialog-title" }, "自动组队领VIP"),
-              h("span", {
-                class: "atv-refresh-btn",
-                onClick: onRefresh,
-                title: "刷新组队状态",
-              }, "刷新"),
-              h("div", { class: "atv-dialog-close", onClick: closeDialog, style: "font-size: 18px; line-height: 1; user-select: none;" }, "✕"),
-            ]),
-            h(StatusContent),
-          ]),
-        ]);
+        dialogOpen.value
+          ? h("div", { class: "atv-dialog-mask", onClick: (e) => { if (e.target === e.currentTarget) closeDialog(); } }, [
+              h("div", { class: "atv-dialog" }, [
+                h("div", { class: "atv-dialog-header" }, [
+                  h("span", { class: "atv-dialog-title" }, "自动组队领VIP"),
+                  h("span", {
+                    class: "atv-refresh-btn",
+                    onClick: onRefresh,
+                    title: "刷新组队状态",
+                  }, "刷新"),
+                  h("div", { class: "atv-dialog-close", onClick: closeDialog, style: "font-size: 18px; line-height: 1; user-select: none;" }, "✕"),
+                ]),
+                h(StatusContent),
+              ]),
+            ])
+          : null;
     },
   });
 
-  const container = document.createElement("div");
-  container.id = "atv-dialog-root";
-  document.body.appendChild(container);
-  topDialogEl = container;
-
-  const app = createApp(DialogRoot);
-  app.use(c.pinia);
-  app.use(c.router);
-  app.component("Icon", c.vue.Icon ?? (() => null));
-  app.config.globalProperties.$echo = c.app.config.globalProperties.$echo;
-  app.mount(container);
-  topDialogApp = app;
-}
-
-function closeDialog() {
-  if (topDialogApp) {
-    try { topDialogApp.unmount(); } catch {}
-    topDialogApp = null;
-  }
-  if (topDialogEl) {
-    topDialogEl.remove();
-    topDialogEl = null;
-  }
-  const s = document.getElementById("atv-dialog-style");
-  if (s) s.remove();
-}
-
-// --- activate / deactivate ---
-
-let moreMenuDispose = null;
-
-export async function activate(_ctx) {
-  PLUGIN_VERSION = _ctx.manifest.version || "0.0.0";
-
-  uiState = _ctx.vue.reactive({
-    lastMessage: "",
-    lastError: null,
-    periodId: "",
-    periodName: "",
-    startTime: "",
-    endTime: "",
-    periodActive: false,
-    myCode: "",
-    myMemberCount: 0,
-    myVipDesc: "",
-    targetMembers: 3,
-    joined: false,
-    joinedCode: "",
-    joinedMemberCount: 0,
-    joinedVipDesc: "",
-  });
+  cssDispose = _ctx.css.inject(DIALOG_CSS, { id: "atv-dialog-style" });
+  teleportDispose = _ctx.ui.teleport(DialogRoot, { id: "auto-team-vip-dialog" });
 
   if (_ctx.ui?.titlebar?.register) {
     moreMenuDispose = _ctx.ui.titlebar.register({
@@ -829,7 +808,7 @@ export async function activate(_ctx) {
       tooltip: "自动组队",
       defaultPlacement: "toolbar",
       order: 100,
-      onClick: () => openDialog(_ctx),
+      onClick: () => openDialog(),
     });
   }
 
@@ -844,9 +823,11 @@ export async function activate(_ctx) {
 
   _ctx.dispose(() => {
     if (moreMenuDispose) { moreMenuDispose(); moreMenuDispose = null; }
+    if (teleportDispose) { teleportDispose(); teleportDispose = null; }
+    if (cssDispose) { cssDispose(); cssDispose = null; }
     clearAuto();
-    closeDialog();
     uiState = null;
+    dialogOpen = null;
   });
 }
 
@@ -854,5 +835,8 @@ export async function deactivate() {
   if (moreMenuDispose) { moreMenuDispose(); moreMenuDispose = null; }
   clearAuto();
   closeDialog();
+  cssDispose?.(); cssDispose = null;
+  teleportDispose?.(); teleportDispose = null;
   uiState = null;
+  dialogOpen = null;
 }
