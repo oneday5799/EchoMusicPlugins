@@ -1,6 +1,6 @@
 // ============================================================
 //  plugin-panel — 插件面板
-//  侧边栏快捷入口 + 顶部导航栏按钮，一键跳转 EchoMusic 插件管理
+//  侧边栏快捷入口 + 标题栏入口，一键跳转 EchoMusic 插件管理
 // ============================================================
 
 const STORAGE_KEY = "settings";
@@ -25,7 +25,6 @@ const applyTitlebar = (enabled) => {
       id: "plugin-panel",
       title: "插件管理",
       icon: "tabler:apps",
-      tooltip: "插件管理",
       defaultPlacement: "toolbar",
       order: 100,
       onClick: () => {
