@@ -250,6 +250,7 @@ async function poolRequest(c, path, payload, method = "POST") {
     }
     return r;
   }
+  return { ok: false, error: "max_retries" };
 }
 
 async function poolRequestOnce(c, path, payload, method = "POST") {
@@ -396,7 +397,7 @@ async function runOnceBase(c, opts = {}) {
     }
 
     if (myCode && myMemberCount >= period.totalMembers && joinedCode && joinedMemberCount >= period.totalMembers) {
-      notify("本期组队已完成，期待下一次组队", "team_complete");
+      notify("本期组队已完成，期待下一次组队", null);
     }
 
     return {
