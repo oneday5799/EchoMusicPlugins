@@ -45,6 +45,14 @@ function applyTeamInfoToState(myTeam) {
   uiState.joined = Boolean(myTeam.joinedCode);
 }
 
+function setLastError(msg, code, detail) {
+  if (!uiState) return;
+  uiState.lastMessage = msg;
+  uiState.lastError = code
+    ? { code, message: msg, detail: detail || {} }
+    : null;
+}
+
 async function updateSettings(c, patch) {
   const prev = await c.storage.get("settings");
   const base = prev && typeof prev === "object" ? prev : {};
@@ -55,6 +63,30 @@ async function copyToClipboard(c, text) {
   try {
     await navigator.clipboard.writeText(text);
     c.toast.success("组队码已复制");
+  } catch {
+    c.toast.warning("复制失败");
+  }
+}
+
+async function copyErrorDetail(c) {
+  const err = uiState?.lastError;
+  if (!err) return;
+  const lines = [
+    "=== EchoMusic 自动组队错误详情 ===",
+    "时间: " + new Date().toLocaleString(),
+    "错误码: " + err.code,
+    "描述: " + err.message,
+  ];
+  if (err.detail) {
+    for (const [k, v] of Object.entries(err.detail)) {
+      if (v !== undefined && v !== null && v !== "") {
+        lines.push(k + ": " + (typeof v === "object" ? JSON.stringify(v) : v));
+      }
+    }
+  }
+  try {
+    await navigator.clipboard.writeText(lines.join("\n"));
+    c.toast.success("错误详情已复制");
   } catch {
     c.toast.warning("复制失败");
   }
@@ -163,17 +195,21 @@ function normalizeTeam(body) {
 
 function classifyJoinError(body) {
   const d = body?.data ?? body ?? {};
-  const code = Number(pick(d, ["error_code", "errcode", "code"], 0));
-  const msg = String(pick(d, ["msg", "message", "error"], "")).toLowerCase();
-  if (code !== 0) {
+  const errorCode = Number(pick(d, ["error_code", "errcode", "code"], 0));
+  const errorMsg = String(pick(d, ["msg", "message", "error"], ""));
+  const msg = errorMsg.toLowerCase();
+
+  let kind = "invalid";
+  if (errorCode !== 0) {
     if (msg.includes("已加入") || msg.includes("已经") || msg.includes("已参") || msg.includes("joined"))
-      return "already_joined";
-    if (msg.includes("满") || msg.includes("full") || code === 20006) return "full";
-    return "invalid";
+      kind = "already_joined";
+    else if (msg.includes("满") || msg.includes("full") || errorCode === 20006)
+      kind = "full";
+  } else {
+    if (msg.includes("满") || msg.includes("full")) kind = "full";
+    else if (msg.includes("已加入") || msg.includes("joined")) kind = "already_joined";
   }
-  if (msg.includes("满") || msg.includes("full")) return "full";
-  if (msg.includes("已加入") || msg.includes("joined")) return "already_joined";
-  return "invalid";
+  return { kind, errorCode, errorMsg };
 }
 
 function parseJoinResponse(r) {
@@ -238,7 +274,7 @@ async function poolRequestOnce(c, path, payload, method = "POST") {
       console.warn("[auto-team-vip] version mismatch:", msg);
       if (!versionMismatchReported && uiState) {
         versionMismatchReported = true;
-        uiState.lastMessage = msg;
+        setLastError(msg, res.data?.error, { pluginVersion: PLUGIN_VERSION });
         c.toast.warning(msg);
       }
       return { ok: false, status: res.status, data: res.data, error: msg, needUpdate: true };
@@ -297,14 +333,14 @@ async function joinTeam(c, code) {
 async function runOnceBase(c, opts = {}) {
   if (runLock) return { ok: false, error: "locked" };
   runLock = true;
-  const notify = (msg) => {
+  const notify = (msg, code, detail) => {
     if (opts.silent) return;
-    if (uiState) uiState.lastMessage = msg;
+    setLastError(msg, code, detail);
   };
   try {
     const auth = readAuth(c);
     if (!auth) {
-      notify("未登录 EchoMusic，请先登录");
+      notify("未登录 EchoMusic，请先登录", "not_logged_in");
       return { ok: false, error: "not_logged_in" };
     }
 
@@ -313,7 +349,7 @@ async function runOnceBase(c, opts = {}) {
 
     const period = await getPeriodInfo(c);
     if (!period.ok) {
-      notify(period.error || "获取活动信息失败");
+      notify(period.error || "获取活动信息失败", "no_period", { endpoint: "/team/period/info" });
       return { ok: false, error: "no_period" };
     }
     if (uiState) {
@@ -357,7 +393,7 @@ async function runOnceBase(c, opts = {}) {
     }
 
     if (myCode && myMemberCount >= period.totalMembers) {
-      notify("本期组队已完成，期待下一次组队");
+      notify("本期组队已完成，期待下一次组队", "team_complete");
     }
 
     return {
@@ -405,17 +441,17 @@ async function runOncePool(c, baseResult) {
           await poolRegister(c, periodId, myTeam.joinedCode, "unknown", [uid], remaining);
         }
       } else {
-        const kind = classifyJoinError(r.body);
+        const { kind, errorCode, errorMsg: joinErrorMsg } = classifyJoinError(r.body);
         if (kind === "full" || kind === "invalid") {
           await poolReport(c, periodId, code, "failed");
         } else if (kind === "already_joined") {
           joined = true;
           myTeam = await getMyTeamInfo(c, periodId);
         }
-        if (uiState) uiState.lastMessage = "加入队伍未成功（" + kind + "）";
+        setLastError("加入队伍未成功（" + kind + "）", "join_" + kind, { code, periodId, uid, errorCode, errorMsg: joinErrorMsg });
       }
     } else {
-      if (uiState) uiState.lastMessage = "暂无可加入的队伍，可手动组队或耐心等待";
+      setLastError("暂无可加入的队伍，可手动组队或耐心等待", "pool_empty", { periodId, uid });
     }
   }
 
@@ -572,6 +608,7 @@ function openDialog(c) {
   const Button = defineAsyncComponent(c.ui.components.Button);
 
   const refreshing = c.vue.ref(false);
+  let lastRefreshTime = 0;
   const lastSyncTime = {};
 
   const poolSyncThrottled = async (periodId, code, members, remaining) => {
@@ -583,6 +620,12 @@ function openDialog(c) {
 
   const onRefresh = async () => {
     if (refreshing.value) return;
+    const now = Date.now();
+    if (now - lastRefreshTime < 3000) {
+      c.toast.info("刷新过于频繁，请稍后再试");
+      return;
+    }
+    lastRefreshTime = now;
     refreshing.value = true;
     try {
       const periodId = uiState?.periodId;
@@ -689,6 +732,7 @@ function openDialog(c) {
           }
         } else {
           const msg = errorMsg || "加入失败，请检查组队码";
+          setLastError(msg, "manual_join_failed", { code, errorMsg });
           c.toast.warning(msg);
         }
       };
@@ -714,7 +758,15 @@ function openDialog(c) {
                 : "无"),
             ]),
             uiState?.lastMessage
-              ? h("div", { style: "font-size: 12px; color: #f0b93c; margin-bottom: 10px;" }, uiState.lastMessage)
+              ? h("div", { style: "font-size: 12px; color: #f0b93c; margin-bottom: 10px; display: flex; gap: 6px; align-items: center;" }, [
+                  h("span", { style: "flex: 1; word-break: break-all;" }, uiState.lastMessage),
+                  uiState?.lastError
+                    ? h("span", {
+                        style: "font-size: 11px; padding: 2px 6px; border-radius: 4px; background: rgba(255,185,60,0.15); color: #f0b93c; cursor: pointer; flex-shrink: 0; white-space: nowrap;",
+                        onClick: () => copyErrorDetail(c),
+                      }, "复制")
+                    : null,
+                ])
               : null,
           ]),
           h("div", { style: "display: flex; gap: 12px; align-items: center; margin-bottom: 4px;" }, [
@@ -800,6 +852,7 @@ export async function activate(_ctx) {
 
   uiState = _ctx.vue.reactive({
     lastMessage: "",
+    lastError: null,
     periodId: "",
     periodName: "",
     startTime: "",

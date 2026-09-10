@@ -99,7 +99,7 @@ var PeriodPool = class extends DurableObject {
   }
   async join(uid) {
     await this._ready;
-    if (!this._checkRate(uid)) return { ok: false, error: "rate_limited" };
+    if (!this._checkRate(uid)) return { ok: false, error: "rate_limited", message: "请求过于频繁，请稍后再试" };
     try {
       const cur = this.ctx.storage.sql.exec(
         `SELECT code FROM codes
@@ -124,7 +124,7 @@ var PeriodPool = class extends DurableObject {
   }
   async reportResult(code, status) {
     await this._ready;
-    if (!this._checkRate(code)) return { ok: false, error: "rate_limited" };
+    if (!this._checkRate(code)) return { ok: false, error: "rate_limited", message: "请求过于频繁，请稍后再试" };
     try {
       if (status === "joined") {
         // noop: remaining already decremented on dispatch
@@ -134,7 +134,7 @@ var PeriodPool = class extends DurableObject {
           Date.now(), code
         );
       } else {
-        return { ok: false, error: "unknown_status" };
+        return { ok: false, error: "unknown_status", message: "未知操作状态: " + status };
       }
       return { ok: true };
     } catch (e) {
@@ -147,7 +147,7 @@ var PeriodPool = class extends DurableObject {
       const rows = this.ctx.storage.sql.exec(
         `SELECT members, creator FROM codes WHERE code = ?`, code
       ).toArray();
-      if (rows.length === 0) return { ok: false, error: "code_not_found" };
+      if (rows.length === 0) return { ok: false, error: "code_not_found", message: "队伍码不存在或已过期" };
       const existingMembers = JSON.parse(String(rows[0].members ?? "[]"));
       const creator = String(rows[0].creator ?? "");
       const merged = [...new Set([...existingMembers, ...members].filter(m => m !== creator))];
