@@ -105,6 +105,7 @@ var PeriodPool = class extends DurableObject {
         `SELECT code FROM codes
          WHERE remaining > 0
            AND creator <> ?
+           AND creator <> 'unknown'
            AND NOT EXISTS (SELECT 1 FROM json_each(members) WHERE value = ?)
          ORDER BY created_at ASC LIMIT 1`,
         uid, uid
