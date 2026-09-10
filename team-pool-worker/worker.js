@@ -77,14 +77,14 @@ var PeriodPool = class extends DurableObject {
       const now = Date.now();
       if (existing.length > 0) {
         const existingMembers = JSON.parse(String(existing[0].members ?? "[]"));
-        const merged = [...new Set([...existingMembers, ...members].filter(m => m !== creator))];
+        const merged = [...new Set([...existingMembers, ...members].filter(m => m !== creator))].slice(0, 2);
         const realRemaining = Math.max(0, 2 - merged.length);
         this.ctx.storage.sql.exec(
           `UPDATE codes SET members = ?, remaining = ?, updated_at = ? WHERE code = ?`,
           JSON.stringify(merged), realRemaining, now, code
         );
       } else {
-        const filtered = members.filter(m => m !== creator);
+        const filtered = members.filter(m => m !== creator).slice(0, 2);
         const realRemaining = Math.max(0, 2 - filtered.length);
         this.ctx.storage.sql.exec(
           `INSERT INTO codes (code, creator, members, remaining, created_at, updated_at)
@@ -150,7 +150,7 @@ var PeriodPool = class extends DurableObject {
       if (rows.length === 0) return { ok: false, error: "code_not_found", message: "队伍码不存在或已过期" };
       const existingMembers = JSON.parse(String(rows[0].members ?? "[]"));
       const creator = String(rows[0].creator ?? "");
-      const merged = [...new Set([...existingMembers, ...members].filter(m => m !== creator))];
+      const merged = [...new Set([...existingMembers, ...members].filter(m => m !== creator))].slice(0, 2);
       const realRemaining = Math.max(0, 2 - merged.length);
       this.ctx.storage.sql.exec(
         `UPDATE codes SET members = ?, remaining = ?, updated_at = ? WHERE code = ?`,
