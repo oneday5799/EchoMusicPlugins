@@ -2,6 +2,12 @@ const DEFAULT_CAPACITY = 2; // 3人组队：队长 + 2队员
 const SYNC_THROTTLE_MS = 5000;
 const MAX_SYNC_CODES = 5;
 const POOL_URL = "https://echo-team-pool.oneday.vip";
+const POOL_RETRY_COUNT = 2;
+const POOL_RETRY_DELAY_MS = 500;
+const REFRESH_THROTTLE_MS = 3000;
+const AUTO_RUN_DELAY_MS = 3000;
+const LOGIN_RUN_DELAY_MS = 2000;
+const JOINED_CREATOR = "unknown";
 const INPUT_STYLE = "flex: 1; min-width: 0; height: 32px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--border-subtle, rgba(255,255,255,0.12)); background: var(--control-muted-bg, rgba(255,255,255,0.06)); color: var(--color-text-main); font-size: 13px; outline: none;";
 let PLUGIN_VERSION = "0.0.0";
 
@@ -15,7 +21,6 @@ let runLock = false;
 let uiState = null;
 let versionMismatchReported = false;
 
-// --- Dialog ---
 let topDialogEl = null;
 let topDialogApp = null;
 
@@ -236,11 +241,11 @@ async function getSettings(c) {
 }
 
 async function poolRequest(c, path, payload, method = "POST") {
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < POOL_RETRY_COUNT; attempt++) {
     const r = await poolRequestOnce(c, path, payload, method);
     if (r.status === 403) return r;
     if ((r.status === 0 || (r.status >= 500 && r.status < 600)) && attempt === 0) {
-      await new Promise(res => setTimeout(res, 500));
+      await new Promise(res => setTimeout(res, POOL_RETRY_DELAY_MS));
       continue;
     }
     return r;
@@ -422,7 +427,7 @@ async function runOncePool(c, baseResult) {
 
   if (myTeam.ok && myTeam.joinedCode) {
     const remaining = calcRemaining(myTeam.joinedMemberCount);
-    await poolRegister(c, periodId, myTeam.joinedCode, "unknown", [uid], remaining);
+    await poolRegister(c, periodId, myTeam.joinedCode, JOINED_CREATOR, [uid], remaining);
   }
 
   if (!joined) {
@@ -436,7 +441,7 @@ async function runOncePool(c, baseResult) {
         myTeam = await getMyTeamInfo(c, periodId);
         if (myTeam.ok && myTeam.joinedCode) {
           const remaining = calcRemaining(myTeam.joinedMemberCount);
-          await poolRegister(c, periodId, myTeam.joinedCode, "unknown", [uid], remaining);
+          await poolRegister(c, periodId, myTeam.joinedCode, JOINED_CREATOR, [uid], remaining);
         }
       } else {
         const { kind, errorCode, errorMsg: joinErrorMsg } = classifyJoinError(r.body);
@@ -536,8 +541,6 @@ const DIALOG_CSS = `
 @keyframes atv-scale-in { from { opacity: 0; transform: scale(0.92); } to { opacity: 1; transform: scale(1); } }
 `;
 
-// --- Dialog ---
-
 function openDialog(c) {
   if (topDialogEl) return;
   versionMismatchReported = false;
@@ -566,7 +569,7 @@ function openDialog(c) {
   const onRefresh = async () => {
     if (refreshing.value) return;
     const now = Date.now();
-    if (now - lastRefreshTime < 3000) {
+    if (now - lastRefreshTime < REFRESH_THROTTLE_MS) {
       c.toast.info("刷新过于频繁，请稍后再试");
       return;
     }
@@ -625,7 +628,7 @@ function openDialog(c) {
       });
 
       const toggleAuto = async (val) => {
-        console.log("[auto-team-vip] toggleAuto called with:", val);
+        dlog("toggleAuto called with:", val);
         autoTeam.value = Boolean(val);
         await updateSettings(c, { autoEnabled: autoTeam.value });
         if (autoTeam.value) {
@@ -667,7 +670,7 @@ function openDialog(c) {
               const uid = await getUid(c);
               if (autoTeam.value && teamInfo.joinedCode) {
                 const remaining = calcRemaining(teamInfo.joinedMemberCount);
-                await poolRegister(c, periodId, teamInfo.joinedCode, "unknown", [uid], remaining);
+                await poolRegister(c, periodId, teamInfo.joinedCode, JOINED_CREATOR, [uid], remaining);
               } else if (!autoTeam.value && teamInfo.code) {
                 const mc = teamInfo.memberCount || 1;
                 const remaining = calcRemaining(mc);
@@ -832,11 +835,11 @@ export async function activate(_ctx) {
   _ctx.vue.watch(
     () => _ctx.pinia?.state?.value?.user?.info?.token,
     (token) => {
-      if (token) scheduleRun(_ctx, 2000);
+      if (token) scheduleRun(_ctx, LOGIN_RUN_DELAY_MS);
     },
   );
 
-  scheduleRun(_ctx, 3000);
+  scheduleRun(_ctx, AUTO_RUN_DELAY_MS);
 
   _ctx.dispose(() => {
     if (moreMenuDispose) { moreMenuDispose(); moreMenuDispose = null; }
