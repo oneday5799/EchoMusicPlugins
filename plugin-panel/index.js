@@ -6,7 +6,7 @@
 const STORAGE_KEY = "settings";
 const DEFAULT_SETTINGS = {
   sidebar: true,
-  topBar: true,
+  titlebar: true,
 };
 
 let ctx = null;
@@ -15,82 +15,28 @@ let disposeSidebar = null;
 let settingsDispose = null;
 let settingsStyleDispose = null;
 
-// --- 顶部导航栏按钮 ---
-let topBtn = null;
-let topBtnStyle = null;
-let topBtnCheckLoop = null;
+// --- 标题栏入口 ---
+let titlebarDispose = null;
 
-function startTopButton() {
-  if (topBtnCheckLoop) return;
-
-  if (!document.getElementById("pp-top-btn-style")) {
-    const s = document.createElement("style");
-    s.id = "pp-top-btn-style";
-    s.textContent = [
-      ".pp-plugin-btn {",
-      "  width: 34px; height: 34px;",
-      "  display: flex; align-items: center; justify-content: center;",
-      "  border-radius: 50%;",
-      "  transition: all 0.2s;",
-      "  background: transparent; border: none;",
-      "  color: var(--color-text-main); opacity: 0.6;",
-      "  cursor: pointer; flex-shrink: 0;",
-      "  margin-left: 2px;",
-      "}",
-      ".pp-plugin-btn:hover {",
-      "  opacity: 1;",
-      "  background-color: var(--control-hover-bg);",
-      "}",
-      ".pp-plugin-btn svg {",
-      "  width: 17px; height: 17px;",
-      "}",
-    ].join("\n");
-    document.head.appendChild(s);
-    topBtnStyle = s;
-  }
-
-  topBtnCheckLoop = setInterval(() => {
-    const nav = document.querySelector(".titlebar-nav");
-    if (!nav) return;
-    const searchBox = nav.querySelector(".tb-search");
-    if (!searchBox) return;
-    if (document.getElementById("pp-top-btn")) return;
-
-    const btn = document.createElement("button");
-    btn.id = "pp-top-btn";
-    btn.className = "pp-plugin-btn nav-btn";
-    btn.title = "插件管理";
-    btn.innerHTML = [
-      '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" role="img" width="20" height="20" viewBox="0 0 24 24">',
-      '<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7h3a1 1 0 0 0 1-1V5a2 2 0 0 1 4 0v1a1 1 0 0 0 1 1h3a1 1 0 0 1 1 1v3a1 1 0 0 0 1 1h1a2 2 0 0 1 0 4h-1a1 1 0 0 0-1 1v3a1 1 0 0 1-1 1h-3a1 1 0 0 1-1-1v-1a2 2 0 0 0-4 0v1a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a2 2 0 0 0 0-4H4a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1"></path>',
-      "</svg>"
-    ].join("");
-    btn.addEventListener("click", () => {
-      ctx.router.push("/main/settings/plugins");
+const applyTitlebar = (enabled) => {
+  if (enabled) {
+    if (titlebarDispose) return;
+    titlebarDispose = ctx.ui.titlebar.register({
+      id: "plugin-panel",
+      title: "插件管理",
+      icon: "tabler:apps",
+      tooltip: "插件管理",
+      defaultPlacement: "toolbar",
+      order: 100,
+      onClick: () => {
+        ctx.router.push("/main/settings/plugins");
+      },
     });
-    searchBox.parentNode.insertBefore(btn, searchBox.nextSibling);
-    topBtn = btn;
-    clearInterval(topBtnCheckLoop);
-    topBtnCheckLoop = null;
-  }, 800);
-}
-
-function stopTopButton() {
-  if (topBtnCheckLoop) {
-    clearInterval(topBtnCheckLoop);
-    topBtnCheckLoop = null;
+  } else {
+    titlebarDispose?.();
+    titlebarDispose = null;
   }
-  if (topBtn) {
-    topBtn.remove();
-    topBtn = null;
-  }
-  if (topBtnStyle) {
-    topBtnStyle.remove();
-    topBtnStyle = null;
-  }
-  const s = document.getElementById("pp-top-btn-style");
-  if (s) s.remove();
-}
+};
 
 // --- 设置持久化 ---
 
@@ -98,7 +44,7 @@ const normalizeSettings = (value) => {
   const source = value && typeof value === "object" ? value : {};
   return {
     sidebar: source.sidebar ?? DEFAULT_SETTINGS.sidebar,
-    topBar: source.topBar ?? DEFAULT_SETTINGS.topBar,
+    titlebar: source.titlebar ?? DEFAULT_SETTINGS.titlebar,
   };
 };
 
@@ -107,7 +53,7 @@ const saveSettings = async (values) => {
   state.settings = next;
   await ctx.storage.set(STORAGE_KEY, next);
   applySidebar(next.sidebar);
-  applyTopBar(next.topBar);
+  applyTitlebar(next.titlebar);
   return next;
 };
 
@@ -126,14 +72,6 @@ const applySidebar = (enabled) => {
   } else {
     disposeSidebar?.();
     disposeSidebar = null;
-  }
-};
-
-const applyTopBar = (enabled) => {
-  if (enabled) {
-    startTopButton();
-  } else {
-    stopTopButton();
   }
 };
 
@@ -240,9 +178,9 @@ const createSettingsComponent = (ctx) =>
               "在侧边栏底部插件区域添加快捷入口。"
             ),
             row(
-              "顶部入口",
-              "topBar",
-              "在主窗口顶部导航栏搜索框旁添加按钮。"
+              "标题栏入口",
+              "titlebar",
+              "在顶部标题栏添加插件管理快捷入口。"
             ),
           ]),
           h("div", { class: "pp-settings-actions" }, [
@@ -264,7 +202,7 @@ const registerSettings = (ctx) => {
   settingsDispose?.();
   settingsDispose = ctx.ui.settings.define({
     title: "插件面板",
-    description: "控制插件面板入口在侧边栏和顶部导航栏的显示。",
+    description: "控制插件面板入口在侧边栏和标题栏的显示。",
     component: createSettingsComponent(ctx),
   });
 };
@@ -284,7 +222,7 @@ export async function activate(_ctx) {
   registerSettings(ctx);
 
   applySidebar(state.settings.sidebar);
-  applyTopBar(state.settings.topBar);
+  applyTitlebar(state.settings.titlebar);
 }
 
 export function deactivate() {
@@ -296,7 +234,8 @@ export function deactivate() {
   disposeSidebar?.();
   disposeSidebar = null;
 
-  stopTopButton();
+  titlebarDispose?.();
+  titlebarDispose = null;
 
   state = null;
   ctx = null;
