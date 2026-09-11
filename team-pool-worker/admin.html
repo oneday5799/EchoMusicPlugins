@@ -20,7 +20,7 @@
           padding: 16px; margin-bottom: 16px; }
   .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
   label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 3px; }
-  input[type="text"], input[type="password"] {
+  input[type="text"], input[type="password"], select {
     padding: 7px 10px; border: 1px solid var(--border); border-radius: 6px;
     font-size: 13px; width: 260px; background: #fff; color: var(--text);
   }
@@ -84,6 +84,28 @@
   <div class="foot">三项配置均需手填，仅保存在本浏览器 localStorage，不上传、不同步；点「清除本机配置」可随时抹除。期次 ID 见插件面板或插件日志（/team/period/info 的 id 字段）。</div>
 </div>
 
+<div class="card">
+  <h2>管理操作 <span class="muted">（破坏性，谨慎使用）</span></h2>
+  <div class="row">
+    <div>
+      <label>操作</label>
+      <select id="admAction" style="width: 300px;">
+        <option value="delete_user">删除用户 —— 解除 token 绑定（多设备/丢 token 恢复）</option>
+        <option value="delete_team">删除队伍 —— 同时清除该队全部租约</option>
+        <option value="expire_lease">强制过期租约 —— 立即腾出在途名额</option>
+      </select>
+    </div>
+    <div>
+      <label id="admTargetLabel">目标 uid</label>
+      <input type="text" id="admTarget" placeholder="按所选操作填写对应值" style="width: 320px;" />
+    </div>
+    <div style="align-self: flex-end;">
+      <button id="btnAdm" class="secondary">执行</button>
+    </div>
+  </div>
+  <div class="foot" id="admHint">删除用户会连同其全部租约一并删除，不可恢复；成功后该账号下次快照自动重签 token。删除队伍同理，相关用户恢复可分配。强制过期仅改变租约状态，保留账目记录。</div>
+</div>
+
 <div id="banner" class="banner"></div>
 <div id="content" class="hidden">
 
@@ -143,6 +165,44 @@ $("btnClear").addEventListener("click", () => {
   banner("已清除本机保存的配置（localStorage 中 pool_api / pool_period / pool_token）", true);
 });
 
+// ---------- 管理操作 ----------
+const ADM_ACTIONS = {
+  delete_user: { label: "删除用户", targetLabel: "目标 uid" },
+  delete_team: { label: "删除队伍", targetLabel: "目标队伍码" },
+  expire_lease: { label: "强制过期租约", targetLabel: "目标租约 ID" },
+};
+$("admAction").addEventListener("change", () => {
+  const a = ADM_ACTIONS[$("admAction").value];
+  $("admTargetLabel").textContent = a.targetLabel;
+});
+$("btnAdm").addEventListener("click", async () => {
+  const action = $("admAction").value;
+  const target = $("admTarget").value.trim();
+  if (!target) {
+    banner("请先填写目标值（" + ADM_ACTIONS[action].targetLabel + "）", false);
+    return;
+  }
+  const a = ADM_ACTIONS[action];
+  if (!confirm(a.label + "：" + target + "\n\n删除类操作不可恢复，确认执行？")) return;
+  $("btnAdm").disabled = true;
+  try {
+    const r = await callPool("/v2/admin/delete", { action, target, confirm: true });
+    const parts = [a.label + " " + target + " 完成"];
+    if (r.deleted_users !== undefined) parts.push("用户行 " + r.deleted_users);
+    if (r.deleted_teams !== undefined) parts.push("队伍行 " + r.deleted_teams);
+    if (r.deleted_leases !== undefined) parts.push("租约 " + r.deleted_leases);
+    if (r.note) parts.push(r.note);
+    banner(parts.join(" · "), true);
+    $("admTarget").value = "";
+    // 数据看板若已展开，自动刷新一次全量数据
+    if (!$("content").classList.contains("hidden")) query("data");
+  } catch (e) {
+    banner("操作失败：" + (e.message || e), false);
+  } finally {
+    $("btnAdm").disabled = false;
+  }
+});
+
 let autoTimer = null;
 $("auto").addEventListener("change", () => {
   clearInterval(autoTimer);
@@ -159,9 +219,17 @@ function banner(msg, ok) {
   el.textContent = msg || "";
 }
 function badge(status) { return '<span class="badge b-' + esc(status) + '">' + esc(status) + "</span>"; }
-function shortTime(iso) { return iso ? esc(String(iso).replace("T", " ").slice(0, 19)) : "—"; }
+function shortTime(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "—";
+  const p = (n) => String(n).padStart(2, "0");
+  // 服务端返回 UTC ISO 串，统一转为浏览器本地时区显示
+  return esc(d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) +
+    " " + p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds()));
+}
 
-async function callPool(endpoint) {
+async function callPool(endpoint, extra = {}) {
   const base = $("api").value.trim().replace(/\/+$/, "");
   const period = $("period").value.trim();
   const token = $("token").value.trim();
@@ -169,7 +237,7 @@ async function callPool(endpoint) {
   const res = await fetch(base + endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-Admin-Token": token, "X-Plugin-Version": ADMIN_VERSION },
-    body: JSON.stringify({ period_id: period }),
+    body: JSON.stringify({ period_id: period, ...extra }),
   });
   const data = await res.json().catch(() => ({}));
   if (res.status === 404) throw new Error("404：ADMIN_TOKEN 未在 Worker 配置、密钥不匹配，或该端点尚未部署（旧版 Worker）");
@@ -193,7 +261,7 @@ function renderStats(s) {
   $("stats").innerHTML = cells
     .map(([t, n, cls]) => '<div class="stat ' + cls + '"><div class="n">' + esc(n ?? 0) + '</div><div class="t">' + esc(t) + "</div></div>")
     .join("");
-  if (s.now_iso) $("snapTime").textContent = "· 服务端时间 " + shortTime(s.now_iso);
+  if (s.now_iso) $("snapTime").textContent = "· 本地时间 " + shortTime(s.now_iso);
 }
 
 function teamStatus(t) {
