@@ -834,12 +834,9 @@ export async function activate(_ctx) {
         }
       };
 
-      // 渲染期调用：读取响应式 uiState，刷新后聚合数随渲染更新
+      // 渲染期调用：仅在码池鉴权异常时显示提示行；开放队伍/等待人数不再对外展示
       const poolLineText = () => {
-        if (uiState?.poolDisabled) return "码池：本期已停用（下期自动恢复）";
-        if (uiState?.poolOpen >= 0) {
-          return `码池：开放队伍 ${uiState.poolOpen} · 等待 ${Math.max(0, uiState.poolWaiting)} 人`;
-        }
+        if (uiState?.poolDisabled) return "状态异常，请联系插件作者处理，或等待下期组队";
         return "";
       };
 
