@@ -1,13 +1,24 @@
-const DEFAULT_CAPACITY = 2; // 3人组队：队长 + 2队员
-const SYNC_THROTTLE_MS = 5000;
-const MAX_SYNC_CODES = 5;
+// auto-team-vip v1.2.0 —— v2 快照/租约协议
+// 架构设计：docs/auto-team-vip-redesign.md（§4 §7）
+//
+// 职责边界：
+//   - 酷狗服务器：队伍真实构成的唯一权威（本插件是其唯一可靠观察者 + 组队操作执行器）。
+//   - 码池服务器：存储快照、计算名额、以租约方式下发组队码。
+//   - 本插件：①GUARD → ②MYINFO → ③SNAPSHOT → ④DECIDE → ⑤ASSIGN → ⑥JOIN_KUGOU → ⑦RESULT → ⑧VERIFY。
+
+const TARGET_MEMBERS = 3; // 1 队长 + 2 队员
 const POOL_URL = "https://echo-team-pool.oneday.vip";
-const POOL_RETRY_COUNT = 2;
-const POOL_RETRY_DELAY_MS = 500;
+const POOL_RETRY_DELAY_MS = 500;      // 瞬时故障（网络/5xx）的一次补射间隔
+const RETRY_MAX = 3;                  // 当轮 join 重试上限（含首次）
+const RETRY_DELAY_MS = 2000;          // 重试间隔
+const MIN_RUN_INTERVAL_MS = 10_000;   // 触发合并窗口
+const HEARTBEAT_TICK_MS = 60_000;     // 心跳巡检周期
+const SNAPSHOT_INTERVAL_MS = 5 * 60_000;    // 保活快照间隔
+const FULLFLOW_INTERVAL_MS = 10 * 60_000;   // 等待新码的完整流程间隔
+const POOL_BACKOFF_STEPS_MS = [5, 15, 30].map((m) => m * 60_000); // 码池不可用退避
 const REFRESH_THROTTLE_MS = 3000;
 const AUTO_RUN_DELAY_MS = 3000;
 const LOGIN_RUN_DELAY_MS = 2000;
-const JOINED_CREATOR = "unknown";
 const INPUT_STYLE = "flex: 1; min-width: 0; height: 32px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--border-subtle, rgba(255,255,255,0.12)); background: var(--control-muted-bg, rgba(255,255,255,0.06)); color: var(--color-text-main); font-size: 13px; outline: none;";
 let PLUGIN_VERSION = "0.0.0";
 
@@ -16,14 +27,46 @@ function dlog(...args) {
   if (_DEBUG) console.log("[auto-team-vip]", ...args);
 }
 
-let autoTimer = null;
-let runLock = false;
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ---------- 状态 ----------
+
 let uiState = null;
+let runChain = null;
+let lastRunAt = 0;
+let lastSnapshotAt = 0;
+let lastFullAt = 0;
+let heartbeatTimer = null;
 let versionMismatchReported = false;
 
 let dialogOpen = null;
 let cssDispose = null;
 let teleportDispose = null;
+let moreMenuDispose = null;
+
+// 码池侧状态：退避 + 401 停用（按期次）
+const poolBackoff = { step: 0, nextAttemptAt: 0 };
+let disabledPeriods = new Set();
+
+function poolDown() {
+  poolBackoff.nextAttemptAt =
+    Date.now() + POOL_BACKOFF_STEPS_MS[Math.min(poolBackoff.step, POOL_BACKOFF_STEPS_MS.length - 1)];
+  poolBackoff.step += 1;
+  dlog("[码池退避]", Math.round((poolBackoff.nextAttemptAt - Date.now()) / 1000) + "s");
+}
+
+function poolUp() {
+  poolBackoff.step = 0;
+  poolBackoff.nextAttemptAt = 0;
+}
+
+function poolAvailable() {
+  return Date.now() >= poolBackoff.nextAttemptAt;
+}
+
+// ---------- 通用 ----------
 
 function pick(obj, keys, fallback) {
   if (!obj || typeof obj !== "object") return fallback;
@@ -34,27 +77,21 @@ function pick(obj, keys, fallback) {
   return fallback;
 }
 
-function calcRemaining(memberCount) {
-  return Math.min(DEFAULT_CAPACITY, Math.max(0, DEFAULT_CAPACITY - (memberCount - 1)));
-}
-
-function applyTeamInfoToState(myTeam) {
-  if (!uiState || !myTeam.ok) return;
-  uiState.myCode = myTeam.code;
-  uiState.myMemberCount = myTeam.memberCount;
-  uiState.myVipDesc = myTeam.vipDesc;
-  uiState.joinedCode = myTeam.joinedCode;
-  uiState.joinedMemberCount = myTeam.joinedMemberCount;
-  uiState.joinedVipDesc = myTeam.joinedVipDesc;
-  uiState.joined = Boolean(myTeam.joinedCode);
-}
-
 function setLastError(msg, code, detail) {
   if (!uiState) return;
   uiState.lastMessage = msg;
-  uiState.lastError = code
-    ? { code, message: msg, detail: detail || {} }
-    : null;
+  uiState.lastError = code ? { code, message: msg, detail: detail || {} } : null;
+}
+
+function applyTeamInfoToState(info) {
+  if (!uiState || !info?.ok) return;
+  uiState.myCode = info.created?.code || "";
+  uiState.myMemberCount = info.created?.memberCount || 0;
+  uiState.myVipDesc = info.created?.vipDesc || "";
+  uiState.joinedCode = info.joined?.code || "";
+  uiState.joinedMemberCount = info.joined?.memberCount || 0;
+  uiState.joinedVipDesc = info.joined?.vipDesc || "";
+  uiState.joined = Boolean(info.joined?.code);
 }
 
 async function updateSettings(c, patch) {
@@ -95,6 +132,8 @@ async function copyErrorDetail(c) {
     c.toast.warning("复制失败");
   }
 }
+
+// ---------- 酷狗侧（观察者 + 执行器） ----------
 
 function readAuth(c) {
   const user = c.pinia?.state?.value?.user;
@@ -150,7 +189,7 @@ async function teamRequest(c, method, url, params, data) {
     return { ok: false, error: String(e?.message || e) };
   }
 
-  dlog("[酷狗响应]", method, url, "status:", res?.status, "body:", res?.body);
+  dlog("[酷狗响应]", method, url, "status:", res?.status);
 
   const body = res?.body;
   const eventId = pick(body, ["ssaCode", "eventId"], "") || pick(res?.headers, ["ssa-code", "SSA-CODE"], "");
@@ -164,7 +203,7 @@ async function teamRequest(c, method, url, params, data) {
       if (verified?.ok) {
         dlog("[酷狗重试]", method, url);
         res = await c.electron.api.request(cfg);
-        dlog("[酷狗重试响应]", method, url, "status:", res?.status, "body:", res?.body);
+        dlog("[酷狗重试响应]", method, url, "status:", res?.status);
       }
     } catch (e) {
       console.warn("[auto-team-vip] verification failed:", e);
@@ -177,35 +216,38 @@ async function teamRequest(c, method, url, params, data) {
 function normalizePeriod(body) {
   const d = body?.data ?? body ?? {};
   const current = d?.current_period_info ?? d?.period_info ?? d;
-  const total = Number(pick(current, ["team_member_count", "member_count", "team_num", "target_member", "limit", "need_count"], 3));
+  const total = Number(pick(current, ["team_member_count", "member_count", "team_num", "target_member", "limit", "need_count"], TARGET_MEMBERS));
   const statusRaw = Number(pick(current, ["status"], -1));
-  const isActive = statusRaw === 0;
   return {
     periodId: String(pick(current, ["id", "period_id", "periodId", "activity_id"], "")),
     periodName: String(pick(current, ["name"], "")),
     startTime: String(pick(current, ["start_time"], "")),
     endTime: String(pick(current, ["end_time"], "")),
-    active: isActive,
-    totalMembers: total >= 3 ? total : 3,
+    active: statusRaw === 0,
+    totalMembers: total >= TARGET_MEMBERS ? total : TARGET_MEMBERS,
     raw: body,
   };
 }
 
-function normalizeTeam(body) {
+// 两维度真实状态：我创建的队伍（队长身份）+ 我加入的队伍（队员身份，至多 1 支）
+function normalizeTeamInfo(body) {
   const d = body?.data ?? body ?? {};
-  const createList = d?.my_create_team_list ?? [];
-  const joinList = d?.my_join_team_list ?? [];
-  const created = Array.isArray(createList) && createList.length > 0 ? createList[0] : null;
-  const joined = Array.isArray(joinList) && joinList.length > 0 ? joinList[0] : null;
-  const code = created ? pick(created, ["team_code", "code", "teamCode"], "") : "";
-  const members = created && Array.isArray(created?.member_list) ? created.member_list.length : 0;
-  const memberCount = created ? Number(pick(created, ["member_count", "count", "members_count", "current_count"], members)) : 0;
-  const vipDesc = created ? pick(created, ["vip_desc"], "") : "";
-  const joinedCode = joined ? pick(joined, ["team_code", "code", "teamCode"], "") : "";
-  const joinedMembers = joined && Array.isArray(joined?.member_list) ? joined.member_list.length : 0;
-  const joinedMemberCount = joined ? Number(pick(joined, ["member_count", "count", "members_count", "current_count"], joinedMembers)) : 0;
-  const joinedVipDesc = joined ? pick(joined, ["vip_desc"], "") : "";
-  return { code, memberCount, vipDesc, joinedCode, joinedMemberCount, joinedVipDesc, raw: d };
+  const toTeam = (t) => {
+    if (!t) return null;
+    const code = String(pick(t, ["team_code", "code", "teamCode"], ""));
+    if (!code) return null;
+    const listLen = Array.isArray(t.member_list) ? t.member_list.length : 0;
+    const mc = listLen > 0 ? listLen : Number(pick(t, ["member_count", "count", "members_count", "current_count"], 1));
+    return {
+      code,
+      memberCount: Math.min(TARGET_MEMBERS, Math.max(1, Math.round(Number(mc) || 1))),
+      captain: String(pick(t, ["captain"], "") || ""),
+      vipDesc: String(pick(t, ["vip_desc"], "")),
+    };
+  };
+  const createList = Array.isArray(d?.my_create_team_list) ? d.my_create_team_list : [];
+  const joinList = Array.isArray(d?.my_join_team_list) ? d.my_join_team_list : [];
+  return { created: toTeam(createList[0]), joined: toTeam(joinList[0]), raw: d };
 }
 
 function classifyJoinError(body) {
@@ -236,96 +278,6 @@ function parseJoinResponse(r) {
   return { httpOk, bizOk, errorCode, errorMsg };
 }
 
-async function getUid(c) {
-  let uid = await c.storage.get("uid");
-  if (!uid) {
-    const bytes = crypto.getRandomValues(new Uint8Array(16));
-    uid = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-    await c.storage.set("uid", uid);
-  }
-  return uid;
-}
-
-async function getSettings(c) {
-  const saved = await c.storage.get("settings");
-  const { poolUrl: _, ...rest } = (saved && typeof saved === "object") ? saved : {};
-  return { poolUrl: POOL_URL, ...rest };
-}
-
-async function poolRequest(c, path, payload, method = "POST") {
-  for (let attempt = 0; attempt < POOL_RETRY_COUNT; attempt++) {
-    const r = await poolRequestOnce(c, path, payload, method);
-    if (r.status === 403) return r;
-    if ((r.status === 0 || (r.status >= 500 && r.status < 600)) && attempt === 0) {
-      await new Promise(res => setTimeout(res, POOL_RETRY_DELAY_MS));
-      continue;
-    }
-    return r;
-  }
-  return { ok: false, error: "max_retries" };
-}
-
-async function poolRequestOnce(c, path, payload, method = "POST") {
-  const settings = await getSettings(c);
-  const base = String(settings.poolUrl || "").replace(/\/+$/, "");
-  if (!base) {
-    console.warn("[auto-team-vip] poolRequest: no poolUrl configured");
-    return { ok: false, error: "no_pool" };
-  }
-  dlog("poolRequest:", method, base + path);
-  try {
-    const res = await c.net.request({
-      url: base + path,
-      method,
-      headers: {
-        "Content-Type": "application/json",
-        "X-Plugin-Version": PLUGIN_VERSION,
-      },
-      body: method === "GET" ? undefined : payload,
-      responseType: "json",
-    });
-    dlog("poolRequest response:", res.status);
-    if (res.status === 403 && (res.data?.error === "version_mismatch" || res.data?.error === "version_missing")) {
-      const msg = res.data?.message || "插件版本过低，请更新";
-      console.warn("[auto-team-vip] version mismatch:", msg);
-      if (!versionMismatchReported && uiState) {
-        versionMismatchReported = true;
-        setLastError(msg, res.data?.error, { pluginVersion: PLUGIN_VERSION });
-        c.toast.warning(msg);
-      }
-      return { ok: false, status: res.status, data: res.data, error: msg, needUpdate: true };
-    }
-    return { ok: res.status >= 200 && res.status < 300, status: res.status, data: res.data };
-  } catch (e) {
-    console.warn("[auto-team-vip] poolRequest error:", e);
-    const msg = String(e?.message || e);
-    const hint = msg.includes("403") ? "（Cloudflare 安全挑战，请降低 Security Level 或使用 workers.dev 域名）" : "";
-    return { ok: false, status: 0, data: null, error: msg + hint };
-  }
-}
-
-async function poolRegister(c, periodId, code, creator, members, remaining) {
-  return poolRequest(c, "/pool/register", { period_id: periodId, code, creator, members, remaining });
-}
-
-async function poolJoin(c, periodId, uid, skip) {
-  const payload = { period_id: periodId, uid };
-  if (skip) payload.skip = skip;
-  return poolRequest(c, "/pool/join", payload);
-}
-
-async function poolReport(c, periodId, code, status) {
-  return poolRequest(c, "/pool/report", { period_id: periodId, code, status });
-}
-
-async function poolSync(c, periodId, code, members, remaining) {
-  return poolRequest(c, "/pool/sync", { period_id: periodId, code, members, remaining });
-}
-
-async function poolStats(c, periodId) {
-  return poolRequest(c, "/pool/stats", { period_id: periodId });
-}
-
 async function getPeriodInfo(c) {
   const r = await teamRequest(c, "GET", "/team/period/info");
   if (!r.ok) return { ok: false, error: r.error || "请求失败" };
@@ -337,7 +289,7 @@ async function getPeriodInfo(c) {
 async function getMyTeamInfo(c, periodId) {
   const r = await teamRequest(c, "GET", "/team/my/info", { period_id: periodId });
   if (!r.ok) return { ok: false, error: r.error };
-  return { ok: true, ...normalizeTeam(r.body) };
+  return { ok: true, ...normalizeTeamInfo(r.body) };
 }
 
 async function createTeam(c, periodId) {
@@ -348,186 +300,294 @@ async function joinTeam(c, code) {
   return teamRequest(c, "POST", "/team/join", { team_code: code });
 }
 
-async function runOnceBase(c, opts = {}) {
-  if (runLock) return { ok: false, error: "locked" };
-  runLock = true;
-  const notify = (msg, code, detail) => {
-    if (opts.silent) return;
-    setLastError(msg, code, detail);
+// ---------- 码池侧（快照 / 租约） ----------
+
+async function getPoolTokens(c) {
+  const tokens = await c.storage.get("poolTokens");
+  return tokens && typeof tokens === "object" ? tokens : {};
+}
+
+async function setPoolToken(c, uid, token) {
+  const all = await getPoolTokens(c);
+  all[uid] = token;
+  await c.storage.set("poolTokens", all);
+}
+
+async function isPoolDisabled(c, periodId) {
+  if (disabledPeriods.has(periodId)) return true;
+  const map = await c.storage.get("poolAuthDisabled");
+  return Boolean(map && typeof map === "object" && map[periodId]);
+}
+
+async function disablePool(c, periodId) {
+  disabledPeriods.add(periodId);
+  try {
+    const map = (await c.storage.get("poolAuthDisabled")) || {};
+    map[periodId] = true;
+    await c.storage.set("poolAuthDisabled", map);
+  } catch {
+    // 存储失败不影响本轮判定（内存 Set 已生效）
+  }
+}
+
+async function poolRequestOnce(c, path, payload) {
+  const base = POOL_URL.replace(/\/+$/, "");
+  try {
+    const res = await c.net.request({
+      url: base + path,
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Plugin-Version": PLUGIN_VERSION,
+      },
+      body: payload,
+      responseType: "json",
+    });
+    dlog("poolRequest:", path, res.status);
+    if (res.status === 403 && (res.data?.error === "version_mismatch" || res.data?.error === "version_missing")) {
+      const msg = res.data?.message || "插件版本过低，请更新";
+      console.warn("[auto-team-vip] version mismatch:", msg);
+      if (!versionMismatchReported && uiState) {
+        versionMismatchReported = true;
+        setLastError(msg, res.data?.error, { pluginVersion: PLUGIN_VERSION });
+        c.toast.warning(msg);
+      }
+      return { ok: false, status: 403, data: res.data, error: msg, needUpdate: true };
+    }
+    return { ok: res.status >= 200 && res.status < 300, status: res.status, data: res.data };
+  } catch (e) {
+    console.warn("[auto-team-vip] poolRequest error:", e);
+    const msg = String(e?.message || e);
+    const hint = msg.includes("403") ? "（Cloudflare 安全挑战，请降低 Security Level 或使用 workers.dev 域名）" : "";
+    return { ok: false, status: 0, data: null, error: msg + hint };
+  }
+}
+
+async function poolRequest(c, path, payload) {
+  const r = await poolRequestOnce(c, path, payload);
+  if (!r.ok && (r.status === 0 || r.status >= 500)) {
+    await sleep(POOL_RETRY_DELAY_MS);
+    return poolRequestOnce(c, path, payload);
+  }
+  return r;
+}
+
+async function poolJoin(c, periodId, uid) {
+  const tokens = await getPoolTokens(c);
+  return poolRequest(c, "/v2/join", { period_id: periodId, uid, token: tokens[uid] || "" });
+}
+
+async function poolResult(c, periodId, uid, leaseId, result, errorKind) {
+  const tokens = await getPoolTokens(c);
+  return poolRequest(c, "/v2/join/result", {
+    period_id: periodId,
+    uid,
+    token: tokens[uid] || "",
+    lease_id: leaseId,
+    result,
+    error_kind: errorKind || "",
+  });
+}
+
+// 上报快照；返回 "ok" | "disabled" | "down"
+async function doSnapshot(c, periodId, uid, teamInfo) {
+  if (await isPoolDisabled(c, periodId)) {
+    if (uiState) uiState.poolDisabled = true;
+    return "disabled";
+  }
+  if (!poolAvailable()) return "down";
+
+  const tokens = await getPoolTokens(c);
+  const payload = {
+    period_id: periodId,
+    uid,
+    token: tokens[uid] || "",
+    created: teamInfo.created
+      ? {
+          code: teamInfo.created.code,
+          member_count: teamInfo.created.memberCount,
+          captain: teamInfo.created.captain || uid,
+        }
+      : null,
+    joined: teamInfo.joined
+      ? {
+          code: teamInfo.joined.code,
+          member_count: teamInfo.joined.memberCount,
+          captain: teamInfo.joined.captain || "",
+        }
+      : null,
   };
+
+  const r = await poolRequest(c, "/v2/snapshot", payload);
+  if (r.ok) {
+    poolUp();
+    // 服务端签发/轮换的 token 及时入库（新期次自动重签）
+    if (r.data?.token) await setPoolToken(c, uid, r.data.token);
+    if (r.data?.pool && uiState) {
+      uiState.poolOpen = Number(r.data.pool.open_teams ?? 0);
+      uiState.poolWaiting = Number(r.data.pool.waiting ?? 0);
+      uiState.poolDisabled = false;
+    }
+    return "ok";
+  }
+  if (r.status === 401) {
+    await disablePool(c, periodId);
+    if (uiState) uiState.poolDisabled = true;
+    setLastError("身份校验失败，本期码池功能停用（下期自动恢复）", "pool_unauthorized", { periodId, uid });
+    return "disabled";
+  }
+  if (r.needUpdate) return "disabled";
+  poolDown();
+  return "down";
+}
+
+// ---------- 单 Runner 状态机（§7.1） ----------
+
+// ①→⑧ 完整流程；snapshotOnly 时仅执行 ①②③（心跳保活）。
+// 必须内部捕获全部异常、永不向链上抛出——否则 runChain 变 rejected 后所有触发点静默失效。
+async function runFullFlow(c, reason, opts = {}) {
+  const snapshotOnly = Boolean(opts.snapshotOnly);
+  if (!opts.force && Date.now() - lastRunAt < MIN_RUN_INTERVAL_MS) return;
+  lastRunAt = Date.now();
+  if (!snapshotOnly) lastFullAt = lastRunAt;
   try {
     const auth = readAuth(c);
     if (!auth) {
-      notify("未登录 EchoMusic，请先登录", "not_logged_in");
-      return { ok: false, error: "not_logged_in" };
+      setLastError("未登录 EchoMusic，请先登录", "not_logged_in");
+      return;
     }
+    const uid = String(auth.userid);
 
-    const settings = await getSettings(c);
-    const uid = await getUid(c);
-
+    // ① GUARD：期次信息；非进行中直接终止（不建队、不请求码池）
     const period = await getPeriodInfo(c);
     if (!period.ok) {
-      notify(period.error || "获取活动信息失败", "no_period", { endpoint: "/team/period/info" });
-      return { ok: false, error: "no_period" };
+      setLastError(period.error || "获取活动信息失败", "no_period", { endpoint: "/team/period/info" });
+      return;
     }
+    const periodId = String(period.periodId);
+    const lastPeriodId = await c.storage.get("lastPeriodId");
+    if (lastPeriodId && lastPeriodId !== periodId) {
+      // 期次切换：清空本地缓存的码与 joined 状态（token 为账号级，由新期次 DO 重签覆盖）
+      dlog("[期次切换]", lastPeriodId, "->", periodId);
+      if (uiState) {
+        uiState.myCode = "";
+        uiState.myMemberCount = 0;
+        uiState.joinedCode = "";
+        uiState.joinedMemberCount = 0;
+        uiState.joined = false;
+      }
+    }
+    await c.storage.set("lastPeriodId", periodId);
     if (uiState) {
-      uiState.periodId = String(period.periodId);
+      uiState.periodId = periodId;
       uiState.periodName = period.periodName;
       uiState.startTime = period.startTime;
       uiState.endTime = period.endTime;
       uiState.periodActive = period.active;
-    }
-
-    const periodId = period.periodId;
-
-    let myTeam = await getMyTeamInfo(c, periodId);
-    if (!myTeam.ok || !myTeam.code) {
-      const createRes = await createTeam(c, periodId);
-      if (!createRes.ok) {
-        console.warn("[auto-team-vip] createTeam failed:", createRes.error);
-      }
-      myTeam = await getMyTeamInfo(c, periodId);
-    }
-
-    let myCode = "";
-    let myMemberCount = 0;
-    let joinedCode = "";
-    let joinedMemberCount = 0;
-    if (myTeam.ok) {
-      myCode = myTeam.code;
-      myMemberCount = myTeam.memberCount;
-      joinedCode = myTeam.joinedCode;
-      joinedMemberCount = myTeam.joinedMemberCount;
-    }
-    if (uiState) {
-      uiState.myCode = myCode;
-      uiState.myMemberCount = myMemberCount;
-      uiState.myVipDesc = myTeam.ok ? myTeam.vipDesc : "";
       uiState.targetMembers = period.totalMembers;
-      uiState.joinedCode = joinedCode;
-      uiState.joinedMemberCount = joinedMemberCount;
-      uiState.joinedVipDesc = myTeam.ok ? myTeam.joinedVipDesc : "";
-      uiState.joined = Boolean(joinedCode);
+    }
+    if (!period.active) {
+      setLastError("本期活动未开启", "period_inactive");
+      return;
     }
 
-    if (myCode && myMemberCount >= period.totalMembers && joinedCode && joinedMemberCount >= period.totalMembers) {
-      notify("本期组队已完成，期待下一次组队", null);
+    // ② MYINFO：无自己创建的队伍 → 创建 → 重查
+    let myInfo = await getMyTeamInfo(c, periodId);
+    if (myInfo.ok && !myInfo.created) {
+      await createTeam(c, periodId);
+      myInfo = await getMyTeamInfo(c, periodId);
     }
+    if (!myInfo.ok) {
+      setLastError("获取队伍信息失败", "myinfo_failed");
+      return;
+    }
+    applyTeamInfoToState(myInfo);
 
-    return {
-      ok: true,
-      myCode,
-      periodId,
-      uid,
-      totalMembers: period.totalMembers,
-    };
-  } finally {
-    runLock = false;
-  }
-}
+    // ③ SNAPSHOT：两维度真实状态整体上报
+    const snap = await doSnapshot(c, periodId, uid, myInfo);
+    lastSnapshotAt = Date.now();
+    if (snapshotOnly || snap !== "ok") return;
 
-async function runOncePool(c, baseResult) {
-  if (!baseResult?.ok) return baseResult;
-  const { periodId, uid } = baseResult;
-  const myCode = baseResult.myCode;
+    // ④ DECIDE：入队即终态（酷狗不支持退队），本轮结束进入心跳模式
+    if (myInfo.joined) return;
 
-  let myTeam = await getMyTeamInfo(c, periodId);
-  let joined = myTeam.ok ? Boolean(myTeam.joinedCode) : false;
-
-  if (myCode) {
-    const mc = myTeam.ok && myTeam.code === myCode ? myTeam.memberCount : 1;
-    const remaining = calcRemaining(mc);
-    await poolRegister(c, periodId, myCode, uid, [], remaining);
-  }
-
-  if (myTeam.ok && myTeam.joinedCode) {
-    const remaining = calcRemaining(myTeam.joinedMemberCount);
-    await poolRegister(c, periodId, myTeam.joinedCode, JOINED_CREATOR, [uid], remaining);
-  }
-
-  if (!joined) {
-    const pickRes = await poolJoin(c, periodId, uid);
-    if (pickRes.ok && pickRes.data?.code) {
-      const code = pickRes.data.code;
-      const r = await joinTeam(c, code);
-      const { httpOk, bizOk } = parseJoinResponse(r);
-      if (httpOk && bizOk) {
-        joined = true;
-        myTeam = await getMyTeamInfo(c, periodId);
-        if (myTeam.ok && myTeam.joinedCode) {
-          const remaining = calcRemaining(myTeam.joinedMemberCount);
-          await poolRegister(c, periodId, myTeam.joinedCode, JOINED_CREATOR, [uid], remaining);
+    // ⑤→⑦ ASSIGN / JOIN_KUGOU / RESULT（当轮重试 ≤ RETRY_MAX）
+    for (let attempt = 1; attempt <= RETRY_MAX; attempt++) {
+      const joinRes = await poolJoin(c, periodId, uid);
+      if (!joinRes.ok) {
+        if (joinRes.status === 401) {
+          await disablePool(c, periodId);
+          if (uiState) uiState.poolDisabled = true;
+          setLastError("身份校验失败，本期码池功能停用（下期自动恢复）", "pool_unauthorized", { periodId, uid });
+        } else if (!joinRes.needUpdate) {
+          poolDown();
+          setLastError("码池暂时不可用，稍后自动重试", "pool_down", { periodId, uid, error: joinRes.error });
         }
-      } else {
-        const { kind, errorCode, errorMsg: joinErrorMsg } = classifyJoinError(r.body);
-        if (kind === "already_joined") {
-          joined = true;
-          myTeam = await getMyTeamInfo(c, periodId);
-        } else if (kind === "full" || kind === "invalid") {
-          dlog("[重试]", code, kind, "→ 请求新码");
-          const retryRes = await poolJoin(c, periodId, uid, code);
-          if (retryRes.ok && retryRes.data?.code) {
-            const newCode = retryRes.data.code;
-            const r2 = await joinTeam(c, newCode);
-            const { httpOk: h2, bizOk: b2 } = parseJoinResponse(r2);
-            if (h2 && b2) {
-              dlog("[重试成功]", newCode);
-              joined = true;
-              await poolReport(c, periodId, code, "failed");
-              myTeam = await getMyTeamInfo(c, periodId);
-              if (myTeam.ok && myTeam.joinedCode) {
-                const remaining = calcRemaining(myTeam.joinedMemberCount);
-                await poolRegister(c, periodId, myTeam.joinedCode, JOINED_CREATOR, [uid], remaining);
-              }
-            } else {
-              const { kind: k2, errorCode: e2, errorMsg: m2 } = classifyJoinError(r2.body);
-              dlog("[重试失败]", newCode, k2);
-              await poolReport(c, periodId, newCode, "failed");
-              await poolReport(c, periodId, code, "failed");
-              setLastError("加入队伍未成功（" + k2 + "）", "join_" + k2, { code: newCode, periodId, uid, errorCode: e2, errorMsg: m2 });
-            }
-          } else {
-            dlog("[重试无码]", code);
-            await poolReport(c, periodId, code, "failed");
-            setLastError("暂无可加入的队伍，可手动组队或耐心等待", "pool_empty", { periodId, uid });
-          }
-        } else {
-          setLastError("加入队伍未成功（" + kind + "）", "join_" + kind, { code, periodId, uid, errorCode, errorMsg: joinErrorMsg });
-        }
+        return;
       }
-    } else {
-      setLastError("暂无可加入的队伍，可手动组队或耐心等待", "pool_empty", { periodId, uid });
+      const d = joinRes.data || {};
+      if (d.reason === "already_joined") {
+        // 服务端判定已在队中：校正本地状态 + 立即快照，不执行酷狗 join
+        if (d.code && uiState) {
+          uiState.joinedCode = String(d.code);
+          uiState.joined = true;
+        }
+        const verify = await getMyTeamInfo(c, periodId);
+        if (verify.ok) applyTeamInfoToState(verify);
+        await doSnapshot(c, periodId, uid, verify.ok ? verify : myInfo);
+        return;
+      }
+      if (d.reason === "pool_empty" || !d.code) {
+        setLastError("暂无可加入的队伍，可手动组队或耐心等待", "pool_empty", { periodId, uid });
+        return;
+      }
+
+      const leaseId = String(d.lease_id || "");
+      const code = String(d.code);
+      const joinKugou = await joinTeam(c, code);
+      if (!joinKugou.ok) {
+        // 酷狗请求本身失败（网络/未登录）：与队伍状态无关，不参与服务端纠偏
+        await poolResult(c, periodId, uid, leaseId, "failed", "network");
+        if (attempt < RETRY_MAX) await sleep(RETRY_DELAY_MS);
+        continue;
+      }
+      const parsed = parseJoinResponse(joinKugou);
+      if (parsed.httpOk && parsed.bizOk) {
+        await poolResult(c, periodId, uid, leaseId, "success", "");
+        // ⑧ VERIFY + SNAPSHOT：把成队后的真实人数报给码池
+        const verify = await getMyTeamInfo(c, periodId);
+        if (verify.ok) applyTeamInfoToState(verify);
+        await doSnapshot(c, periodId, uid, verify.ok ? verify : myInfo);
+        return;
+      }
+      const { kind, errorCode, errorMsg } = classifyJoinError(joinKugou.body);
+      await poolResult(c, periodId, uid, leaseId, "failed", kind);
+      if (kind === "already_joined") {
+        // 已在队中（如上轮租约迟到成功）：立即快照纠偏，不重试
+        const verify = await getMyTeamInfo(c, periodId);
+        if (verify.ok) applyTeamInfoToState(verify);
+        await doSnapshot(c, periodId, uid, verify.ok ? verify : myInfo);
+        return;
+      }
+      dlog("[重试]", code, kind, attempt);
+      if (attempt < RETRY_MAX) await sleep(RETRY_DELAY_MS);
     }
-  }
-
-  if (myTeam.ok && uiState) {
-    applyTeamInfoToState(myTeam);
-  }
-
-  await c.storage.set("lastPeriod", { periodId, myCode, joined, updatedAt: Date.now() });
-  return { ok: true, myCode, joined };
-}
-
-async function scheduleRun(c, delay = 800) {
-  if (autoTimer) clearTimeout(autoTimer);
-  autoTimer = setTimeout(async () => {
-    autoTimer = null;
-    const base = await runOnceBase(c, {});
-    const settings = await getSettings(c);
-    if (base.ok && settings.autoEnabled) {
-      await runOncePool(c, base);
-    }
-  }, delay);
-}
-
-function clearAuto() {
-  if (autoTimer) {
-    clearTimeout(autoTimer);
-    autoTimer = null;
+    setLastError("加入队伍未成功，稍后自动重试", "join_exhausted", { periodId, uid });
+  } catch (e) {
+    console.warn("[auto-team-vip] runFullFlow error:", e?.message || e);
   }
 }
 
-// --- Dialog ---
+// 全流程互斥：任何触发点（启动/登录/开关/刷新/心跳）都汇入同一个串行链
+function requestRun(c, reason, opts = {}) {
+  if (!runChain) runChain = Promise.resolve();
+  runChain = runChain
+    .then(() => runFullFlow(c, reason, opts))
+    .catch((e) => console.warn("[auto-team-vip] run chain error:", e?.message || e));
+  return runChain;
+}
+
+// ---------- Dialog ----------
 
 const DIALOG_CSS = `
 .atv-dialog-mask {
@@ -595,8 +655,6 @@ function closeDialog() {
 
 // --- activate / deactivate ---
 
-let moreMenuDispose = null;
-
 export async function activate(_ctx) {
   PLUGIN_VERSION = _ctx.manifest.version || "0.0.0";
 
@@ -611,34 +669,32 @@ export async function activate(_ctx) {
     myCode: "",
     myMemberCount: 0,
     myVipDesc: "",
-    targetMembers: 3,
+    targetMembers: TARGET_MEMBERS,
     joined: false,
     joinedCode: "",
     joinedMemberCount: 0,
     joinedVipDesc: "",
+    poolOpen: -1,
+    poolWaiting: -1,
+    poolDisabled: false,
   });
 
   dialogOpen = _ctx.vue.ref(false);
   const refreshing = _ctx.vue.ref(false);
   const autoTeam = _ctx.vue.ref(false);
   let lastRefreshTime = 0;
-  const lastSyncTime = {};
 
   _ctx.storage.get("settings").then((saved) => {
     if (saved && typeof saved === "object") {
       autoTeam.value = pick(saved, ["autoEnabled"], false) !== false;
     }
   });
+  _ctx.storage.get("poolAuthDisabled").then((map) => {
+    if (map && typeof map === "object") disabledPeriods = new Set(Object.keys(map));
+  });
 
   const { h, ref, defineComponent, defineAsyncComponent } = _ctx.vue;
   const Button = defineAsyncComponent(_ctx.ui.components.Button);
-
-  const poolSyncThrottled = async (periodId, code, members, remaining) => {
-    const now = Date.now();
-    if (lastSyncTime[code] && now - lastSyncTime[code] < SYNC_THROTTLE_MS) return;
-    lastSyncTime[code] = now;
-    return poolSync(_ctx, periodId, code, members, remaining);
-  };
 
   const onRefresh = async () => {
     if (refreshing.value) return;
@@ -650,39 +706,9 @@ export async function activate(_ctx) {
     lastRefreshTime = now;
     refreshing.value = true;
     try {
-      const periodId = uiState?.periodId;
-      if (periodId) {
-        const uid = await getUid(_ctx);
-        const teamInfo = await getMyTeamInfo(_ctx, periodId);
-        const statsRes = await poolStats(_ctx, periodId);
-        if (statsRes.ok && statsRes.data?.codes) {
-          const myCodes = statsRes.data.codes.filter(
-            codeObj => codeObj.creator === uid || (codeObj.members || []).includes(uid)
-          ).slice(0, MAX_SYNC_CODES);
-          if (teamInfo.ok) {
-            for (const codeObj of myCodes) {
-              const members = [];
-              if (teamInfo.joinedCode === codeObj.code) members.push(uid);
-              const kugouMemberCount = teamInfo.joinedCode === codeObj.code
-                ? teamInfo.joinedMemberCount
-                : (teamInfo.code === codeObj.code ? teamInfo.memberCount : 0);
-              const remaining = calcRemaining(kugouMemberCount);
-              await poolSyncThrottled(periodId, codeObj.code, members, remaining);
-            }
-          }
-        }
-        if (teamInfo.ok && uiState) {
-          applyTeamInfoToState(teamInfo);
-        }
-        if (!teamInfo.ok || !teamInfo.joinedCode) {
-          const base = await runOnceBase(_ctx, {});
-          if (base.ok && autoTeam.value) {
-            await runOncePool(_ctx, base);
-          }
-        }
-      }
+      await requestRun(_ctx, "manual", { force: true });
       _ctx.toast.success("已刷新");
-    } catch (e) {
+    } catch {
       _ctx.toast.warning("刷新失败");
     } finally {
       refreshing.value = false;
@@ -695,17 +721,15 @@ export async function activate(_ctx) {
       const manualCode = ref("");
 
       const toggleAuto = async (val) => {
-        dlog("toggleAuto called with:", val);
         autoTeam.value = Boolean(val);
         await updateSettings(_ctx, { autoEnabled: autoTeam.value });
         if (autoTeam.value) {
           _ctx.toast.info("已开启自动组队，正在执行~~~");
-          const base = await runOnceBase(_ctx, {});
-          if (base.ok) {
-            await runOncePool(_ctx, base);
-          }
+          requestRun(_ctx, "toggle_on", { force: true });
         } else {
           _ctx.toast.info("已关闭自动组队");
+          // 关闭后快照照发一次，保持码池状态同步（不再参与分配）
+          requestRun(_ctx, "toggle_off", { snapshotOnly: true, force: true });
         }
       };
 
@@ -729,28 +753,22 @@ export async function activate(_ctx) {
         if (httpOk && bizOk) {
           _ctx.toast.success("已提交加入");
           manualCode.value = "";
-          const periodId = uiState?.periodId;
-          if (periodId) {
-            const teamInfo = await getMyTeamInfo(_ctx, periodId);
-            if (teamInfo.ok && uiState) {
-              applyTeamInfoToState(teamInfo);
-              const uid = await getUid(_ctx);
-              if (autoTeam.value && teamInfo.joinedCode) {
-                const remaining = calcRemaining(teamInfo.joinedMemberCount);
-                await poolRegister(_ctx, periodId, teamInfo.joinedCode, JOINED_CREATOR, [uid], remaining);
-              } else if (!autoTeam.value && teamInfo.code) {
-                const mc = teamInfo.memberCount || 1;
-                const remaining = calcRemaining(mc);
-                await poolRegister(_ctx, periodId, teamInfo.code, uid, [], remaining);
-              }
-            }
-          }
+          // 手动加入成功 → 触发一次快照，该码自动入池
+          requestRun(_ctx, "manual_join", { snapshotOnly: true, force: true });
         } else {
           const msg = errorMsg || "加入失败，请检查组队码";
           setLastError(msg, "manual_join_failed", { code, errorMsg });
           _ctx.toast.warning(msg);
         }
       };
+
+      const poolLine = (() => {
+        if (uiState?.poolDisabled) return "码池：本期已停用（下期自动恢复）";
+        if (uiState?.poolOpen >= 0) {
+          return `码池：开放队伍 ${uiState.poolOpen} · 等待 ${Math.max(0, uiState.poolWaiting)} 人`;
+        }
+        return "";
+      })();
 
       return () =>
         h("div", { style: "display: grid; gap: 14px;" }, [
@@ -766,12 +784,15 @@ export async function activate(_ctx) {
                 (uiState?.myCode ? `（${uiState?.myMemberCount}/${uiState?.targetMembers} 人）` : "") +
                 (uiState?.myCode && uiState?.myVipDesc ? `  ${uiState.myVipDesc}` : ""),
             ]),
-            h("div", { style: "font-size: 13px; opacity: 0.7; margin-bottom: 10px;" }, [
+            h("div", { style: "font-size: 13px; opacity: 0.7; margin-bottom: 6px;" }, [
               "我加入的队伍：" + (uiState?.joinedCode
                 ? `${uiState.joinedCode}（${uiState.joinedMemberCount}/${uiState.targetMembers} 人）` +
                   (uiState?.joinedVipDesc ? `  ${uiState.joinedVipDesc}` : "")
                 : "无"),
             ]),
+            poolLineText()
+              ? h("div", { style: "font-size: 12px; opacity: 0.6; margin-bottom: 10px;" }, poolLineText())
+              : null,
             uiState?.lastMessage
               ? h("div", { style: "font-size: 12px; color: #f0b93c; margin-bottom: 10px; display: flex; gap: 6px; align-items: center;" }, [
                   h("span", { style: "flex: 1; word-break: break-all;" }, uiState.lastMessage),
@@ -855,28 +876,50 @@ export async function activate(_ctx) {
   _ctx.vue.watch(
     () => _ctx.pinia?.state?.value?.user?.info?.token,
     (token) => {
-      if (token) scheduleRun(_ctx, LOGIN_RUN_DELAY_MS);
+      if (token) requestRun(_ctx, "login");
     },
   );
 
-  scheduleRun(_ctx, AUTO_RUN_DELAY_MS);
+  // 登录后延迟启动完整流程（等 pinia 状态就绪）
+  setTimeout(() => requestRun(_ctx, "startup"), AUTO_RUN_DELAY_MS);
+
+  // 心跳：面板打开或自动开关开启时保活；本期未完成时定期触发完整流程等新码
+  heartbeatTimer = setInterval(() => {
+    if (!uiState || !dialogOpen) return;
+    const panelOpen = Boolean(dialogOpen.value);
+    const autoOn = autoTeam.value;
+    if (!panelOpen && !autoOn) return;
+    if (!uiState.periodActive) return;
+    const now = Date.now();
+    const completed = uiState.joined && uiState.myMemberCount >= uiState.targetMembers;
+    if (autoOn && !completed && now - lastFullAt >= FULLFLOW_INTERVAL_MS) {
+      lastFullAt = now;
+      lastSnapshotAt = now;
+      requestRun(_ctx, "heartbeat_full");
+    } else if (now - lastSnapshotAt >= SNAPSHOT_INTERVAL_MS) {
+      lastSnapshotAt = now;
+      requestRun(_ctx, "heartbeat_snapshot", { snapshotOnly: true });
+    }
+  }, HEARTBEAT_TICK_MS);
 
   _ctx.dispose(() => {
     if (moreMenuDispose) { moreMenuDispose(); moreMenuDispose = null; }
     if (teleportDispose) { teleportDispose(); teleportDispose = null; }
     if (cssDispose) { cssDispose(); cssDispose = null; }
-    clearAuto();
+    if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
     uiState = null;
     dialogOpen = null;
+    runChain = null;
   });
 }
 
 export async function deactivate() {
   if (moreMenuDispose) { moreMenuDispose(); moreMenuDispose = null; }
-  clearAuto();
+  if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
   closeDialog();
   cssDispose?.(); cssDispose = null;
   teleportDispose?.(); teleportDispose = null;
   uiState = null;
   dialogOpen = null;
+  runChain = null;
 }

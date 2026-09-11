@@ -3,77 +3,63 @@
 自动参加概念版官方活动「组队瓜分酷狗概念版畅听VIP」并组队，插件入口在软件顶部⭐️。
 
 - 插件名：自动组队领VIP
-- 版本：1.0.7
+- 版本：1.2.0（v2 快照/租约协议）
 - 作者：Oneday5799
-- 依赖：EchoMusic `>=2.3.0`（需已内置 `server/module/team_*.js` 组队接口）
+- 依赖：EchoMusic `>=2.3.2-beta.2`（需已内置组队接口）
+- 架构设计文档：[`docs/auto-team-vip-redesign.md`](../docs/auto-team-vip-redesign.md)
 
-## 工作原理
+## 工作原理（v2）
 
-1. 从 EchoMusic 内部登录态读取酷狗 `token/userid/dfid/mid/uuid`（`ctx.pinia.state.value.user/device`）。
-2. 通过 EchoMusic 内置 IPC（`ctx.electron.api.request`）调用组队接口：
-   - `GET /team/period/info`：获取本期活动信息（`period_id`、名称、时间）
-   - `GET /team/my/info`：读取自己创建的队伍（`my_create_team_list`）和加入的队伍（`my_join_team_list`）
-   - `POST /team/my`：创建自己的队伍（如尚未创建）
-   - `POST /team/join`：用 `team_code` 加入他人队伍
-3. 组队码通过**远程码池**（Cloudflare Worker + Durable Object）在插件用户之间自动交换：上传自己的码、领取可加入的码、上报结果。
+三方职责划分：
 
-## 队伍维度
+- **酷狗服务器**：队伍真实构成的唯一权威。码池对"队伍里有几个人"的判断全部来自插件上报的观测值。
+- **插件端**：酷狗状态的观察者 + 组队操作执行器，把观测结果以**快照**上报码池。
+- **码池服务器**（Cloudflare Worker + Durable Object，[`team-pool-worker/`](../team-pool-worker/)）：存储快照、计算可用名额、以**租约**方式下发组队码并跟踪结果。
 
-同一期活动中，每个用户可以同时存在于**两个独立维度**：
+### 自动组队流程
 
-- **我创建的队伍**（队长身份）：`my_create_team_list` → `team_code` + 成员数
-- **我加入的队伍**（队员身份）：`my_join_team_list` → `team_code` + 成员数
+开启「自动组队」后，单 Runner 状态机串行执行：
 
-两个维度互不影响，最多可同时在两个不同队伍中。
+1. **GUARD**：读取登录态，获取本期活动信息；期次非进行中直接终止
+2. **MYINFO**：读取自己创建的/加入的队伍；无创建队伍则自动创建
+3. **SNAPSHOT**：两维度真实状态（我创建的队 + 我加入的队，含人数与队长）整体上报码池
+4. **DECIDE**：已加入队伍 → 本期完成，进入心跳模式（酷狗不支持退队，入队即终态）
+5. **ASSIGN**：向码池申请分配，获得租约（lease_id + 组队码，120s 有效）
+6. **JOIN_KUGOU**：用组队码加入酷狗队伍（含验证码处理）
+7. **RESULT**：向码池回报 success/failed；failed 后当轮立即重试（最多 3 次）
+8. **VERIFY**：复查酷狗队伍状态并再次快照，把成队后的真实人数同步给码池
 
-## 自动组队流程
+### 关键机制
 
-开启「自动组队」开关后，插件执行以下流程：
+- **名额计算在服务端**：`可用名额 = 2 - (快照人数 - 1) - 在途租约数`，插件不再上报"剩余名额"
+- **租约自愈**：领码后崩溃/断网 → 120s 自动回收；成功但快照缺失 → 10min 后释放；任何路径无永久泄漏
+- **匹配策略**：快满优先（尽快产出完整队伍）+ FIFO；full/invalid 失败直接纠偏队伍状态或冷却
+- **心跳**：面板打开或自动开关开启时，每 5min 保活快照；本期未完成时每 10min 完整流程等新码
+- **身份防伪**：首次快照由服务端签发 token（按酷狗 userid 绑定），永不重签；伪造 uid 得到 401
+- **隐私**：客户端只能看到自己的队伍与租约 + 匿名聚合统计（v1 的全量队伍码端点已删除）
 
-1. **获取活动信息**：调用 `GET /team/period/info` 获取当前期次
-2. **获取/创建队伍**：调用 `GET /team/my/info`，如无队伍则自动创建
-3. **注册码池**：将自己创建的队伍码（creator=己方uid）和加入的队伍码（creator="unknown"）上传到 Worker
-4. **分配加入**：调用 `POST /pool/join` 获取一个可加入的队伍码
-5. **加入队伍**：调用 `POST /team/join` 加入获取到的队伍
-6. **上报结果**：加入成功上报 `joined`，失败上报 `failed`
+### 手动组队
 
-关闭开关后，插件仅执行步骤 1-2（获取活动信息和创建队伍），不参与码池分配。
-
-## 手动组队
-
-无论自动组队是否开启，都可以手动操作：
-
-- **我创建的队伍**：显示自己的队伍码，可点击「复制」分享给他人
-- **我加入的队伍**：输入对方队伍码，点击「加入」手动加入；已加入后显示队伍码，可点击「复制」
-
-手动加入成功后：
-- 若自动组队已开启：自动将加入的队伍码注册到码池（含队员计数）
-- 若自动组队关闭：仅复制队伍码，不参与码池
+- **我创建的队伍**：显示自己的队伍码，可复制分享；他人（无论是否插件用户）加入后，下次快照自动反映人数
+- **我加入的队伍**：输入对方队伍码手动加入；成功后自动快照，该码进入码池
 
 ## 码池部署
 
 见 [`team-pool-worker/`](../team-pool-worker/)。
 
-- 部署后得到 Worker 地址（如 `https://echo-team-pool.xxxx.workers.dev`）。
-- 在插件设置中填入该地址即可。
+- 部署后得到 Worker 地址（自定义域 `echo-team-pool.oneday.vip` 或 `*.workers.dev` 兜底）。
+- 插件端码池地址为内置常量，修改需同步 `index.js` 的 `POOL_URL`。
 
 ## 版本校验
 
-插件请求时会带 `X-Plugin-Version` 头。Worker 会校验：
-- 缺失版本头 → 返回 403 `version_missing`
-- 低于最低版本 → 返回 403 `version_mismatch`，提示更新
+插件请求携带 `X-Plugin-Version` 头，Worker 校验：
 
-**最低兼容版本：1.0.6**
+- 缺失版本头 → 403 `version_missing`
+- 低于最低版本 → 403 `version_mismatch`，提示更新
 
-升级 Worker 时只需修改 `worker.js` 顶部的 `MIN_CLIENT_VERSION` 常量（同步修改客户端 `manifest.json` 的 `version`）。
+**最低兼容版本：1.2.0**（v1 端点已全部下线，旧版插件无法使用码池功能，请更新）。
 
-## 限速
-
-Worker 对每个 uid 限速 **1 req/second**（仅 join/result 接口），防止恶意请求。
-
-## 防御性修复
-
-服务端 `register` 接口具备防御性逻辑：当用户注册已存在的码时，会将新 uid 合并到 `members` JSON 数组中（自动去重），同时更新 `remaining` 计数。这确保手动加入的队伍码能被其他用户正确识别为"有空间"。
+升级 Worker 时只需修改 `wrangler.toml` 的 `MIN_CLIENT_VERSION`（同步修改插件 `manifest.json` 的 `version`）。
 
 ## 免责声明
 
