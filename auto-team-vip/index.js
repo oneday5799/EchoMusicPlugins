@@ -268,17 +268,21 @@ function normalizeTeamInfo(body) {
 
 // 错误分类（2026-09-12 修订）：仅显式证据才归类为队伍终态（full/already_joined/invalid），
 // 其余一律 transient——客户端侧抖动不给队伍泼脏水；服务端仅对 full/invalid 纠偏/冷却。
+// 酷狗 join 错误分类。错误响应结构（2026-09-12 实测，HTTP 502，错误字段在顶层、data 为空串）：
+//   {"error_msg":"队伍不存在","data":"","status":0,"error_code":143001}
+// 实测数值码：143004=满员、143010=已是成员、143001=队伍不存在；成功：HTTP 200 + status:1 + error_code:0
+// 分类原则：数值码证据最硬优先；文案关键词兜底（防酷狗改码/新错误）；默认 transient 不惩罚队伍（非对称代价）
 function classifyJoinError(body) {
-  const d = body?.data ?? body ?? {};
-  const errorCode = Number(pick(d, ["error_code", "errcode", "code"], 0));
-  const errorMsg = String(pick(d, ["msg", "message", "error"], ""));
+  const errorCode = Number(pick(body, ["error_code", "errcode", "code"], 0));
+  const errorMsg = String(pick(body, ["error_msg", "msg", "message"], ""));
   const msg = errorMsg.toLowerCase();
 
   let kind = "transient";
-  if (errorCode === 20006 || msg.includes("满") || msg.includes("full")) kind = "full";
-  else if (msg.includes("已加入") || msg.includes("已经") || msg.includes("已参") || msg.includes("joined"))
-    kind = "already_joined";
-  else if (msg.includes("不存在") || msg.includes("无效") || msg.includes("已解散") || msg.includes("组队码错误"))
+  if (errorCode === 143004 || errorCode === 20006 || msg.includes("满") || msg.includes("full"))
+    kind = "full"; // 20006 为 v1 观测历史码，实测未复现，保留兼容
+  else if (errorCode === 143010 || msg.includes("已加入") || msg.includes("是队伍成员") || msg.includes("已参") || msg.includes("joined"))
+    kind = "already_joined"; // 实测文案"你已经是队伍成员~"；不用"已经"泛匹配（满员文案也含"已经"）
+  else if (errorCode === 143001 || msg.includes("不存在") || msg.includes("无效") || msg.includes("已解散") || msg.includes("组队码错误"))
     kind = "invalid"; // 码无效/队不存在：无快照可纠偏，服务端 24h 冷却（§11.2）
   return { kind, errorCode, errorMsg };
 }
