@@ -596,6 +596,82 @@ export class PeriodPool extends DurableObject {
     };
   }
 
+  // POST /v2/admin/data —— 站长全量观测（可选）：X-Admin-Token 门禁，只读明细。
+  // 明细粒度受快照模型限制：队伍仅到 code + 队长 uid + member_count（无成员名单/昵称）；users 不含 token。
+  async adminData() {
+    await this._ready;
+    const now = Date.now();
+    this._sweepExpired();
+    const fresh = now - FRESH_CUTOFF_MS;
+    const iso = (t) => (Number(t) > 0 ? new Date(Number(t)).toISOString() : null);
+
+    const teamsTotal = Number(this._sql(`SELECT COUNT(*) AS c FROM teams`)[0]?.c ?? 0);
+    const teams = this._sql(
+      `SELECT t.code, t.captain_uid, t.member_count, t.status, t.snapshot_at, t.fail_until, t.created_at,
+              (SELECT COUNT(*) FROM leases l
+                WHERE l.code = t.code
+                  AND (l.status = 'success' OR (l.status = 'pending' AND l.expires_at > ?))) AS inflight
+       FROM teams t ORDER BY t.created_at DESC LIMIT 1000`,
+      now
+    ).map((r) => ({
+      code: String(r.code),
+      captain_uid: String(r.captain_uid ?? ""),
+      member_count: Number(r.member_count),
+      status: String(r.status) === "full" ? "full" : (Number(r.snapshot_at) > fresh ? "open" : "stale"),
+      snapshot_at_iso: iso(r.snapshot_at),
+      fail_until_iso: Number(r.fail_until) > now ? iso(r.fail_until) : null,
+      created_at_iso: iso(r.created_at),
+      inflight: Number(r.inflight ?? 0),
+    }));
+
+    const usersTotal = Number(this._sql(`SELECT COUNT(*) AS c FROM users`)[0]?.c ?? 0);
+    const users = this._sql(
+      `SELECT uid, last_joined_code, created_at, last_seen_at FROM users ORDER BY last_seen_at DESC LIMIT 500`
+    ).map((r) => ({
+      uid: String(r.uid),
+      last_joined_code: String(r.last_joined_code ?? "") || null,
+      created_at_iso: iso(r.created_at),
+      last_seen_at_iso: iso(r.last_seen_at),
+    }));
+
+    const leasesTotal = Number(this._sql(`SELECT COUNT(*) AS c FROM leases`)[0]?.c ?? 0);
+    const leases = this._sql(
+      `SELECT id, uid, code, status, assigned_at, expires_at, resolved_at FROM leases ORDER BY assigned_at DESC LIMIT 200`
+    ).map((r) => ({
+      id: String(r.id),
+      uid: String(r.uid),
+      code: String(r.code),
+      status: String(r.status),
+      assigned_at_iso: iso(r.assigned_at),
+      expires_at_iso: iso(r.expires_at),
+      resolved_at_iso: iso(r.resolved_at),
+    }));
+
+    const events = this._sql(
+      `SELECT ts, kind, uid, code, detail FROM events ORDER BY id DESC LIMIT 100`
+    ).map((r) => ({
+      ts_iso: iso(r.ts),
+      kind: String(r.kind),
+      uid: r.uid ? String(r.uid) : null,
+      code: r.code ? String(r.code) : null,
+      detail: r.detail ? String(r.detail) : null,
+    }));
+
+    const summary = await this.health();
+    delete summary.ok;
+
+    return {
+      ok: true,
+      now_iso: new Date(now).toISOString(),
+      totals: { teams: teamsTotal, users: usersTotal, leases: leasesTotal, events_shown: events.length },
+      teams,
+      users,
+      leases,
+      events,
+      summary,
+    };
+  }
+
   // ---------- alarm：过期回收 + 每日清理 ----------
 
   async alarm() {
@@ -694,6 +770,15 @@ export default {
             return err("not_found", "路径不存在", 404);
           }
           result = await stub.health(body);
+          break;
+        }
+        case "/v2/admin/data": {
+          // 站长全量明细：同 health 的门禁策略（X-Admin-Token，失败 404），只读。
+          const adminData = String(env.ADMIN_TOKEN || "");
+          if (!adminData || request.headers.get("X-Admin-Token") !== adminData) {
+            return err("not_found", "路径不存在", 404);
+          }
+          result = await stub.adminData(body);
           break;
         }
         default:
