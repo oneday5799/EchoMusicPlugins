@@ -20,6 +20,7 @@ https://github.com/hoowhoami/EchoMusicPlugins
 - [任务中心 API](docs/tasks.md)：后台任务、进度、中止信号与终态保留策略。
 - [备份与恢复 API](docs/backups.md)：命令式备份操作、存储提供方注册与 WebDAV 示例。
 - [Graphics 绘图 API](/docs/graphics.md)：为插件提供绘图能力。
+- [`openrgb`](openrgb)：独立的 OpenRGB 音乐灯效，支持频谱铺展、音量律动与低频节拍。
 - [`webdav-backup`](webdav-backup)：将主程序备份与恢复界面接入用户自己的 WebDAV 存储。
 - [`example-plugin`](example-plugin)：覆盖常用宿主能力的综合示例。
 
