@@ -1,7 +1,8 @@
 # auto-team-vip v2 架构设计方案
 
-> 状态：已定稿（2026-09-11 两轮评审完毕，可按「提交计划」在 `vip` 分支实施）
+> 状态：已定稿（2026-09-11 三轮评审完毕——含二次复核补充 §11，可按「提交计划」在 `vip` 分支实施）
 > 复核修订：token 永不重签、租约过期以时间戳判定、失败冷却改列存储、限速令牌桶、租约 TTL 120s、status 改 POST
+> 二次复核补充：join 失败当轮立即重试（≤3 次）、失败即纠偏（full 置满员 / invalid 24h 冷却）、runFullFlow 全捕获、uid=酷狗 userid、alarm 清理覆盖全部表
 > 范围：`auto-team-vip/`（插件端）+ `team-pool-worker/`（码池服务器）
 > 版本目标：插件 v1.2.0 / Worker API v2
 
@@ -134,6 +135,8 @@ open/full ──(6 小时无快照)──► stale        （选队时排除；�
 
 full 状态在期内**不会回退**（无退队接口），full 队伍的保活快照仅用于 staleness 与统计，不再参与匹配计算。
 
+> 调优备注：失败即纠偏（§6.4）落地后，stale 阈值可评估从 6h 收紧至 1~2h 以增加池子供给（最坏一次无效分配且可自愈）；首版维持 6h，上线观察后再调。
+
 不再引入 expired/sealed 状态：新期次天然是新 DO 实例，旧 DO 由每日 alarm 清理，无需显式封存。
 
 ---
@@ -192,7 +195,7 @@ full 状态在期内**不会回退**（无退队接口），full 队伍的保活
 ```
 
 - `success` → 租约 `pending → success`（保持占用，等快照确认，见 §5.2）。
-- `failed` → 租约 `→ failed`，名额**立即释放**；`error_kind` 记入 events 供诊断。
+- `failed` → 租约 `→ failed`，名额**立即释放**；并按 `error_kind` 将失败视为酷狗观测值纠偏队伍状态（§6.4 失败即纠偏）。
 - 重复回报幂等忽略。
 
 #### `POST /v2/status` —— 自查 + 聚合
@@ -279,7 +282,7 @@ CREATE TABLE IF NOT EXISTS events (          -- 环形审计日志（保留最�
 
 - `pending` / `success` 占用名额；`confirmed` / `failed` / `expired` 不占用。
 - **过期判定以 `expires_at` 与当前时间比较为准**：alarm 只是"到期后执行回收"的执行者；所有查询（幂等检查、名额计算）必须同时校验时间戳，不能只看 status 字段——否则 alarm 延迟期间会把已过期租约误判为在途（少算名额、幂等返回死租约）。
-- 回收由 **DO alarm 驱动**：alarm 时间 = min(最近的 pending/success `expires_at`, 每日清理点)。alarm 触发时执行过期回收 + 每日清理（30 天旧数据、rate_limit 过期行），并按需设置下一次 alarm。
+- 回收由 **DO alarm 驱动**：alarm 时间 = min(最近的 pending/success `expires_at`, 每日清理点)。alarm 触发时执行过期回收 + 每日清理（users/teams/leases/events **全部表**的 30 天旧数据、rate_limit 过期行；判空 `deleteAll` 同样以全部表为准，v1 逻辑只认 codes/rate_limit，重写时勿遗漏），并按需设置下一次 alarm。
 
 ### 6.4 匹配算法（快满优先 + FIFO）
 
@@ -329,6 +332,7 @@ LIMIT 1;
 - **Schema 迁移**：`_init()` 读取 `meta.schema_version`；v2 首次部署检测到 v1 表结构（存在 `codes` 表）时 `DROP` 重建——每期活动数据独立，无需保留。`compatibility_date`、DO 绑定、自定义域名路由不变。
 - **WAF 403 问题**（v1 已知）：为 `echo-team-pool.oneday.vip` 配置 WAF 跳过规则（匹配路径 `/v2/*` 或 `X-Plugin-Version` 头）；同时在 wrangler.toml 启用 `workers_dev` 域名作为兜底，插件端 403 时提示切换。
 - `MIN_CLIENT_VERSION` 提至 `1.2.0`（与新插件版本同步），README 版本口径一并修正。
+- **部署节奏**：Worker 先部署即令所有 v1.1.x 客户端码池功能 403（提示更新）——Worker 部署与插件发版应紧凑衔接，避免长时间功能空窗。
 
 ### 6.8 运维观测（可选）
 
@@ -457,5 +461,12 @@ const snapshot = {
 3. **`my_join_team_list` 至多 1 支**——快照的 `joined` 采用单对象（非数组）是正确设计，无需预留扩展；服务端对超量上报取第一支并记 events（§6.1）。
 
 **协议与策略决策（同日拍板）：** 快满优先 + FIFO ｜ 外部码入池 ｜ 服务端签发 Token ｜ v2 直接切换（旧版 403 提示更新）。
+
+**二次复核补充（2026-09-11，用户确认采纳）：**
+
+1. **join 失败当轮立即重试**（≤3 次、间隔 2s；`already_joined` 除外，改为立即快照纠偏）——补回 v1.1.2 的即时换码 UX，服务端纠偏/冷却保证不重复领到同一坏队（§7.4）。
+2. **失败即纠偏**：full（本租约为最后名额时）置 `member_count=3/status=full`、非最后名额时 10min 冷却、invalid 24h 冷却（§6.4）。
+3. **实现级约束**：`runFullFlow` 内部全捕获；uid=酷狗 userid（弃用随机 uid）；member_count 取 `member_list.length` 并以字段兜底；alarm 清理与判空覆盖全部表；teams.status 的 stale 不落库（查询推导）；already_joined 响应带 code；Worker 部署与插件发版紧凑衔接。
+4. **stale 阈值**首版维持 6h，上线观察后再评估收紧至 1~2h。
 
 无遗留开放问题，可按 §10 提交计划实施。
