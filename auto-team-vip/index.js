@@ -178,6 +178,11 @@ function buildAuthHeader(auth) {
   return parts.join(";");
 }
 
+// 酷狗 join 业务终态错误码（2026-09-12 实测）：这些失败与验证码无关，
+// 即使响应带 eventId 也不触发 kugouVerification（弹验证码 + 重试注定失败的 join 纯属浪费）。
+// 20028 仍显式触发；未知新失败码保持原行为（failed 即触发），白名单式豁免不影响正途。
+const BIZ_JOIN_CODES = new Set([143001, 143004, 143010, 20006]);
+
 async function teamRequest(c, method, url, params, data) {
   const auth = readAuth(c);
   if (!auth) return { ok: false, error: "not_logged_in" };
@@ -205,7 +210,9 @@ async function teamRequest(c, method, url, params, data) {
   const eventId = pick(body, ["ssaCode", "eventId"], "") || pick(res?.headers, ["ssa-code", "SSA-CODE"], "");
   const errorCode = Number(pick(body, ["error_code", "errcode"], 0));
   const failed = Number(pick(body, ["status"], 1)) === 0;
-  if (eventId && (errorCode === 20028 || failed)) {
+  // 验证码触发条件（2026-09-12 第六轮复核修订）：20028 显式要求；其他失败仅当非已知
+  // 业务终态错误码时触发（143001/143004/143010/20006 属终态，弹验证码 + 重试注定失败）
+  if (eventId && (errorCode === 20028 || (failed && !BIZ_JOIN_CODES.has(errorCode)))) {
     dlog("[酷狗验证]", method, url, "eventId:", eventId, "errorCode:", errorCode);
     try {
       const verified = await c.kugouVerification.request(eventId);
