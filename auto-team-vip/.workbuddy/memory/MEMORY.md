@@ -7,6 +7,8 @@
 - 活动规则关键事实（用户确认）：每队 1 队长+2 队员；每账号每期自动建队成队长，另可以队员身份加 1 支队；**酷狗不支持退队**（入队即期内终态）；队员奖励与加入顺序无关；`my_join_team_list` 至多 1 支。
 - 部署：码池为 Cloudflare Worker + DO SQLite，自定义域 `echo-team-pool.oneday.vip`。**v2 已部署**（/v2/admin/data 带 token 可用；鉴权掩码设计：无 token 一律 404「路径不存在」）。**WAF 阻止规则** `http.host eq echo-team-pool.oneday.vip and not has_key(http.request.headers,"x-plugin-version")` 会拦掉 CORS 预检——OPTIONS 按规范不带自定义头，修复 = 表达式追加 `and http.request.method ne "OPTIONS"`（2026-09-12 确认；admin.html 的 Failed to fetch 即此因，PowerShell 不走预检且手动带 header 故正常）。
 - 插件运行环境：EchoMusic 客户端 IPC（`ctx.electron.api.request` 走酷狗接口，`ctx.net.request` 走码池），酷狗错误码 20028 需走 `kugouVerification` 验证码流程。
+- 码池状态行 UI 定稿（2026-09-12）：401 停用行 = 「状态异常，请联系插件作者处理，或等待下期组队」（人工支持路径，用户明确不做客户端自动探测/重试）；「开放队伍 N · 等待 M 人」聚合行已移除不展示（快照上报逻辑不变，仅 UI 不渲染）；本轮及后续 UI 微调版本号保持 1.2.0 不变（用户要求，勿擅自 bump）。
+- 401 停用人工支持流程：用户联系作者 → /v2/admin/delete（delete_user，服务端解绑重签）→ 用户端 poolAuthDisabled 本地停用标记仍需解除：清空插件数据/重装（或等下期 key 失效）。可选优化：开关重开即解除本地停用（约 6 行，用户未拍板）。
 - admin.html 看板为独立本地文件（Worker 不内嵌），已按用户要求隐私化：页面不得出现预设 API 地址/期次等环境信息（如 echo-team-pool.oneday.vip），API 地址/期次 ID/Token 三项一律手填、仅存浏览器 localStorage，有「清除本机配置」按钮——后续修改不要把预设值加回去。
 
 ## 本机环境坑（2026-09-12 确认）
