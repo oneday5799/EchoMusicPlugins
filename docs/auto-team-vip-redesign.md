@@ -492,4 +492,11 @@ const snapshot = {
 3. 插件端心跳以 `periodState`（unknown/error/active/inactive）取代 periodActive 硬门控：GUARD 失败按常规间隔自动重试自愈；期次未开启每 30min 低频探测，下一期自动开始。
 4. 建队失败显式提示（不阻断分配流程，仍可以队员身份加入他人队伍）；README 注明同账号多设备仅最先上报快照的一台可用码池（防劫持设计取舍）。
 
+**实现加固补全（2026-09-12 二次复核）：**
+
+复核发现加固第 2、3 条在 b5b2680 中只落地了一半，本次补全：
+
+1. `periodState` 此前只有初始化与心跳读取、无任何赋值路径——补全 GUARD 失败→`error`、期次未开启→`inactive`、进行中→`active` 三处赋值，30min 低频探测自此实际生效。
+2. `join()` 分配租约后补调 `_scheduleNextAlarm()`（此前仅 joinResult success 路径调用；正确性本由懒清扫+时间戳判定兜底，无超发风险，属文档一致性补全）。
+
 无遗留开放问题，可按 §10 提交计划实施。

@@ -482,6 +482,11 @@ export class PeriodPool extends DurableObject {
       leaseId, uid, code, now, now + LEASE_TTL_MS
     );
     this._event("assign", uid, code, leaseId);
+    try {
+      await this._scheduleNextAlarm(); // pending 120s 到期需 alarm 回收（§6.3）
+    } catch {
+      // ignore：懒清扫与时间戳判定兜底
+    }
     return { ok: true, lease_id: leaseId, code, expires_in: Math.round(LEASE_TTL_MS / 1000) };
   }
 

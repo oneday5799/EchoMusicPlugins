@@ -489,6 +489,7 @@ async function runFullFlow(c, reason, opts = {}) {
     // ① GUARD：期次信息；非进行中直接终止（不建队、不请求码池）
     const period = await getPeriodInfo(c);
     if (!period.ok) {
+      if (uiState) uiState.periodState = "error"; // GUARD 失败：心跳按常规间隔自愈重试
       setLastError(period.error || "获取活动信息失败", "no_period", { endpoint: "/team/period/info" });
       return;
     }
@@ -512,6 +513,7 @@ async function runFullFlow(c, reason, opts = {}) {
       uiState.startTime = period.startTime;
       uiState.endTime = period.endTime;
       uiState.periodActive = period.active;
+      uiState.periodState = period.active ? "active" : "inactive"; // 驱动心跳：保活/等待循环 vs 30min 低频探测
       uiState.targetMembers = period.totalMembers;
     }
     if (!period.active) {
