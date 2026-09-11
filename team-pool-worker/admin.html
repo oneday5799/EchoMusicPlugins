@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>码池数据看板 · echo-team-pool</title>
+<title>码池数据看板</title>
 <style>
   :root {
     --bg: #f5f6f8; --card: #ffffff; --border: #e4e7ec; --text: #1f2329;
@@ -67,20 +67,21 @@
 <body>
 
 <h1>码池数据看板</h1>
-<div class="sub">echo-team-pool · /v2/admin/data（需 Admin Token）· 数据仅在本页与你的浏览器间传输</div>
+<div class="sub">/v2/admin/data 管理端点（需 Admin Token）· 数据仅在本页与你的浏览器间传输</div>
 
 <div class="card">
   <div class="row">
-    <div><label>API 地址</label><input type="text" id="api" placeholder="https://echo-team-pool.oneday.vip" /></div>
-    <div><label>期次 ID（period_id）</label><input type="text" id="period" placeholder="如 288" /></div>
+    <div><label>API 地址</label><input type="text" id="api" placeholder="https://pool.example.com" /></div>
+    <div><label>期次 ID（period_id）</label><input type="text" id="period" placeholder="请输入期次编号" /></div>
     <div><label>Admin Token</label><input type="password" id="token" placeholder="wrangler secret 配置的密钥" /></div>
     <div style="align-self: flex-end;">
       <button id="btnData">查询全量数据</button>
       <button id="btnHealth" class="secondary">仅健康聚合</button>
+      <button id="btnClear" class="secondary">清除本机配置</button>
       <label style="display:inline; margin-left:8px;"><input type="checkbox" id="auto" /> 每 30s 自动刷新</label>
     </div>
   </div>
-  <div class="foot">配置保存在浏览器 localStorage，仅本机可见。期次 ID 见插件面板或插件日志（/team/period/info 的 id 字段）。</div>
+  <div class="foot">三项配置均需手填，仅保存在本浏览器 localStorage，不上传、不同步；点「清除本机配置」可随时抹除。期次 ID 见插件面板或插件日志（/team/period/info 的 id 字段）。</div>
 </div>
 
 <div id="banner" class="banner"></div>
@@ -130,9 +131,17 @@ const $ = (id) => document.getElementById(id);
   const v = localStorage.getItem("pool_" + k);
   if (v) $(k).value = v;
 });
+// 输入即保存（input 事件），不依赖失焦；关闭页面前未失焦也能留存
 ["api", "period", "token"].forEach((k) =>
-  $(k).addEventListener("change", () => localStorage.setItem("pool_" + k, $(k).value.trim()))
+  $(k).addEventListener("input", () => localStorage.setItem("pool_" + k, $(k).value.trim()))
 );
+$("btnClear").addEventListener("click", () => {
+  ["api", "period", "token"].forEach((k) => {
+    localStorage.removeItem("pool_" + k);
+    $(k).value = "";
+  });
+  banner("已清除本机保存的配置（localStorage 中 pool_api / pool_period / pool_token）", true);
+});
 
 let autoTimer = null;
 $("auto").addEventListener("change", () => {
