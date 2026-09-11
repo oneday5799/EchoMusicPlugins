@@ -11,7 +11,7 @@
 ## 本机环境坑（2026-09-12 确认）
 
 - **磁盘对 git 进程写入的文件有丢失/回滚现象**（node/Read 工具写入正常）：曾致 `.git/refs` 整目录消失、pack 丢一个、工作区 docs 6 文件消失。git 报 `not a git repository` 但 `.git/HEAD+config` 可读 = refs 层损坏。修复：读 `.git/logs/refs/heads/*` reflog 找回 ref 值 → 隔离损坏 pack/packed-refs → `git fetch origin` 全量重建对象库 → node 手写 ref 文件（SHA+`\n`）。详见 2026-09-12 日志。凌晨已完成一轮修复（reset --hard 后工作区完整恢复）。
-- **git 直连 GitHub 的 TLS 故障**：schannel 报 CRYPT_E_NO_REVOCATION_CHECK（全局 .gitconfig 已配 schannelcheckrevoke=false 仍复现）、openssl 后端报 unable to get local issuer certificate；解法：显式 `-c http.sslBackend=schannel -c http.schannelCheckRevoke=false`，已固化进本仓库 .git/config（2026-09-12）。
+- **git 直连 GitHub 的 TLS 故障**：schannel 报 CRYPT_E_NO_REVOCATION_CHECK（全局 .gitconfig 已配 schannelcheckrevoke=false 仍复现）、openssl 后端报 unable to get local issuer certificate；解法：显式 `-c http.sslBackend=schannel -c http.schannelCheckRevoke=false`，已固化进本仓库 .git/config（2026-09-12）。**推送凭据**：`gh auth setup-git` 已写入全局 gh helper（本 gh 版本的 helper 需带完整 exe 路径；勿在仓库本地设 `credential.helper=""`，会清掉全局 helper 链导致 could not read Username）；全局 http.lowspeedlimit=0/lowspeedtime=999999 会令连接挂死不超时，仓库本地已用 1000/45 覆盖。
 - 判断推送真伪只用 `git ls-remote`（WorkBuddy worktree `C:/Users/Oneday/WorkBuddy/Worktrees/auto-team-vip/origin-vip-03a16790` 会持续重置 tracking ref，`git status` 的 ahead/behind 是假象）。
 - bash 的 `/d/` 映射间歇失效，git 一律用 `git -C "D:/..."`；coreutils（ls/wc/head）缺失，用 node -e 替代；批量编辑后必须 `git diff` 核对（Edit 回吞坑）；node -e 外层用 bash 双引号时内容里禁止反引号（会被当命令替换吞掉）。
 - **遗留待办**：①找出后台并发操作 `D:\Code\EchoMusicPlugins` 的程序（.git/opencode 残留为线索）；②检查 D 盘健康（chkdsk/SMART）与杀软/同步盘干预。
