@@ -515,7 +515,7 @@ export class PeriodPool extends DurableObject {
 
     const rows = this._sql(`SELECT id, code, status FROM leases WHERE id = ? AND uid = ?`, leaseId, uid);
     if (rows.length === 0) {
-      return { ok: false, error: "lease_not_found", message: "租约不存在" };
+      return { ok: false, status: 404, error: "lease_not_found", message: "租约不存在" };
     }
     const lease = rows[0];
     if (String(lease.status) !== "pending") {
