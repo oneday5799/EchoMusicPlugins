@@ -6,7 +6,7 @@
 //   - 码池只做两件事：(a) 存储快照并计算每个队的可用名额；(b) 以租约方式下发组队码并跟踪结果。
 //   - 每期活动一个 Durable Object 实例（getByName(periodId)），DO 内嵌 SQLite 存储全部状态。
 
-const SCHEMA_VERSION = "2";
+const SCHEMA_VERSION = "3";
 const TEAM_CAPACITY = 3;                    // 1 队长 + 2 队员
 const MEMBER_SLOTS = TEAM_CAPACITY - 1;     // 队员名额
 const LEASE_TTL_MS = 120_000;               // pending 租约有效期（预留酷狗验证码交互）
@@ -60,6 +60,24 @@ function cleanStr(v, maxLen) {
   return s.length > maxLen ? s.slice(0, maxLen) : s;
 }
 
+// 成员观测名单净化：至多 3 人，字段白名单（userid 必填；nick/reward 截断；role 1 队长 / 2 队员）
+function sanitizeMembers(list) {
+  if (!Array.isArray(list)) return null;
+  const out = [];
+  for (const m of list.slice(0, TEAM_CAPACITY)) {
+    if (!m || typeof m !== "object") continue;
+    const userid = cleanStr(m.userid ?? m.u, 32);
+    if (!userid) continue;
+    out.push({
+      userid,
+      nick: cleanStr(m.nick ?? m.nickname, 48),
+      role: Number(m.role) === 1 ? 1 : 2,
+      reward: cleanStr(m.reward ?? m.vip_desc, 48),
+    });
+  }
+  return out.length > 0 ? out : null;
+}
+
 // ---------- Durable Object ----------
 
 import { DurableObject } from "cloudflare:workers";
@@ -72,7 +90,7 @@ export class PeriodPool extends DurableObject {
 
   async _init() {
     const sql = this.ctx.storage.sql;
-    // schema 版本检测：v1 表结构（codes / 旧 rate_limit）直接丢弃——每期数据独立，无需保留
+    // schema 版本检测：版本不符时全部业务表丢弃重建——每期数据独立，无需保留
     let schemaVersion = "";
     const tables = sql
       .exec(`SELECT name FROM sqlite_master WHERE type='table' AND name IN ('meta','codes')`)
@@ -83,8 +101,9 @@ export class PeriodPool extends DurableObject {
       if (rows.length > 0) schemaVersion = String(rows[0].value ?? "");
     }
     if (schemaVersion !== SCHEMA_VERSION) {
-      sql.exec(`DROP TABLE IF EXISTS codes`);
-      sql.exec(`DROP TABLE IF EXISTS rate_limit`);
+      for (const t of ["codes", "rate_limit", "users", "teams", "leases", "events", "meta"]) {
+        sql.exec(`DROP TABLE IF EXISTS ${t}`);
+      }
       sql.exec(`
         CREATE TABLE IF NOT EXISTS meta (
           key   TEXT PRIMARY KEY,
@@ -101,6 +120,7 @@ export class PeriodPool extends DurableObject {
           code         TEXT PRIMARY KEY,
           captain_uid  TEXT NOT NULL DEFAULT '',
           member_count INTEGER NOT NULL DEFAULT 1,
+          members_json TEXT NOT NULL DEFAULT '[]', -- 成员观测名单 [{userid,nick,role,reward}]，仅站长端点可见
           status       TEXT NOT NULL DEFAULT 'open',
           snapshot_at  INTEGER NOT NULL,
           fail_until   INTEGER NOT NULL DEFAULT 0,
@@ -273,17 +293,19 @@ export class PeriodPool extends DurableObject {
 
   // 快照 upsert 队伍：member_count 以酷狗观测值为权威，覆盖更新；
   // 新快照代表更新的观测，清除失败冷却（"新快照立即复活"）。
-  _upsertTeam({ code, captain, memberCount, source }, now) {
+  // members（成员名单观测值）仅在快照携带时覆盖，缺省保留旧值（部分响应可能不带 member_list）。
+  _upsertTeam({ code, captain, memberCount, members, source }, now) {
     const mc = clampMemberCount(memberCount);
     const status = mc >= TEAM_CAPACITY ? "full" : "open";
+    const roster = sanitizeMembers(members);
     const rows = this._sql(
       `SELECT captain_uid, member_count, status FROM teams WHERE code = ?`, code
     );
     if (rows.length === 0) {
       this._exec(
-        `INSERT INTO teams (code, captain_uid, member_count, status, snapshot_at, fail_until, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 0, ?, ?)`,
-        code, captain || "", mc, status, now, now, now
+        `INSERT INTO teams (code, captain_uid, member_count, members_json, status, snapshot_at, fail_until, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+        code, captain || "", mc, JSON.stringify(roster || []), status, now, now, now
       );
       return;
     }
@@ -294,11 +316,19 @@ export class PeriodPool extends DurableObject {
       this._event("error", source, code, `member_count_decrease ${prevMc}->${mc}`);
     }
     const newCaptain = captain || String(rows[0].captain_uid ?? "");
-    this._exec(
-      `UPDATE teams SET captain_uid = ?, member_count = ?, status = ?, snapshot_at = ?, fail_until = 0, updated_at = ?
-       WHERE code = ?`,
-      newCaptain, mc, status, now, now, code
-    );
+    if (roster) {
+      this._exec(
+        `UPDATE teams SET captain_uid = ?, member_count = ?, members_json = ?, status = ?, snapshot_at = ?, fail_until = 0, updated_at = ?
+         WHERE code = ?`,
+        newCaptain, mc, JSON.stringify(roster), status, now, now, code
+      );
+    } else {
+      this._exec(
+        `UPDATE teams SET captain_uid = ?, member_count = ?, status = ?, snapshot_at = ?, fail_until = 0, updated_at = ?
+         WHERE code = ?`,
+        newCaptain, mc, status, now, now, code
+      );
+    }
   }
 
   // ---------- v2 API ----------
@@ -323,7 +353,13 @@ export class PeriodPool extends DurableObject {
 
     if (created) {
       this._upsertTeam(
-        { code: cleanStr(created.code, 64), captain: uid, memberCount: created.member_count, source: uid },
+        {
+          code: cleanStr(created.code, 64),
+          captain: uid,
+          memberCount: created.member_count,
+          members: created.members,
+          source: uid,
+        },
         now
       );
     }
@@ -331,7 +367,13 @@ export class PeriodPool extends DurableObject {
     if (joined) {
       const code = cleanStr(joined.code, 64);
       this._upsertTeam(
-        { code, captain: cleanStr(joined.captain, 64), memberCount: joined.member_count, source: uid },
+        {
+          code,
+          captain: cleanStr(joined.captain, 64),
+          memberCount: joined.member_count,
+          members: joined.members,
+          source: uid,
+        },
         now
       );
       this._exec(`UPDATE users SET last_joined_code = ? WHERE uid = ?`, code, uid);
@@ -597,7 +639,7 @@ export class PeriodPool extends DurableObject {
   }
 
   // POST /v2/admin/data —— 站长全量观测（可选）：X-Admin-Token 门禁，只读明细。
-  // 明细粒度受快照模型限制：队伍仅到 code + 队长 uid + member_count（无成员名单/昵称）；users 不含 token。
+  // 队伍明细含成员观测名单（userid/昵称/角色/奖励 vip_desc），仅此端点可见；users 不含 token。
   async adminData() {
     await this._ready;
     const now = Date.now();
@@ -607,22 +649,31 @@ export class PeriodPool extends DurableObject {
 
     const teamsTotal = Number(this._sql(`SELECT COUNT(*) AS c FROM teams`)[0]?.c ?? 0);
     const teams = this._sql(
-      `SELECT t.code, t.captain_uid, t.member_count, t.status, t.snapshot_at, t.fail_until, t.created_at,
+      `SELECT t.code, t.captain_uid, t.member_count, t.members_json, t.status, t.snapshot_at, t.fail_until, t.created_at,
               (SELECT COUNT(*) FROM leases l
                 WHERE l.code = t.code
                   AND (l.status = 'success' OR (l.status = 'pending' AND l.expires_at > ?))) AS inflight
        FROM teams t ORDER BY t.created_at DESC LIMIT 1000`,
       now
-    ).map((r) => ({
-      code: String(r.code),
-      captain_uid: String(r.captain_uid ?? ""),
-      member_count: Number(r.member_count),
-      status: String(r.status) === "full" ? "full" : (Number(r.snapshot_at) > fresh ? "open" : "stale"),
-      snapshot_at_iso: iso(r.snapshot_at),
-      fail_until_iso: Number(r.fail_until) > now ? iso(r.fail_until) : null,
-      created_at_iso: iso(r.created_at),
-      inflight: Number(r.inflight ?? 0),
-    }));
+    ).map((r) => {
+      let members = [];
+      try {
+        members = JSON.parse(String(r.members_json ?? "[]"));
+      } catch {
+        members = [];
+      }
+      return {
+        code: String(r.code),
+        captain_uid: String(r.captain_uid ?? ""),
+        member_count: Number(r.member_count),
+        members,
+        status: String(r.status) === "full" ? "full" : (Number(r.snapshot_at) > fresh ? "open" : "stale"),
+        snapshot_at_iso: iso(r.snapshot_at),
+        fail_until_iso: Number(r.fail_until) > now ? iso(r.fail_until) : null,
+        created_at_iso: iso(r.created_at),
+        inflight: Number(r.inflight ?? 0),
+      };
+    });
 
     const usersTotal = Number(this._sql(`SELECT COUNT(*) AS c FROM users`)[0]?.c ?? 0);
     const users = this._sql(

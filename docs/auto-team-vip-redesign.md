@@ -78,8 +78,8 @@
 ② MYINFO     GET /team/my/info；无自己创建的队伍 → POST /team/my 创建 → 重查
   │
   ▼
-③ SNAPSHOT   POST /v2/snapshot  上报：我创建的队 {code, member_count, captain}
-  │                                + 我加入的队 {code, member_count, captain}（可为空）
+③ SNAPSHOT   POST /v2/snapshot  上报：我创建的队 {code, member_count, captain, members[]}
+  │                                + 我加入的队 {code, member_count, captain, members[]}（可为空）
   ▼
 ④ DECIDE     已有 joined 队伍 → 本轮结束（进入心跳模式）
   │ 未加入
@@ -155,8 +155,9 @@ full 状态在期内**不会回退**（无退队接口），full 队伍的保活
   "period_id": "288",
   "uid": "589524259",
   "token": "…",                          // 首次可为空，服务端签发（§6.6）
-  "created": { "code": "ABC123", "member_count": 2, "captain": "589524259" }, // 可为 null
-  "joined":  { "code": "XYZ789", "member_count": 3, "captain": "357328413" }  // 可为 null
+  "created": { "code": "ABC123", "member_count": 2, "captain": "589524259",
+               "members": [ { "userid": "589524259", "nick": "一天", "role": 1, "reward": "获得7天VIP" } ] }, // 可为 null
+  "joined":  { "code": "XYZ789", "member_count": 3, "captain": "357328413", "members": [ /* 同上 */ ] }  // 可为 null
 }
 // 响应
 { "ok": true, "token": "…", "pool": { "open_teams": 12, "waiting": 5 } }
@@ -166,7 +167,7 @@ full 状态在期内**不会回退**（无退队接口），full 队伍的保活
 
 服务端处理：
 1. 校验/签发 token（已存在 uid **永不重签**，见 §6.6）；更新 `users.last_seen_at`。
-2. Upsert `created` 队（captain_uid = uid）与 `joined` 队（captain 取上报值，外部码 captain 可为空串）→ 更新 `member_count`、`snapshot_at`、status。`joined` 至多 1 支（已确认 `my_join_team_list` 上限为 1）；若异常上报多支，取第一支并记 events。
+2. Upsert `created` 队（captain_uid = uid）与 `joined` 队（captain 取上报值，外部码 captain 可为空串）→ 更新 `member_count`、`members_json`（成员观测名单，快照携带时覆盖、缺省保留旧值）、`snapshot_at`、status。`joined` 至多 1 支（已确认 `my_join_team_list` 上限为 1）；若异常上报多支，取第一支并记 events。
 3. 更新 `users.last_joined_code`（joined 非空 → 该 code；否则清空）。
 4. 若该 uid 存在 `pending`/`success`/`expired` 租约且 `joined.code` 与其 code 相符 → 统一转 `confirmed`（"迟到成功"仅作账目修正与审计一致性；名额真值由 `member_count` 保证，见 §5.2）。
 5. 返回轻量聚合统计（供 UI 展示）。
@@ -267,7 +268,7 @@ CREATE TABLE IF NOT EXISTS events (          -- 环形审计日志（保留最�
 );
 ```
 
-对比 v1：members JSON 列**删除**（成员真相由 `member_count` 快照 + 租约表表达）；`rate_limit` 表保留（结构不变）。
+对比 v1：members JSON 列恢复并升级为**成员观测名单**（`{userid, nick, role, reward}`，来自 `member_list` 的 userid/nick_name/role/vip_desc，服务端净化截断）——普通客户端不可见，仅 `/v2/admin/data`（X-Admin-Token）对站长展示；`rate_limit` 表保留（结构不变）。
 
 ### 6.3 租约状态机
 
@@ -338,7 +339,7 @@ LIMIT 1;
 
 - `POST /v2/health`：请求头 `X-Admin-Token` 与 Worker secret 比对，请求体 `{ "period_id": "…" }`。返回该期 DO 的聚合指标——开放/满员/过期/冷却队伍数、租约各状态数、用户数、24h 异常事件计数。仅聚合、不含 uid/code 明细。供运维监控与容量观察，非客户端功能依赖。
 - `POST /v2/admin/data`：同门禁（`X-Admin-Token`，校验失败返回 404 不暴露端点存在性），站长只读全量明细——当前期全部队伍（code、队长 uid、人数、open/full/stale 状态、最近快照/冷却截止时间、在途租约数）、用户列表（uid、最近加入码、活跃时间；**不含 token**）、最近 200 条租约、最近 100 条审计事件、聚合 summary。
-- 明细粒度受快照模型约束：码池只存插件上报的观测值（code + 人数 + 队长 uid），**不存成员名单、酷狗昵称或队员 userid**；请求需携带 `X-Plugin-Version` 头（版本门禁在前）。
+- 成员名单/昵称/奖励（`members_json`，含每人 `vip_desc`）自 v2.1 起随快照存储，**仅站长端点 `/v2/admin/data` 可见**，普通客户端的 `/v2/status` 仍只返回自身数据；请求需携带 `X-Plugin-Version` 头（版本门禁在前）。
 
 ---
 
@@ -387,9 +388,10 @@ async function runFullFlow(reason) {
 const snapshot = {
   period_id: periodId,
   uid, token,
-  created: myTeam ? { code: myTeam.code, member_count: myTeam.memberCount, captain: uid } : null,
+  created: myTeam ? { code: myTeam.code, member_count: myTeam.memberCount, captain: uid,
+                      members: myTeam.members } : null,
   joined:  joinedTeam ? { code: joinedTeam.code, member_count: joinedTeam.memberCount,
-                          captain: joinedTeam.captain ?? "" } : null,
+                          captain: joinedTeam.captain ?? "", members: joinedTeam.members } : null,
 };
 ```
 

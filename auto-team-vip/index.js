@@ -232,6 +232,21 @@ function normalizePeriod(body) {
 // 两维度真实状态：我创建的队伍（队长身份）+ 我加入的队伍（队员身份，至多 1 支）
 function normalizeTeamInfo(body) {
   const d = body?.data ?? body ?? {};
+  const toMembers = (list) => {
+    if (!Array.isArray(list)) return [];
+    const out = [];
+    for (const m of list.slice(0, TARGET_MEMBERS)) {
+      const userid = String(pick(m, ["userid", "user_id"], ""));
+      if (!userid) continue;
+      out.push({
+        userid,
+        nick: String(pick(m, ["nick_name", "nickname", "nick"], "")).slice(0, 48),
+        role: Number(pick(m, ["role"], 2)) === 1 ? 1 : 2,
+        reward: String(pick(m, ["vip_desc", "reward_desc"], "")).slice(0, 48),
+      });
+    }
+    return out;
+  };
   const toTeam = (t) => {
     if (!t) return null;
     const code = String(pick(t, ["team_code", "code", "teamCode"], ""));
@@ -242,6 +257,7 @@ function normalizeTeamInfo(body) {
       code,
       memberCount: Math.min(TARGET_MEMBERS, Math.max(1, Math.round(Number(mc) || 1))),
       captain: String(pick(t, ["captain"], "") || ""),
+      members: toMembers(t.member_list),
       vipDesc: String(pick(t, ["vip_desc"], "")),
     };
   };
@@ -407,6 +423,7 @@ async function doSnapshot(c, periodId, uid, teamInfo) {
           code: teamInfo.created.code,
           member_count: teamInfo.created.memberCount,
           captain: teamInfo.created.captain || uid,
+          members: teamInfo.created.members,
         }
       : null,
     joined: teamInfo.joined
@@ -414,6 +431,7 @@ async function doSnapshot(c, periodId, uid, teamInfo) {
           code: teamInfo.joined.code,
           member_count: teamInfo.joined.memberCount,
           captain: teamInfo.joined.captain || "",
+          members: teamInfo.joined.members,
         }
       : null,
   };
