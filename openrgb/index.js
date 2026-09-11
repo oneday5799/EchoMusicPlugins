@@ -701,7 +701,11 @@ export async function activate(ctx) {
   const Page = ctx.vue.defineComponent({
     name: "OpenRgbSettings",
     setup() {
-      const { h, ref } = ctx.vue;
+      const { h, ref, defineAsyncComponent } = ctx.vue;
+      const Slider = defineAsyncComponent(ctx.ui.components.Slider);
+      const Select = defineAsyncComponent(ctx.ui.components.Select);
+      const Checkbox = defineAsyncComponent(ctx.ui.components.Checkbox);
+      const draft = ref({});
       const host = ref(state.settings.host),
         port = ref(state.settings.port),
         busy = ref(false),
@@ -731,29 +735,46 @@ export async function activate(ctx) {
           text,
         );
       const select = (label, key, values) =>
-        h("label", { class: "orgb-field" }, [
-          h("span", label),
-          h(
-            "select",
-            {
-              value: state.settings[key],
-              disabled: busy.value,
-              onChange: (e) => patch({ [key]: e.target.value }),
-            },
-            values.map(([value, title]) => h("option", { value }, title)),
-          ),
+        h("div", { class: "orgb-field" }, [
+          h("div", { class: "orgb-label" }, label),
+          h(Select, {
+            class: "orgb-select",
+            ariaLabel: label,
+            modelValue: state.settings[key],
+            options: values.map(([value, label]) => ({ value, label })),
+            disabled: busy.value,
+            "onUpdate:modelValue": (value) => patch({ [key]: value }),
+          }),
         ]);
       const slider = (label, key, min, max, step, suffix = "") =>
-        h("label", { class: "orgb-field" }, [
-          h("span", [label, h("b", `${state.settings[key]}${suffix}`)]),
-          h("input", {
-            type: "range",
+        h("div", { class: "orgb-field" }, [
+          h("div", { class: "orgb-label" }, [
+            label,
+            h(
+              "output",
+              { class: "orgb-value" },
+              `${draft.value[key] ?? state.settings[key]}${suffix}`,
+            ),
+          ]),
+          h(Slider, {
+            modelValue: Number(draft.value[key] ?? state.settings[key]),
             min,
             max,
             step,
-            value: state.settings[key],
+            ariaLabel: label,
+            trackClass: "orgb-slider-track",
+            rangeClass: "orgb-slider-range",
+            thumbClass: "orgb-slider-thumb",
             disabled: busy.value,
-            onChange: (e) => patch({ [key]: Number(e.target.value) }),
+            "onUpdate:modelValue": (value) => {
+              draft.value[key] = Number(value);
+            },
+            onValueCommit: (value) =>
+              perform(() =>
+                save({ ...state.settings, [key]: Number(value) }),
+              ).finally(() => {
+                delete draft.value[key];
+              }),
           }),
         ]);
       return () =>
@@ -841,11 +862,12 @@ export async function activate(ctx) {
               ),
             ]),
             h("label", { class: "orgb-check" }, [
-              h("input", {
-                type: "checkbox",
-                checked: state.settings.enabled,
+              h(Checkbox, {
+                ariaLabel: "启用后自动连接，断线时自动重试",
+                modelValue: state.settings.enabled,
                 disabled: busy.value,
-                onChange: (e) => patch({ enabled: e.target.checked }),
+                "onUpdate:modelValue": (checked) =>
+                  patch({ enabled: checked === true }),
               }),
               "启用后自动连接，断线时自动重试",
             ]),
@@ -877,17 +899,18 @@ export async function activate(ctx) {
                   key: d.key + ":" + d.index,
                 },
                 [
-                  h("input", {
-                    type: "checkbox",
-                    checked: state.settings.selected.includes(d.key),
+                  h(Checkbox, {
+                    ariaLabel: `选择设备 ${d.name}`,
+                    modelValue: state.settings.selected.includes(d.key),
                     disabled: !state.connected || !d.supported || busy.value,
-                    onChange: (e) =>
+                    "onUpdate:modelValue": (checked) =>
                       patch({
-                        selected: e.target.checked
-                          ? [...state.settings.selected, d.key]
-                          : state.settings.selected.filter(
-                              (key) => key !== d.key,
-                            ),
+                        selected:
+                          checked === true
+                            ? [...state.settings.selected, d.key]
+                            : state.settings.selected.filter(
+                                (key) => key !== d.key,
+                              ),
                       }),
                   }),
                   h("span", [
@@ -949,29 +972,36 @@ export function deactivate() {
   runtime = null;
 }
 const STYLE = `
-.orgb-settings { display: grid; gap: 18px; color: var(--color-text-main, #20212b); }
+.orgb-settings { --orgb-control-border: color-mix(in srgb, var(--color-text-main, #1d1d1f) 38%, var(--surface-card-base, #fff)); display: grid; gap: 18px; color: var(--color-text-main, #1d1d1f); min-width: 0; }
 .orgb-settings * { box-sizing: border-box; }
-.orgb-hero { display: flex; align-items: center; gap: 16px; padding: 22px; border-radius: 20px; background: linear-gradient(115deg, color-mix(in srgb, #23dca2 12%, transparent), color-mix(in srgb, #568bff 12%, transparent), color-mix(in srgb, #bc71ff 12%, transparent)); border: 1px solid var(--border-subtle, #8883); }
-.orgb-orbit { font-size: 46px; line-height: 1; color: var(--color-primary, #549ffa); }
-.orgb-settings h2 { margin: 0 0 6px; font-size: 20px; } .orgb-settings h3 { margin: 0 0 12px; font-size: 16px; }
-.orgb-settings p { color: var(--color-text-secondary, #80818d); font-size: 13px; line-height: 1.7; margin: 8px 0; }
-.orgb-badge { margin-left: auto; padding: 5px 10px; border: 1px solid var(--border-subtle, #8883); border-radius: 99px; font-size: 12px; white-space: nowrap; }
-.orgb-online { background: #22c58620; color: var(--color-primary, #21a678); }
-.orgb-panel { padding: 22px; border: 1px solid var(--border-subtle, #8883); border-radius: 18px; background: var(--color-bg-elevated, #fff); }
-.orgb-address { display: grid; grid-template-columns: 1fr 110px; gap: 12px; margin: 16px 0; }
-.orgb-address label, .orgb-field { display: grid; gap: 9px; font-size: 13px; }
-.orgb-settings input:not([type=checkbox]):not([type=range]), .orgb-settings select { width: 100%; padding: 9px 11px; min-height: 38px; border-radius: 9px; background: var(--color-bg-base, transparent); color: inherit; border: 1px solid var(--border-subtle, #8885); font: inherit; }
-.orgb-settings input, .orgb-settings select { accent-color: var(--color-primary, #568bff); }
-.orgb-settings :focus-visible { outline: 2px solid var(--color-primary, #568bff); outline-offset: 3px; }
-.orgb-settings :disabled { opacity: .5; cursor: not-allowed; }
+.orgb-hero { display: flex; align-items: center; gap: 16px; padding: 20px; border-radius: 16px; background: linear-gradient(115deg, color-mix(in srgb, #23dca2 10%, transparent), color-mix(in srgb, #568bff 10%, transparent), color-mix(in srgb, #bc71ff 10%, transparent)); border: 1px solid var(--border-strong); }
+.orgb-orbit { font-size: 46px; line-height: 1; color: var(--color-primary-text, var(--color-primary)); }
+.orgb-settings h2 { margin: 0 0 6px; font-size: 20px; font-weight: 700; } .orgb-settings h3 { margin: 0 0 12px; font-size: 16px; font-weight: 600; }
+.orgb-settings p { color: var(--color-text-secondary); font-size: 13px; line-height: 1.7; margin: 8px 0; }
+.orgb-badge { margin-left: auto; padding: 5px 10px; border: 1px solid var(--orgb-control-border); border-radius: 99px; font-size: 12px; white-space: nowrap; }
+.orgb-online { background: var(--control-active-bg); color: var(--color-primary-text, var(--color-primary)); }
+.orgb-panel { padding: 20px; border: 1px solid var(--border-strong); border-radius: 16px; background: var(--control-muted-bg); }
+.orgb-address { display: grid; grid-template-columns: minmax(0, 1fr) 110px; gap: 12px; margin: 16px 0; }
+.orgb-address label, .orgb-field { display: grid; gap: 10px; font-size: 13px; min-width: 0; }
+.orgb-label { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-weight: 500; }
+.orgb-value { padding: 2px 8px; border-radius: 6px; background: var(--control-bg); color: var(--color-text-main); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.orgb-address input { width: 100%; min-width: 0; padding: 9px 11px; min-height: 40px; border-radius: 9px; background: var(--control-bg); color: inherit; border: 1px solid var(--orgb-control-border); font: inherit; }
+.orgb-settings .orgb-select { width: 100%; min-height: 40px; background: var(--control-bg); border-color: var(--orgb-control-border); font-weight: 500; }
+.orgb-settings .orgb-field .slider-root-horizontal .orgb-slider-track { height: 6px; background: color-mix(in srgb, var(--color-text-main) 50%, var(--surface-card-base)); }
+.orgb-settings .orgb-slider-range { background: var(--color-primary-text, var(--color-primary)); }
+.orgb-settings .orgb-slider-thumb { width: 16px; height: 16px; background: var(--control-thumb-bg); border: 2px solid var(--color-primary-text, var(--color-primary)); }
+.orgb-settings :is(input, button, [role=combobox], [role=slider]):focus-visible { outline: 2px solid var(--color-primary-text, var(--color-primary)) !important; outline-offset: 3px; }
+.orgb-settings :disabled { opacity: .55; cursor: not-allowed; }
 .orgb-actions { display: flex; flex-wrap: wrap; gap: 9px; margin: 10px 0 16px; }
-.orgb-button { padding: 9px 14px; border-radius: 9px; border: 1px solid var(--border-subtle, #8885); background: transparent; color: inherit; cursor: pointer; font: inherit; font-size: 13px; }
-.orgb-primary { background: var(--color-primary, #568bff); color: var(--color-on-primary, #fff); border-color: transparent; }
+.orgb-button { padding: 9px 14px; min-height: 40px; border-radius: 9px; border: 1px solid var(--orgb-control-border); background: var(--control-bg); color: inherit; cursor: pointer; font: inherit; font-size: 13px; }
+.orgb-button:hover:not(:disabled) { background: var(--control-hover-bg); border-color: var(--color-primary-text, var(--color-primary)); }
+.orgb-primary { background: var(--color-primary); color: var(--color-on-primary); border-color: transparent; }
+.orgb-primary:hover:not(:disabled) { background: var(--color-primary-hover, var(--color-primary)); color: var(--color-on-primary-hover, var(--color-on-primary)); }
 .orgb-check, .orgb-device { display: flex; align-items: center; gap: 12px; font-size: 13px; }
-.orgb-device { padding: 14px 0; border-bottom: 1px solid var(--border-subtle, #8882); } .orgb-device:last-child { border-bottom: none; }
-.orgb-device span { display: grid; gap: 5px; } .orgb-device small { color: var(--color-text-secondary, #80818d); overflow-wrap: anywhere; }
-.orgb-unavailable { opacity: .6; } .orgb-empty { padding: 24px 0; text-align: center; color: var(--color-text-secondary, #80818d); font-size: 13px; }
-.orgb-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; } .orgb-field span { display: flex; justify-content: space-between; gap: 12px; } .orgb-field b { font-weight: 500; color: var(--color-text-secondary, #80818d); }
-.orgb-settings .orgb-error { color: var(--color-danger, #e96a6a); overflow-wrap: anywhere; } .orgb-settings .orgb-note { margin-top: 20px; }
+.orgb-device { padding: 14px 0; border-bottom: 1px solid var(--border-strong); } .orgb-device:last-child { border-bottom: none; }
+.orgb-device > span { display: grid; gap: 5px; min-width: 0; } .orgb-device small { color: var(--color-text-secondary); overflow-wrap: anywhere; }
+.orgb-unavailable { opacity: .7; } .orgb-empty { padding: 24px 0; text-align: center; color: var(--color-text-secondary); font-size: 13px; }
+.orgb-controls { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 22px; }
+.orgb-settings .orgb-error { color: var(--state-danger, #e96a6a); overflow-wrap: anywhere; } .orgb-settings .orgb-note { margin-top: 20px; }
 @media (max-width: 560px) { .orgb-controls { grid-template-columns: 1fr; } .orgb-hero { flex-wrap: wrap; } .orgb-panel, .orgb-hero { padding: 16px; } }
 `;
