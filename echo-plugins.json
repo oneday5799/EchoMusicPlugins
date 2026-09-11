@@ -88,6 +88,17 @@
       ]
     },
     {
+      "id": "openrgb",
+      "path": "openrgb",
+      "homepage": "https://github.com/hoowhoami/EchoMusicPlugins/tree/main/openrgb",
+      "tags": [
+        "audio",
+        "spectrum",
+        "openrgb",
+        "lighting"
+      ]
+    },
+    {
       "id": "webdav-backup",
       "path": "webdav-backup",
       "homepage": "https://github.com/hoowhoami/EchoMusicPlugins/tree/main/webdav-backup",

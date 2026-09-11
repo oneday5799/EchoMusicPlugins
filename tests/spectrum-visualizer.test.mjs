@@ -186,7 +186,7 @@ test("keeps the default fog layers visible without excessive blur", () => {
   assert.equal(layers[2].scale > layers[0].scale, true);
 });
 
-test("plugin package exposes the fog mode as a feature release", async () => {
+test("plugin package declares and documents spectrum features", async () => {
   const manifest = JSON.parse(
     await readFile(
       new URL("../spectrum-visualizer/manifest.json", import.meta.url),
@@ -198,7 +198,7 @@ test("plugin package exposes the fog mode as a feature release", async () => {
     "utf8",
   );
 
-  assert.equal(manifest.version, "1.2.0");
+  assert.equal(manifest.capabilities.audioSpectrum, true);
   assert.match(manifest.description, /雾状/);
   assert.match(readme, /雾化柔度/);
   assert.match(readme, /中心频谱/);

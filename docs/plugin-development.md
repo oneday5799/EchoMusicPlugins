@@ -210,6 +210,8 @@ pnpm exec electron . --safe-mode
 
 `capabilities.sqlite` 可选。插件如需通过 `ctx.sqlite` 使用 SQLite 私有数据库，必须显式设为 `true`。数据库由宿主创建在 EchoMusic 用户数据目录下，并按插件 id 隔离；插件只能访问自己的命名数据库，不能传入任意本地路径。
 
+`capabilities.tcp` 可选。通过 `ctx.net.tcp.connect()` 连接原生 TCP 服务时必须声明为 `true`。支持按需二进制读取、写入、超时和自动清理；独立于 HTTP 网络能力，详见 [TCP 网络 API](tcp.md)。
+
 `capabilities.unrestrictedNetwork` 可选。插件如需通过 `ctx.net.request()` 使用主进程 Axios 的 Node.js HTTP adapter，或自定义浏览器 Fetch 不允许设置的 `User-Agent`、`Referer`、`Cookie`、`Origin`、`Host` 等请求头，必须显式设为 `true`。该能力不受浏览器 CORS 和禁止头规则约束，也允许访问本机及内网地址；只应在确实需要精确控制请求的插件中声明。普通 Web 请求继续使用 `ctx.net.fetch()`。
 
 `capabilities.webServer` 可选。插件如需通过 `ctx.webServer.listen()` 创建可被其他本机软件访问的 HTTP 页面或接口，必须显式设为 `true`。服务默认只监听 `127.0.0.1`，适合 Wallpaper Engine、OBS、本地脚本或其他桌面软件读取 EchoMusic 当前状态、歌词页面、可视化页面等场景。插件禁用、卸载、安全模式、运行上下文销毁或应用退出时，宿主会自动释放端口。
@@ -858,6 +860,10 @@ await ctx.sqlite.deleteDatabase("library");
 - 单条 SQL 最长约 256 KB；单次查询最多 5000 行，结果 JSON 最大约 8 MB；单个事务最多 500 条语句。
 - 插件禁用、安全模式、运行上下文销毁或 EchoMusic 退出时会自动关闭连接；插件卸载时会删除该插件的 SQLite 私有目录。
 - `ctx.sqlite` 也会出现在插件浮窗上下文中，适合浮窗直接读取或写入当前插件的配置、缓存和历史数据。
+
+### TCP 网络连接
+
+`ctx.net.tcp.connect(options)` 返回具有 `read()`、`write(data)` 和 `close()` 的连接；要求 `capabilities.tcp: true`。完整语义、限制和示例见 [TCP 网络 API](tcp.md)。
 
 ### 原生网络请求
 
