@@ -2,7 +2,7 @@ name = "echo-team-pool"
 main = "worker.js"
 compatibility_date = "2026-09-04"
 compatibility_flags = ["nodejs_compat"]
-workers_dev = false
+workers_dev = true
 preview_urls = false
 
 routes = [
@@ -10,7 +10,7 @@ routes = [
 ]
 
 [vars]
-MIN_CLIENT_VERSION = "1.1.0"
+MIN_CLIENT_VERSION = "1.2.0"
 
 [durable_objects]
 bindings = [

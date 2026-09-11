@@ -1,23 +1,45 @@
-var __defProp = Object.defineProperty;
-var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+// echo-team-pool v2 —— 快照 / 租约 / 匹配模型
+// 架构设计：docs/auto-team-vip-redesign.md（§6）
+//
+// 职责边界：
+//   - 酷狗服务器是队伍构成的唯一权威；码池对"队伍里有几个人"的判断全部来自插件上报的快照观测值。
+//   - 码池只做两件事：(a) 存储快照并计算每个队的可用名额；(b) 以租约方式下发组队码并跟踪结果。
+//   - 每期活动一个 Durable Object 实例（getByName(periodId)），DO 内嵌 SQLite 存储全部状态。
 
-// util.js
+const SCHEMA_VERSION = "2";
+const TEAM_CAPACITY = 3;                    // 1 队长 + 2 队员
+const MEMBER_SLOTS = TEAM_CAPACITY - 1;     // 队员名额
+const LEASE_TTL_MS = 120_000;               // pending 租约有效期（预留酷狗验证码交互）
+const SUCCESS_CONFIRM_MS = 600_000;         // success 等待快照确认窗口
+const FRESH_CUTOFF_MS = 6 * 3_600_000;      // 超过该时长无快照 → stale（查询时推导，不落库）
+const COOLDOWN_SUSPECT_FULL_MS = 600_000;   // 可疑 full（非最后名额）冷却
+const COOLDOWN_INVALID_MS = 24 * 3_600_000; // invalid 冷却（码无效无快照可纠偏）
+const RATE_BURST = 5;                       // 令牌桶：突发
+const RATE_REFILL_PER_SEC = 1;              // 令牌桶：持续
+const WAITING_ACTIVE_MS = 30 * 60_000;      // waiting 统计的活跃窗口
+const CLEANUP_INTERVAL_MS = 24 * 3_600_000; // 每日清理
+const DATA_RETENTION_MS = 30 * 24 * 3_600_000;
+const EVENTS_KEEP = 500;                    // 审计环形日志容量
+const MAX_BODY_SIZE = 4096;
+
+// ---------- utils ----------
+
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { "Content-Type": "application/json; charset=utf-8" }
+    headers: { "Content-Type": "application/json; charset=utf-8" },
   });
 }
-__name(json, "json");
+
 function err(code, message, status = 400) {
   return json({ ok: false, error: code, message }, status);
 }
-__name(err, "err");
+
 function parseVersion(v) {
   const p = String(v).split(".").map(Number);
   return [p[0] || 0, p[1] || 0, p[2] || 0];
 }
-__name(parseVersion, "parseVersion");
+
 function versionGte(a, b) {
   const [a1, a2, a3] = parseVersion(a);
   const [b1, b2, b3] = parseVersion(b);
@@ -25,251 +47,665 @@ function versionGte(a, b) {
   if (a2 !== b2) return a2 > b2;
   return a3 >= b3;
 }
-__name(versionGte, "versionGte");
 
-// period-pool.js
+function clampMemberCount(n) {
+  const num = Math.round(Number(n));
+  if (!Number.isFinite(num)) return 1;
+  return Math.min(TEAM_CAPACITY, Math.max(1, num));
+}
+
+function cleanStr(v, maxLen) {
+  const s = String(v ?? "").trim();
+  if (!s) return "";
+  return s.length > maxLen ? s.slice(0, maxLen) : s;
+}
+
+// ---------- Durable Object ----------
+
 import { DurableObject } from "cloudflare:workers";
-var PeriodPool = class extends DurableObject {
-  static {
-    __name(this, "PeriodPool");
-  }
+
+export class PeriodPool extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     this._ready = ctx.blockConcurrencyWhile(async () => this._init());
   }
+
   async _init() {
-    const tables = this.ctx.storage.sql.exec(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name='codes'"
-    ).toArray();
-    if (tables.length > 0) {
-      const cols = this.ctx.storage.sql.exec("PRAGMA table_info(codes)").toArray();
-      const hasUid = cols.some(c => c.name === 'uid');
-      if (hasUid) {
-        this.ctx.storage.sql.exec("DROP TABLE IF EXISTS codes");
-      }
+    const sql = this.ctx.storage.sql;
+    // schema 版本检测：v1 表结构（codes / 旧 rate_limit）直接丢弃——每期数据独立，无需保留
+    let schemaVersion = "";
+    const tables = sql
+      .exec(`SELECT name FROM sqlite_master WHERE type='table' AND name IN ('meta','codes')`)
+      .toArray();
+    const names = new Set(tables.map((r) => String(r.name)));
+    if (names.has("meta")) {
+      const rows = sql.exec(`SELECT value FROM meta WHERE key = 'schema_version'`).toArray();
+      if (rows.length > 0) schemaVersion = String(rows[0].value ?? "");
     }
-    this.ctx.storage.sql.exec(`
-      CREATE TABLE IF NOT EXISTS codes (
-        code TEXT NOT NULL,
-        creator TEXT NOT NULL DEFAULT 'unknown',
-        members TEXT NOT NULL DEFAULT '[]',
-        remaining INTEGER NOT NULL DEFAULT 2,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        PRIMARY KEY (code)
+    if (schemaVersion !== SCHEMA_VERSION) {
+      sql.exec(`DROP TABLE IF EXISTS codes`);
+      sql.exec(`DROP TABLE IF EXISTS rate_limit`);
+      sql.exec(`
+        CREATE TABLE IF NOT EXISTS meta (
+          key   TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS users (
+          uid              TEXT PRIMARY KEY,
+          token            TEXT NOT NULL,
+          last_joined_code TEXT NOT NULL DEFAULT '',
+          created_at       INTEGER NOT NULL,
+          last_seen_at     INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS teams (
+          code         TEXT PRIMARY KEY,
+          captain_uid  TEXT NOT NULL DEFAULT '',
+          member_count INTEGER NOT NULL DEFAULT 1,
+          status       TEXT NOT NULL DEFAULT 'open',
+          snapshot_at  INTEGER NOT NULL,
+          fail_until   INTEGER NOT NULL DEFAULT 0,
+          created_at   INTEGER NOT NULL,
+          updated_at   INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS leases (
+          id          TEXT PRIMARY KEY,
+          uid         TEXT NOT NULL,
+          code        TEXT NOT NULL,
+          status      TEXT NOT NULL,
+          assigned_at INTEGER NOT NULL,
+          expires_at  INTEGER NOT NULL,
+          resolved_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_leases_code ON leases(code, status);
+        CREATE INDEX IF NOT EXISTS idx_leases_uid  ON leases(uid, status);
+        CREATE TABLE IF NOT EXISTS events (
+          id     INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts     INTEGER NOT NULL,
+          kind   TEXT NOT NULL,
+          uid    TEXT,
+          code   TEXT,
+          detail TEXT
+        );
+        CREATE TABLE IF NOT EXISTS rate_limit (
+          uid        TEXT PRIMARY KEY,
+          tokens     REAL NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+      `);
+      sql.exec(
+        `INSERT INTO meta (key, value) VALUES ('schema_version', ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+        SCHEMA_VERSION
       );
-      CREATE TABLE IF NOT EXISTS rate_limit (
-        uid TEXT PRIMARY KEY,
-        last_ts INTEGER NOT NULL
-      );
-    `);
-    const existing = await this.ctx.storage.getAlarm();
-    if (existing === null) {
-      await this.ctx.storage.setAlarm(Date.now() + 24 * 60 * 60 * 1e3);
+    }
+    if ((await this.ctx.storage.getAlarm()) === null) {
+      await this.ctx.storage.setAlarm(Date.now() + CLEANUP_INTERVAL_MS);
     }
   }
-  async register(code, creator, members, remaining) {
-    await this._ready;
+
+  // ---------- 基础设施 ----------
+
+  _sql(query, ...params) {
+    return this.ctx.storage.sql.exec(query, ...params).toArray();
+  }
+
+  _exec(query, ...params) {
+    return this.ctx.storage.sql.exec(query, ...params);
+  }
+
+  _event(kind, uid, code, detail) {
     try {
-      const existing = this.ctx.storage.sql.exec(
-        `SELECT code, members FROM codes WHERE code = ?`, code
-      ).toArray();
+      this._exec(
+        `INSERT INTO events (ts, kind, uid, code, detail) VALUES (?, ?, ?, ?, ?)`,
+        Date.now(), kind, uid || null, code || null,
+        detail ? String(detail).slice(0, 500) : null
+      );
+      this._exec(`DELETE FROM events WHERE id <= (SELECT MAX(id) FROM events) - ?`, EVENTS_KEEP);
+    } catch {
+      // 审计失败不影响主流程
+    }
+  }
+
+  _newToken() {
+    const bytes = new Uint8Array(32);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  // 身份校验：uid 已存在则 token 必须精确匹配（永不重签，防劫持）；
+  // 仅 snapshot（issue=true）允许为不存在的 uid 签发新 token（新用户 / 新期次空表）。
+  _auth(uid, token, { issue = false } = {}) {
+    const rows = this._sql(`SELECT token FROM users WHERE uid = ?`, uid);
+    if (rows.length === 0) {
+      if (!issue) {
+        return { ok: false, status: 401, error: "unauthorized", message: "身份不存在或已过期，请先上报状态" };
+      }
+      const fresh = this._newToken();
       const now = Date.now();
-      if (existing.length > 0) {
-        const existingMembers = JSON.parse(String(existing[0].members ?? "[]"));
-        const merged = [...new Set([...existingMembers, ...members].filter(m => m !== creator))].slice(0, 2);
-        const realRemaining = Math.max(0, 2 - merged.length);
-        this.ctx.storage.sql.exec(
-          `UPDATE codes SET members = ?, remaining = ?, updated_at = ? WHERE code = ?`,
-          JSON.stringify(merged), realRemaining, now, code
-        );
-      } else {
-        const filtered = members.filter(m => m !== creator).slice(0, 2);
-        const realRemaining = Math.max(0, 2 - filtered.length);
-        this.ctx.storage.sql.exec(
-          `INSERT INTO codes (code, creator, members, remaining, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-          code, creator, JSON.stringify(filtered), realRemaining, now, now
-        );
-      }
-      return { ok: true };
-    } catch (e) {
-      return { ok: false, error: "internal", message: String(e?.message) };
-    }
-  }
-  async join(uid, skip) {
-    await this._ready;
-    if (!this._checkRate(uid)) return { ok: false, error: "rate_limited", message: "请求过于频繁，请稍后再试" };
-    try {
-      let sql = `SELECT code FROM codes
-         WHERE remaining > 0
-           AND creator <> ?
-           AND creator <> 'unknown'
-           AND NOT EXISTS (SELECT 1 FROM json_each(members) WHERE value = ?)`;
-      const params = [uid, uid];
-      if (skip) {
-        sql += ` AND code <> ?`;
-        params.push(skip);
-      }
-      sql += ` ORDER BY created_at ASC LIMIT 1`;
-      const cur = this.ctx.storage.sql.exec(sql, ...params).toArray();
-      if (cur.length === 0) return { ok: true, code: null };
-      const code = cur[0].code;
-      this.ctx.storage.sql.exec(
-        `UPDATE codes SET remaining = remaining - 1, updated_at = ?
-         WHERE code = ? AND remaining > 0`,
-        Date.now(), code
+      this._exec(
+        `INSERT INTO users (uid, token, last_joined_code, created_at, last_seen_at) VALUES (?, ?, '', ?, ?)`,
+        uid, fresh, now, now
       );
-      console.log("join:", uid, "->", code);
-      return { ok: true, code };
-    } catch (e) {
-      return { ok: false, error: "internal", message: String(e?.message) };
+      return { ok: true, token: fresh };
     }
-  }
-  async reportResult(code, status) {
-    await this._ready;
-    if (!this._checkRate(code)) return { ok: false, error: "rate_limited", message: "请求过于频繁，请稍后再试" };
-    try {
-      if (status === "joined") {
-        // noop: remaining already decremented on dispatch
-      } else if (status === "failed") {
-        this.ctx.storage.sql.exec(
-          `UPDATE codes SET remaining = remaining + 1, updated_at = ? WHERE code = ?`,
-          Date.now(), code
-        );
-      } else {
-        return { ok: false, error: "unknown_status", message: "未知操作状态: " + status };
-      }
-      return { ok: true };
-    } catch (e) {
-      return { ok: false, error: "internal", message: String(e?.message) };
+    const stored = String(rows[0].token ?? "");
+    if (!token || token !== stored) {
+      this._event("auth", uid, null, "token_mismatch");
+      return { ok: false, status: 401, error: "unauthorized", message: "身份校验失败，本期码池功能停用（下期自动恢复）" };
     }
+    return { ok: true, token: stored };
   }
-  async syncCode(code, members, remaining) {
-    await this._ready;
-    try {
-      const rows = this.ctx.storage.sql.exec(
-        `SELECT members, creator FROM codes WHERE code = ?`, code
-      ).toArray();
-      if (rows.length === 0) return { ok: false, error: "code_not_found", message: "队伍码不存在或已过期" };
-      const existingMembers = JSON.parse(String(rows[0].members ?? "[]"));
-      const creator = String(rows[0].creator ?? "");
-      const merged = [...new Set([...existingMembers, ...members].filter(m => m !== creator))].slice(0, 2);
-      const realRemaining = Math.max(0, 2 - merged.length);
-      this.ctx.storage.sql.exec(
-        `UPDATE codes SET members = ?, remaining = ?, updated_at = ? WHERE code = ?`,
-        JSON.stringify(merged), realRemaining, Date.now(), code
-      );
-      return { ok: true };
-    } catch (e) {
-      return { ok: false, error: "internal", message: String(e?.message) };
-    }
-  }
-  async stats() {
-    await this._ready;
-    try {
-      const rows = this.ctx.storage.sql.exec(
-        `SELECT code, creator, members, remaining, created_at, updated_at FROM codes`
-      ).toArray();
-      return { ok: true, count: rows.length, codes: rows };
-    } catch (e) {
-      return { ok: false, error: "internal", message: String(e?.message) };
-    }
-  }
+
+  // 令牌桶限速：突发 RATE_BURST、持续 RATE_REFILL_PER_SEC，应用到全部 v2 客户端端点
   _checkRate(uid) {
     const now = Date.now();
-    const cur = this.ctx.storage.sql.exec(
-      `SELECT last_ts FROM rate_limit WHERE uid = ?`,
-      uid
-    ).toArray();
-    if (cur.length > 0 && now - Number(cur[0].last_ts) < 1e3) return false;
-    this.ctx.storage.sql.exec(
-      `INSERT INTO rate_limit (uid, last_ts) VALUES (?, ?)
-       ON CONFLICT(uid) DO UPDATE SET last_ts = excluded.last_ts`,
-      uid,
-      now
+    const rows = this._sql(`SELECT tokens, updated_at FROM rate_limit WHERE uid = ?`, uid);
+    let tokens = rows.length > 0 ? Number(rows[0].tokens) : RATE_BURST;
+    const last = rows.length > 0 ? Number(rows[0].updated_at) : now;
+    tokens = Math.min(RATE_BURST, tokens + ((now - last) / 1000) * RATE_REFILL_PER_SEC);
+    if (tokens < 1) {
+      this._exec(
+        `INSERT INTO rate_limit (uid, tokens, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(uid) DO UPDATE SET tokens = excluded.tokens, updated_at = excluded.updated_at`,
+        uid, tokens, now
+      );
+      // 限速事件每 uid 每分钟至多记一条，防止刷掉审计环形日志
+      const recent = this._sql(
+        `SELECT 1 FROM events WHERE kind = 'rate' AND uid = ? AND ts > ? LIMIT 1`,
+        uid, now - 60_000
+      );
+      if (recent.length === 0) this._event("rate", uid, null, "rate_limited");
+      return false;
+    }
+    tokens -= 1;
+    this._exec(
+      `INSERT INTO rate_limit (uid, tokens, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(uid) DO UPDATE SET tokens = excluded.tokens, updated_at = excluded.updated_at`,
+      uid, tokens, now
     );
     return true;
   }
+
+  // 过期回收：以时间戳判定（不依赖 alarm 是否已执行），所有入口先做懒清扫
+  _sweepExpired() {
+    const now = Date.now();
+    try {
+      const cursor = this._exec(
+        `UPDATE leases SET status = 'expired', resolved_at = ?
+         WHERE status IN ('pending', 'success') AND expires_at <= ?`,
+        now, now
+      );
+      const n = Number(cursor?.rowsWritten ?? 0);
+      if (n > 0) this._event("expire", null, null, "expired_leases=" + n);
+    } catch {
+      // 清扫失败不影响主流程（查询侧仍以时间戳兜底）
+    }
+  }
+
+  // 某队当前在途占用（未过期 pending/success 租约数），可排除指定租约
+  _inflightCount(code, excludeLeaseId) {
+    const rows = this._sql(
+      `SELECT COUNT(*) AS c FROM leases
+       WHERE code = ? AND id <> ?
+         AND (status = 'success' OR (status = 'pending' AND expires_at > ?))`,
+      code, excludeLeaseId || "", Date.now()
+    );
+    return Number(rows[0]?.c ?? 0);
+  }
+
+  _poolStats() {
+    const now = Date.now();
+    const open = this._sql(
+      `SELECT COUNT(*) AS c FROM teams WHERE status = 'open' AND snapshot_at > ? AND fail_until < ?`,
+      now - FRESH_CUTOFF_MS, now
+    );
+    const full = this._sql(`SELECT COUNT(*) AS c FROM teams WHERE status = 'full'`);
+    const waiting = this._sql(
+      `SELECT COUNT(*) AS c FROM users WHERE last_joined_code = '' AND last_seen_at > ?`,
+      now - WAITING_ACTIVE_MS
+    );
+    return {
+      open_teams: Number(open[0]?.c ?? 0),
+      full_teams: Number(full[0]?.c ?? 0),
+      waiting: Number(waiting[0]?.c ?? 0),
+    };
+  }
+
+  // 快照 upsert 队伍：member_count 以酷狗观测值为权威，覆盖更新；
+  // 新快照代表更新的观测，清除失败冷却（"新快照立即复活"）。
+  _upsertTeam({ code, captain, memberCount, source }, now) {
+    const mc = clampMemberCount(memberCount);
+    const status = mc >= TEAM_CAPACITY ? "full" : "open";
+    const rows = this._sql(
+      `SELECT captain_uid, member_count, status FROM teams WHERE code = ?`, code
+    );
+    if (rows.length === 0) {
+      this._exec(
+        `INSERT INTO teams (code, captain_uid, member_count, status, snapshot_at, fail_until, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 0, ?, ?)`,
+        code, captain || "", mc, status, now, now, now
+      );
+      return;
+    }
+    const prevMc = Number(rows[0].member_count);
+    const prevStatus = String(rows[0].status ?? "");
+    if (prevStatus === "full" && mc < prevMc) {
+      // 单调性异常：照实覆盖（酷狗仍是真相源），记 events 供排查伪造/故障
+      this._event("error", source, code, `member_count_decrease ${prevMc}->${mc}`);
+    }
+    const newCaptain = captain || String(rows[0].captain_uid ?? "");
+    this._exec(
+      `UPDATE teams SET captain_uid = ?, member_count = ?, status = ?, snapshot_at = ?, fail_until = 0, updated_at = ?
+       WHERE code = ?`,
+      newCaptain, mc, status, now, now, code
+    );
+  }
+
+  // ---------- v2 API ----------
+
+  // POST /v2/snapshot —— 状态上报（替代 v1 register/sync）
+  async snapshot(body) {
+    await this._ready;
+    const uid = cleanStr(body?.uid, 64);
+    if (!uid) return { ok: false, status: 400, error: "missing_uid", message: "缺少 uid" };
+    if (!this._checkRate(uid)) {
+      return { ok: false, status: 429, error: "rate_limited", message: "请求过于频繁，请稍后再试" };
+    }
+    const token = cleanStr(body?.token, 128);
+    const auth = this._auth(uid, token, { issue: true });
+    if (!auth.ok) return auth;
+
+    const now = Date.now();
+    this._exec(`UPDATE users SET last_seen_at = ? WHERE uid = ?`, now, uid);
+
+    const created = body?.created && body.created.code ? body.created : null;
+    const joined = body?.joined && body.joined.code ? body.joined : null;
+
+    if (created) {
+      this._upsertTeam(
+        { code: cleanStr(created.code, 64), captain: uid, memberCount: created.member_count, source: uid },
+        now
+      );
+    }
+
+    if (joined) {
+      const code = cleanStr(joined.code, 64);
+      this._upsertTeam(
+        { code, captain: cleanStr(joined.captain, 64), memberCount: joined.member_count, source: uid },
+        now
+      );
+      this._exec(`UPDATE users SET last_joined_code = ? WHERE uid = ?`, code, uid);
+      // 迟到成功确认：pending/success/expired 租约与快照 joined 相符 → confirmed（账目修正）
+      const cursor = this._exec(
+        `UPDATE leases SET status = 'confirmed', resolved_at = ?
+         WHERE uid = ? AND code = ? AND status IN ('pending', 'success', 'expired')`,
+        now, uid, code
+      );
+      if (Number(cursor?.rowsWritten ?? 0) > 0) {
+        this._event("snapshot", uid, code, "lease_confirmed_late");
+      }
+    } else {
+      this._exec(`UPDATE users SET last_joined_code = '' WHERE uid = ?`, uid);
+    }
+
+    this._event(
+      "snapshot", uid,
+      created?.code ? cleanStr(created.code, 64) : null,
+      `created_mc=${created ? clampMemberCount(created.member_count) : 0};joined_mc=${joined ? clampMemberCount(joined.member_count) : 0}`
+    );
+    return { ok: true, token: auth.token, pool: this._poolStats() };
+  }
+
+  // POST /v2/join —— 申请分配（幂等；快满优先 + FIFO）
+  async join(body) {
+    await this._ready;
+    const uid = cleanStr(body?.uid, 64);
+    if (!uid) return { ok: false, status: 400, error: "missing_uid", message: "缺少 uid" };
+    if (!this._checkRate(uid)) {
+      return { ok: false, status: 429, error: "rate_limited", message: "请求过于频繁，请稍后再试" };
+    }
+    const auth = this._auth(uid, cleanStr(body?.token, 128));
+    if (!auth.ok) return auth;
+
+    const now = Date.now();
+    this._sweepExpired();
+
+    // 幂等：已有未过期 pending/success 租约 → 原样返回（防止重复分配）
+    const active = this._sql(
+      `SELECT id, code, expires_at FROM leases
+       WHERE uid = ? AND ((status = 'pending' AND expires_at > ?) OR (status = 'success' AND expires_at > ?))
+       ORDER BY assigned_at DESC LIMIT 1`,
+      uid, now, now
+    );
+    if (active.length > 0) {
+      const l = active[0];
+      return {
+        ok: true,
+        lease_id: String(l.id),
+        code: String(l.code),
+        expires_in: Math.max(1, Math.round((Number(l.expires_at) - now) / 1000)),
+      };
+    }
+
+    // 最近快照已加入 → already_joined（附该队码，供客户端校正本地状态）
+    const userRows = this._sql(`SELECT last_joined_code FROM users WHERE uid = ?`, uid);
+    const lastJoined = userRows.length > 0 ? String(userRows[0].last_joined_code ?? "") : "";
+    if (lastJoined) {
+      return { ok: true, code: lastJoined, reason: "already_joined" };
+    }
+
+    // 选队：快满优先（可用名额少者优先）+ FIFO；排除自己创建的队、stale、冷却中的队
+    const fresh = now - FRESH_CUTOFF_MS;
+    const candidates = this._sql(
+      `SELECT t.code,
+              (${MEMBER_SLOTS} - (t.member_count - 1) - (SELECT COUNT(*) FROM leases l
+                  WHERE l.code = t.code
+                    AND (l.status = 'success' OR (l.status = 'pending' AND l.expires_at > ?)))) AS avail
+       FROM teams t
+       WHERE t.status = 'open'
+         AND t.snapshot_at > ?
+         AND t.fail_until < ?
+         AND t.captain_uid <> ?
+         AND (${MEMBER_SLOTS} - (t.member_count - 1) - (SELECT COUNT(*) FROM leases l
+                  WHERE l.code = t.code
+                    AND (l.status = 'success' OR (l.status = 'pending' AND l.expires_at > ?)))) > 0
+         AND NOT EXISTS (SELECT 1 FROM leases l2
+                  WHERE l2.uid = ? AND l2.code = t.code
+                    AND (l2.status IN ('success', 'confirmed')
+                         OR (l2.status = 'pending' AND l2.expires_at > ?)))
+       ORDER BY avail ASC, t.created_at ASC
+       LIMIT 1`,
+      now, fresh, now, uid, now, uid, now
+    );
+    if (candidates.length === 0) {
+      return { ok: true, code: null, reason: "pool_empty" };
+    }
+
+    const code = String(candidates[0].code);
+    const leaseId = crypto.randomUUID();
+    this._exec(
+      `INSERT INTO leases (id, uid, code, status, assigned_at, expires_at) VALUES (?, ?, ?, 'pending', ?, ?)`,
+      leaseId, uid, code, now, now + LEASE_TTL_MS
+    );
+    this._event("assign", uid, code, leaseId);
+    return { ok: true, lease_id: leaseId, code, expires_in: Math.round(LEASE_TTL_MS / 1000) };
+  }
+
+  // POST /v2/join/result —— 租约结果回报（幂等）
+  async joinResult(body) {
+    await this._ready;
+    const uid = cleanStr(body?.uid, 64);
+    if (!uid) return { ok: false, status: 400, error: "missing_uid", message: "缺少 uid" };
+    if (!this._checkRate(uid)) {
+      return { ok: false, status: 429, error: "rate_limited", message: "请求过于频繁，请稍后再试" };
+    }
+    const auth = this._auth(uid, cleanStr(body?.token, 128));
+    if (!auth.ok) return auth;
+
+    const leaseId = cleanStr(body?.lease_id, 64);
+    const result = String(body?.result ?? "");
+    if (!leaseId || !result) {
+      return { ok: false, status: 400, error: "bad_request", message: "缺少 lease_id 或 result" };
+    }
+
+    const now = Date.now();
+    this._sweepExpired();
+
+    const rows = this._sql(`SELECT id, code, status FROM leases WHERE id = ? AND uid = ?`, leaseId, uid);
+    if (rows.length === 0) {
+      return { ok: false, error: "lease_not_found", message: "租约不存在" };
+    }
+    const lease = rows[0];
+    if (String(lease.status) !== "pending") {
+      return { ok: true }; // 重复回报幂等忽略
+    }
+    const code = String(lease.code);
+
+    if (result === "success") {
+      // 保持占用，等快照确认（§5.2）
+      this._exec(
+        `UPDATE leases SET status = 'success', expires_at = ?, resolved_at = NULL WHERE id = ?`,
+        now + SUCCESS_CONFIRM_MS, leaseId
+      );
+      this._event("result", uid, code, "success");
+      return { ok: true };
+    }
+
+    if (result === "failed") {
+      this._exec(`UPDATE leases SET status = 'failed', resolved_at = ? WHERE id = ?`, now, leaseId);
+      // 失败即纠偏（§6.4）：join 失败本身即酷狗的直接观测
+      const kind = cleanStr(body?.error_kind, 32);
+      if (kind === "full" || kind === "invalid") {
+        const teamRows = this._sql(`SELECT member_count FROM teams WHERE code = ?`, code);
+        if (teamRows.length > 0) {
+          const mc = Number(teamRows[0].member_count);
+          const others = this._inflightCount(code, leaseId);
+          const availExcluding = MEMBER_SLOTS - (mc - 1) - others;
+          if (kind === "full" && availExcluding <= 0) {
+            // 本租约占用的是最后一个名额却报 full → 采信为真：期内终态
+            this._exec(
+              `UPDATE teams SET member_count = ?, status = 'full', updated_at = ? WHERE code = ?`,
+              TEAM_CAPACITY, now, code
+            );
+            this._event("correct", uid, code, `full_observed mc=${mc}->${TEAM_CAPACITY}`);
+          } else {
+            // 可疑 full / invalid → 冷却（invalid 无快照可纠偏，冷却更长）
+            const until = now + (kind === "invalid" ? COOLDOWN_INVALID_MS : COOLDOWN_SUSPECT_FULL_MS);
+            this._exec(`UPDATE teams SET fail_until = ? WHERE code = ?`, until, code);
+            this._event("result", uid, code, `failed_${kind}_cooldown`);
+          }
+        }
+      } else {
+        this._event("result", uid, code, "failed_" + (kind || "unknown"));
+      }
+      return { ok: true };
+    }
+
+    return { ok: false, status: 400, error: "unknown_result", message: "未知 result: " + result };
+  }
+
+  // POST /v2/status —— 自查 + 聚合（只返回请求者自己的数据）
+  async status(body) {
+    await this._ready;
+    const uid = cleanStr(body?.uid, 64);
+    if (!uid) return { ok: false, status: 400, error: "missing_uid", message: "缺少 uid" };
+    if (!this._checkRate(uid)) {
+      return { ok: false, status: 429, error: "rate_limited", message: "请求过于频繁，请稍后再试" };
+    }
+    const auth = this._auth(uid, cleanStr(body?.token, 128));
+    if (!auth.ok) return auth;
+
+    const now = Date.now();
+    this._sweepExpired();
+
+    const createdRows = this._sql(
+      `SELECT code, member_count, status, snapshot_at FROM teams WHERE captain_uid = ? ORDER BY created_at DESC LIMIT 1`,
+      uid
+    );
+    let myTeam = null;
+    if (createdRows.length > 0) {
+      const r = createdRows[0];
+      const st = String(r.status) === "full"
+        ? "full"
+        : (Number(r.snapshot_at) > now - FRESH_CUTOFF_MS ? "open" : "stale");
+      myTeam = { code: String(r.code), member_count: Number(r.member_count), status: st };
+    }
+
+    const userRows = this._sql(`SELECT last_joined_code FROM users WHERE uid = ?`, uid);
+    const lastJoined = userRows.length > 0 ? String(userRows[0].last_joined_code ?? "") : "";
+    let joinedTeam = null;
+    if (lastJoined) {
+      const r = this._sql(`SELECT member_count FROM teams WHERE code = ?`, lastJoined);
+      if (r.length > 0) {
+        joinedTeam = { code: lastJoined, member_count: Number(r[0].member_count) };
+      }
+    }
+
+    const leaseRows = this._sql(
+      `SELECT id, code, status, expires_at FROM leases
+       WHERE uid = ? AND status IN ('pending', 'success') AND expires_at > ?
+       ORDER BY assigned_at DESC LIMIT 1`,
+      uid, now
+    );
+    const activeLease = leaseRows.length > 0
+      ? {
+          lease_id: String(leaseRows[0].id),
+          code: String(leaseRows[0].code),
+          status: String(leaseRows[0].status),
+          expires_in: Math.max(0, Math.round((Number(leaseRows[0].expires_at) - now) / 1000)),
+        }
+      : null;
+
+    return { ok: true, my_team: myTeam, joined_team: joinedTeam, active_lease: activeLease, pool: this._poolStats() };
+  }
+
+  // POST /v2/health —— 运维观测（可选）：仅聚合，不含 uid/code 明细
+  async health() {
+    await this._ready;
+    const now = Date.now();
+    this._sweepExpired();
+    const fresh = now - FRESH_CUTOFF_MS;
+    const one = (q, ...p) => Number(this._sql(q, ...p)[0]?.c ?? 0);
+    const leaseBy = (st) => one(`SELECT COUNT(*) AS c FROM leases WHERE status = ?`, st);
+    const day = now - 24 * 3_600_000;
+    return {
+      ok: true,
+      teams: {
+        open: one(`SELECT COUNT(*) AS c FROM teams WHERE status = 'open' AND snapshot_at > ? AND fail_until < ?`, fresh, now),
+        full: one(`SELECT COUNT(*) AS c FROM teams WHERE status = 'full'`),
+        stale: one(`SELECT COUNT(*) AS c FROM teams WHERE status = 'open' AND snapshot_at <= ?`, fresh),
+        cooldown: one(`SELECT COUNT(*) AS c FROM teams WHERE fail_until >= ?`, now),
+      },
+      leases: {
+        pending: leaseBy("pending"),
+        success: leaseBy("success"),
+        confirmed: leaseBy("confirmed"),
+        failed: leaseBy("failed"),
+        expired: leaseBy("expired"),
+      },
+      users: {
+        total: one(`SELECT COUNT(*) AS c FROM users`),
+        waiting: one(`SELECT COUNT(*) AS c FROM users WHERE last_joined_code = '' AND last_seen_at > ?`, now - WAITING_ACTIVE_MS),
+      },
+      events_24h: {
+        auth_fail: one(`SELECT COUNT(*) AS c FROM events WHERE kind = 'auth' AND ts > ?`, day),
+        rate_limited: one(`SELECT COUNT(*) AS c FROM events WHERE kind = 'rate' AND ts > ?`, day),
+        expired_leases: one(`SELECT COUNT(*) AS c FROM events WHERE kind = 'expire' AND ts > ?`, day),
+        anomalies: one(`SELECT COUNT(*) AS c FROM events WHERE kind = 'error' AND ts > ?`, day),
+      },
+    };
+  }
+
+  // ---------- alarm：过期回收 + 每日清理 ----------
+
   async alarm() {
     try {
-      const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1e3;
-      this.ctx.storage.sql.exec(`DELETE FROM codes WHERE updated_at < ?`, cutoff);
-      this.ctx.storage.sql.exec(`DELETE FROM rate_limit WHERE last_ts < ?`, Date.now() - 6e4);
-      const codesCount = Number(this.ctx.storage.sql.exec(`SELECT COUNT(*) as c FROM codes`).toArray()[0]?.c ?? 0);
-      const rateCount = Number(this.ctx.storage.sql.exec(`SELECT COUNT(*) as c FROM rate_limit`).toArray()[0]?.c ?? 0);
-      if (codesCount === 0 && rateCount === 0) {
+      this._sweepExpired();
+      const cutoff = Date.now() - DATA_RETENTION_MS;
+      this._exec(`DELETE FROM teams WHERE snapshot_at < ?`, cutoff);
+      this._exec(`DELETE FROM users WHERE last_seen_at < ?`, cutoff);
+      this._exec(`DELETE FROM leases WHERE assigned_at < ?`, cutoff);
+      this._exec(`DELETE FROM events WHERE ts < ?`, cutoff);
+      this._exec(`DELETE FROM rate_limit WHERE updated_at < ?`, Date.now() - 3_600_000);
+      // 判空 deleteAll 以全部业务表为准（meta 不计，随 deleteAll 一并清除，下次访问重新初始化）
+      const count = (t) => Number(this._sql(`SELECT COUNT(*) AS c FROM ${t}`)[0]?.c ?? 0);
+      const total =
+        count("users") + count("teams") + count("leases") + count("events") + count("rate_limit");
+      if (total === 0) {
         await this.ctx.storage.deleteAll();
         return;
       }
-      await this.ctx.storage.setAlarm(Date.now() + 24 * 60 * 60 * 1e3);
+      await this._scheduleNextAlarm();
     } catch (e) {
       console.error("alarm failed", e);
       try {
-        await this.ctx.storage.setAlarm(Date.now() + 60 * 60 * 1e3);
+        await this.ctx.storage.setAlarm(Date.now() + 3_600_000);
       } catch {
+        // ignore
       }
     }
   }
-};
 
-// worker.js
-var MAX_BODY_SIZE = 4096;
-var worker_default = {
+  async _scheduleNextAlarm() {
+    const rows = this._sql(
+      `SELECT MIN(expires_at) AS next FROM leases WHERE status IN ('pending', 'success')`
+    );
+    const nextLease = rows.length > 0 ? Number(rows[0].next ?? 0) : 0;
+    const daily = Date.now() + CLEANUP_INTERVAL_MS;
+    const next = nextLease > Date.now() ? Math.min(nextLease, daily) : daily;
+    await this.ctx.storage.setAlarm(next);
+  }
+}
+
+// ---------- Worker 入口 ----------
+
+export default {
   async fetch(request, env) {
-    const minVersion = env.MIN_CLIENT_VERSION || "1.0.6";
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
-    if (path === "/") return json({ name: "echo-team-pool", ok: true });
+    if (path === "/") return json({ name: "echo-team-pool", api: 2, ok: true });
+    if (request.method !== "POST") return err("method_not_allowed", "仅支持 POST", 405);
+
+    // 版本门禁（保留 v1 机制）
+    const minVersion = env.MIN_CLIENT_VERSION || "1.2.0";
     const v = request.headers.get("X-Plugin-Version") || "";
-    if (!v) return err("version_missing", "\u7F3A\u5C11\u63D2\u4EF6\u7248\u672C\u4FE1\u606F\uFF0C\u8BF7\u66F4\u65B0\u63D2\u4EF6\u540E\u91CD\u8BD5", 403);
+    if (!v) return err("version_missing", "缺少插件版本信息，请更新插件后重试", 403);
     if (!versionGte(v, minVersion)) {
-      return err("version_mismatch", `\u63D2\u4EF6\u7248\u672C\u8FC7\u4F4E\uFF08${v}\uFF09\uFF0C\u8BF7\u66F4\u65B0\u81F3 ${minVersion} \u6216\u66F4\u9AD8\u7248\u672C`, 403);
+      return err("version_mismatch", `插件版本过低（${v}），请更新至 ${minVersion} 或更高版本`, 403);
     }
+
     const cl = Number(request.headers.get("content-length") || 0);
-    if (cl > MAX_BODY_SIZE) return err("payload_too_large", "\u8BF7\u6C42\u4F53\u8D85\u8FC7 4KB", 413);
+    if (cl > MAX_BODY_SIZE) return err("payload_too_large", "请求体超过 4KB", 413);
     let body = {};
-    if (request.method === "POST" && cl > 0) {
+    if (cl > 0) {
       try {
         const text = await request.text();
-        if (text.length > MAX_BODY_SIZE) return err("payload_too_large", "\u8BF7\u6C42\u4F53\u8D85\u8FC7 4KB", 413);
+        if (text.length > MAX_BODY_SIZE) return err("payload_too_large", "请求体超过 4KB", 413);
         body = text ? JSON.parse(text) : {};
       } catch {
-        return err("bad_request", "\u8BF7\u6C42\u4F53\u4E0D\u662F\u5408\u6CD5 JSON", 400);
+        return err("bad_request", "请求体不是合法 JSON", 400);
       }
     }
+
     const periodId = String(body.period_id || url.searchParams.get("period_id") || "");
-    if (!periodId) return err("missing_period_id", "\u7F3A\u5C11 period_id", 400);
+    if (!periodId) return err("missing_period_id", "缺少 period_id", 400);
+
     let result;
     try {
       const stub = env.PERIOD_POOL.getByName(periodId);
       switch (path) {
-        case "/pool/register":
-          result = await stub.register(body.code, body.creator ?? "unknown", body.members ?? [], Number(body.remaining ?? 2));
+        case "/v2/snapshot":
+          result = await stub.snapshot(body);
           break;
-        case "/pool/join":
-          result = await stub.join(body.uid, body.skip);
+        case "/v2/join":
+          result = await stub.join(body);
           break;
-        case "/pool/report":
-          result = await stub.reportResult(body.code, body.status);
+        case "/v2/join/result":
+          result = await stub.joinResult(body);
           break;
-        case "/pool/sync":
-          result = await stub.syncCode(body.code, body.members ?? [], Number(body.remaining ?? 2));
+        case "/v2/status":
+          result = await stub.status(body);
           break;
-        case "/pool/stats":
-          result = await stub.stats();
+        case "/v2/health": {
+          // 管理端点：需 Admin Token；未配置或校验失败一律 404（不暴露端点存在性）。
+          // 注意版本门禁在前——管理请求也需携带 X-Plugin-Version 头。
+          const admin = String(env.ADMIN_TOKEN || "");
+          if (!admin || request.headers.get("X-Admin-Token") !== admin) {
+            return err("not_found", "路径不存在", 404);
+          }
+          result = await stub.health(body);
           break;
+        }
         default:
-          return err("not_found", "\u8DEF\u5F84\u4E0D\u5B58\u5728", 404);
+          // v1 端点（/pool/*）随 v2 全部下线
+          return err("not_found", "路径不存在", 404);
       }
     } catch (e) {
       return err("internal_error", String(e?.message ?? e), 500);
     }
-    return json(result);
-  }
+
+    const status = result && result.ok === false && result.status ? result.status : 200;
+    if (result && result.status !== undefined) delete result.status;
+    return json(result, status);
+  },
 };
-export {
-  PeriodPool,
-  worker_default as default
-};
-//# sourceMappingURL=worker.js.map
