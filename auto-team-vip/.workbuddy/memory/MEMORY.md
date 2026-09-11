@@ -5,7 +5,7 @@
 - 仓库：`D:/Code/EchoMusicPlugins`（单 git 仓，包含插件 `auto-team-vip/`、码池 `team-pool-worker/`、`docs/`）。**开发改动只在 `vip` 分支**，main 只接收合并（2026-09-12 v1.2.0 已合并进 main 并推送，远端 main=6f4cc01、vip=28a0bae，本地已与远端对齐）。
 - v2 重设计方案文档：`docs/auto-team-vip-redesign.md`（快照+租约+DO 每期一实例模型，2026-09-11 定稿）。插件目标版本 1.2.0，Worker MIN_CLIENT_VERSION=1.2.0，直接切换不做灰度。
 - 活动规则关键事实（用户确认）：每队 1 队长+2 队员；每账号每期自动建队成队长，另可以队员身份加 1 支队；**酷狗不支持退队**（入队即期内终态）；队员奖励与加入顺序无关；`my_join_team_list` 至多 1 支。
-- 部署：码池为 Cloudflare Worker + DO SQLite，自定义域 `echo-team-pool.oneday.vip`（已知 WAF 偶发 403，需配置跳过规则）。
+- 部署：码池为 Cloudflare Worker + DO SQLite，自定义域 `echo-team-pool.oneday.vip`。**2026-09-12 凌晨 v2 已部署**（/v2/admin/data 带 token 可用，鉴权掩码设计：无 token/未配置 ADMIN_TOKEN 一律 404 "路径不存在"）。**WAF 剩余问题：OPTIONS 预检与 GET 被拦（403 HTML 挑战页）**，跳过规则需覆盖 `/v2/*` 全部方法（含 OPTIONS/GET）；admin.html 的 "Failed to fetch" 即此因（浏览器预检失败，PowerShell 不走预检故正常）。
 - 插件运行环境：EchoMusic 客户端 IPC（`ctx.electron.api.request` 走酷狗接口，`ctx.net.request` 走码池），酷狗错误码 20028 需走 `kugouVerification` 验证码流程。
 
 ## 本机环境坑（2026-09-12 确认）
