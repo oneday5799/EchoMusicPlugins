@@ -748,6 +748,63 @@ export class PeriodPool extends DurableObject {
     };
   }
 
+  // POST /v2/admin/delete —— 站长管理操作（可选）：X-Admin-Token 门禁，破坏性写操作。
+  // delete_user：删用户行 + 其全部租约（解除 token 绑定；多设备/本地 token 丢失后，
+  //   下次快照以 issue 重签——本期内的唯一恢复手段）；
+  // delete_team：删队伍行 + 该队全部租约（清出无效/病态队伍，相关用户恢复可分配）；
+  // expire_lease：把 pending/success 租约立即置为 expired（腾出在途名额，保留账目记录）。
+  // 安全边界：快照会从酷狗观测重建 last_joined_code 与队伍构成，删除用户/队伍不会造成账目永久错位。
+  async adminDelete(body) {
+    await this._ready;
+    const action = String(body?.action || "");
+    if (!["delete_user", "delete_team", "expire_lease"].includes(action)) {
+      return { ok: false, status: 400, error: "bad_action", message: "未知操作，支持 delete_user / delete_team / expire_lease" };
+    }
+    if (body?.confirm !== true) {
+      return { ok: false, status: 400, error: "missing_confirm", message: "缺少 confirm:true，拒绝执行破坏性操作" };
+    }
+    const target = cleanStr(body?.target, 64);
+    if (!target) {
+      return { ok: false, status: 400, error: "missing_target", message: "缺少目标（uid / 队伍码 / 租约 ID）" };
+    }
+    const now = Date.now();
+    this._sweepExpired();
+    if (action === "delete_user") {
+      const leases = this._exec(`DELETE FROM leases WHERE uid = ?`, target);
+      const users = this._exec(`DELETE FROM users WHERE uid = ?`, target);
+      const nU = Number(users?.rowsWritten ?? 0);
+      const nL = Number(leases?.rowsWritten ?? 0);
+      this._event("admin_delete", nU > 0 ? target : null, null, "user;leases=" + nL);
+      return {
+        ok: true, action, target, deleted_users: nU, deleted_leases: nL,
+        note: nU === 0 ? "用户不存在（可能已删除）" : "已删除；该账号下次快照将自动重签 token",
+      };
+    }
+    if (action === "delete_team") {
+      const leases = this._exec(`DELETE FROM leases WHERE code = ?`, target);
+      const teams = this._exec(`DELETE FROM teams WHERE code = ?`, target);
+      const nT = Number(teams?.rowsWritten ?? 0);
+      const nL = Number(leases?.rowsWritten ?? 0);
+      this._event("admin_delete", null, nT > 0 ? target : null, "team;leases=" + nL);
+      return {
+        ok: true, action, target, deleted_teams: nT, deleted_leases: nL,
+        note: nT === 0 ? "队伍不存在（可能已删除）" : "已删除；相关用户可重新申请分配",
+      };
+    }
+    // expire_lease
+    const rows = this._sql(`SELECT uid, code, status FROM leases WHERE id = ?`, target);
+    if (rows.length === 0) {
+      return { ok: false, status: 404, error: "lease_not_found", message: "租约不存在" };
+    }
+    const st = String(rows[0].status);
+    if (st !== "pending" && st !== "success") {
+      return { ok: false, status: 400, error: "lease_terminal", message: "租约已终态（" + st + "），无需强制过期" };
+    }
+    this._exec(`UPDATE leases SET status = 'expired', resolved_at = ? WHERE id = ?`, now, target);
+    this._event("expire", String(rows[0].uid), String(rows[0].code), "admin_force_expire");
+    return { ok: true, action, target, note: "租约已强制过期，在途名额即时释放" };
+  }
+
   // ---------- alarm：过期回收 + 每日清理 ----------
 
   async alarm() {
@@ -797,7 +854,7 @@ export class PeriodPool extends DurableObject {
 
 // ---------- Worker 入口 ----------
 
-// 仅两个管理端点开放 CORS：供本地看板（admin.html）与运维面板跨域调用。
+// 仅三个管理端点开放 CORS：供本地看板（admin.html）与运维面板跨域调用。
 // 端点本身仍受 X-Admin-Token 门禁；不涉及 Cookie 凭证，ACAO=* 不引入额外风险。
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -812,7 +869,7 @@ export default {
     const path = url.pathname.replace(/\/+$/, "") || "/";
     if (path === "/") return json({ name: "echo-team-pool", api: 2, ok: true });
 
-    const isAdminPath = path === "/v2/health" || path === "/v2/admin/data";
+    const isAdminPath = path === "/v2/health" || path === "/v2/admin/data" || path === "/v2/admin/delete";
     if (isAdminPath && request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: CORS_HEADERS });
     }
@@ -877,6 +934,16 @@ export default {
             return err("not_found", "路径不存在", 404);
           }
           result = await stub.adminData(body);
+          break;
+        }
+        case "/v2/admin/delete": {
+          // 站长管理操作：同 health 的门禁策略（X-Admin-Token，失败 404），破坏性写操作
+          // （服务端另有 confirm:true 二次确认）。
+          const adminDelete = String(env.ADMIN_TOKEN || "");
+          if (!adminDelete || request.headers.get("X-Admin-Token") !== adminDelete) {
+            return err("not_found", "路径不存在", 404);
+          }
+          result = await stub.adminDelete(body);
           break;
         }
         default:
