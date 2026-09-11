@@ -310,9 +310,9 @@ export class PeriodPool extends DurableObject {
       return;
     }
     const prevMc = Number(rows[0].member_count);
-    const prevStatus = String(rows[0].status ?? "");
-    if (prevStatus === "full" && mc < prevMc) {
-      // 单调性异常：照实覆盖（酷狗仍是真相源），记 events 供排查伪造/故障
+    if (mc < prevMc) {
+      // 单调性异常（设计 §5.2：本期 member_count 只增不减，2026-09-12 补全为任意减少均记）：
+      // 照实覆盖（酷狗仍是真相源），记 events 供排查伪造/故障
       this._event("error", source, code, `member_count_decrease ${prevMc}->${mc}`);
     }
     const newCaptain = captain || String(rows[0].captain_uid ?? "");
@@ -412,6 +412,15 @@ export class PeriodPool extends DurableObject {
     const now = Date.now();
     this._sweepExpired();
 
+    // 快照观测优先于在途租约（2026-09-12 顺序对调）：最近快照已加入 → already_joined
+    // （附该队码，供客户端校正本地状态）。避免 120s 租约残留窗口内返回旧租约、
+    // 覆盖"已加入"这一快照事实。
+    const userRows = this._sql(`SELECT last_joined_code FROM users WHERE uid = ?`, uid);
+    const lastJoined = userRows.length > 0 ? String(userRows[0].last_joined_code ?? "") : "";
+    if (lastJoined) {
+      return { ok: true, code: lastJoined, reason: "already_joined" };
+    }
+
     // 幂等：已有未过期 pending/success 租约 → 原样返回（防止重复分配）
     const active = this._sql(
       `SELECT id, code, expires_at FROM leases
@@ -429,12 +438,14 @@ export class PeriodPool extends DurableObject {
       };
     }
 
-    // 最近快照已加入 → already_joined（附该队码，供客户端校正本地状态）
-    const userRows = this._sql(`SELECT last_joined_code FROM users WHERE uid = ?`, uid);
-    const lastJoined = userRows.length > 0 ? String(userRows[0].last_joined_code ?? "") : "";
-    if (lastJoined) {
-      return { ok: true, code: lastJoined, reason: "already_joined" };
-    }
+    // 客户端本轮流程内已失败的队（exclude_codes，2026-09-12 新增）：仅本次选队生效，不落库
+    const excludeCodes = Array.isArray(body?.exclude_codes)
+      ? body.exclude_codes.map((c) => cleanStr(c, 64)).filter(Boolean).slice(0, 3)
+      : [];
+    const excludeSql =
+      excludeCodes.length > 0
+        ? `AND t.code NOT IN (${excludeCodes.map(() => "?").join(", ")})`
+        : "";
 
     // 选队：快满优先（可用名额少者优先）+ FIFO；排除自己创建的队、stale、冷却中的队
     const fresh = now - FRESH_CUTOFF_MS;
@@ -448,6 +459,7 @@ export class PeriodPool extends DurableObject {
          AND t.snapshot_at > ?
          AND t.fail_until < ?
          AND t.captain_uid <> ?
+         ${excludeSql}
          AND (${MEMBER_SLOTS} - (t.member_count - 1) - (SELECT COUNT(*) FROM leases l
                   WHERE l.code = t.code
                     AND (l.status = 'success' OR (l.status = 'pending' AND l.expires_at > ?)))) > 0
@@ -457,7 +469,7 @@ export class PeriodPool extends DurableObject {
                          OR (l2.status = 'pending' AND l2.expires_at > ?)))
        ORDER BY avail ASC, t.created_at ASC
        LIMIT 1`,
-      now, fresh, now, uid, now, uid, now
+      now, fresh, now, uid, ...excludeCodes, now, uid, now
     );
     if (candidates.length === 0) {
       return { ok: true, code: null, reason: "pool_empty" };

@@ -266,22 +266,20 @@ function normalizeTeamInfo(body) {
   return { created: toTeam(createList[0]), joined: toTeam(joinList[0]), raw: d };
 }
 
+// 错误分类（2026-09-12 修订）：仅显式证据才归类为队伍终态（full/already_joined/invalid），
+// 其余一律 transient——客户端侧抖动不给队伍泼脏水；服务端仅对 full/invalid 纠偏/冷却。
 function classifyJoinError(body) {
   const d = body?.data ?? body ?? {};
   const errorCode = Number(pick(d, ["error_code", "errcode", "code"], 0));
   const errorMsg = String(pick(d, ["msg", "message", "error"], ""));
   const msg = errorMsg.toLowerCase();
 
-  let kind = "invalid";
-  if (errorCode !== 0) {
-    if (msg.includes("已加入") || msg.includes("已经") || msg.includes("已参") || msg.includes("joined"))
-      kind = "already_joined";
-    else if (msg.includes("满") || msg.includes("full") || errorCode === 20006)
-      kind = "full";
-  } else {
-    if (msg.includes("满") || msg.includes("full")) kind = "full";
-    else if (msg.includes("已加入") || msg.includes("joined")) kind = "already_joined";
-  }
+  let kind = "transient";
+  if (errorCode === 20006 || msg.includes("满") || msg.includes("full")) kind = "full";
+  else if (msg.includes("已加入") || msg.includes("已经") || msg.includes("已参") || msg.includes("joined"))
+    kind = "already_joined";
+  else if (msg.includes("不存在") || msg.includes("无效") || msg.includes("已解散") || msg.includes("组队码错误"))
+    kind = "invalid"; // 码无效/队不存在：无快照可纠偏，服务端 24h 冷却（§11.2）
   return { kind, errorCode, errorMsg };
 }
 
@@ -388,9 +386,15 @@ async function poolRequest(c, path, payload) {
   return r;
 }
 
-async function poolJoin(c, periodId, uid) {
+async function poolJoin(c, periodId, uid, excludeCodes = []) {
   const tokens = await getPoolTokens(c);
-  return poolRequest(c, "/v2/join", { period_id: periodId, uid, token: tokens[uid] || "" });
+  return poolRequest(c, "/v2/join", {
+    period_id: periodId,
+    uid,
+    token: tokens[uid] || "",
+    // 本轮流程内已失败的队不再命中（服务端仅对本次选队生效，不落库）
+    exclude_codes: Array.isArray(excludeCodes) ? excludeCodes.slice(0, 3).map(String) : [],
+  });
 }
 
 async function poolResult(c, periodId, uid, leaseId, result, errorKind) {
@@ -530,8 +534,9 @@ async function runFullFlow(c, reason, opts = {}) {
     if (myInfo.joined) return;
 
     // ⑤→⑦ ASSIGN / JOIN_KUGOU / RESULT（当轮重试 ≤ RETRY_MAX）
+    const excludedCodes = new Set(); // 本轮流程内失败过的队（network 除外），重试时请求服务端避开
     for (let attempt = 1; attempt <= RETRY_MAX; attempt++) {
-      const joinRes = await poolJoin(c, periodId, uid);
+      const joinRes = await poolJoin(c, periodId, uid, [...excludedCodes]);
       if (!joinRes.ok) {
         if (joinRes.status === 401) {
           await disablePool(c, periodId);
@@ -587,6 +592,7 @@ async function runFullFlow(c, reason, opts = {}) {
         await doSnapshot(c, periodId, uid, verify.ok ? verify : myInfo);
         return;
       }
+      excludedCodes.add(code); // transient/full/invalid：重试换队（full/invalid 另有服务端纠偏/冷却）
       dlog("[重试]", code, kind, attempt);
       if (attempt < RETRY_MAX) await sleep(RETRY_DELAY_MS);
     }
@@ -780,13 +786,14 @@ export async function activate(_ctx) {
         }
       };
 
-      const poolLine = (() => {
+      // 渲染期调用：读取响应式 uiState，刷新后聚合数随渲染更新
+      const poolLineText = () => {
         if (uiState?.poolDisabled) return "码池：本期已停用（下期自动恢复）";
         if (uiState?.poolOpen >= 0) {
           return `码池：开放队伍 ${uiState.poolOpen} · 等待 ${Math.max(0, uiState.poolWaiting)} 人`;
         }
         return "";
-      })();
+      };
 
       return () =>
         h("div", { style: "display: grid; gap: 14px;" }, [
