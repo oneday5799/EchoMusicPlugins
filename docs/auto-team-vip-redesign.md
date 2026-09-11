@@ -294,11 +294,11 @@ FROM teams t
 WHERE t.status = 'open'
   AND t.snapshot_at > :fresh_cutoff          -- 6h 内有快照，排除 stale
   AND t.fail_until < :now                    -- full/invalid 失败冷却中的队暂避
-  AND t.code NOT IN (SELECT code FROM teams WHERE captain_uid = :uid)   -- 不分自己的队
+  AND t.captain_uid <> :uid                  -- 不分自己的队（每账号每期至多 1 支创建队）
   AND NOT EXISTS (SELECT 1 FROM leases l
-                  WHERE l.uid = :uid
+                  WHERE l.uid = :uid AND l.code = t.code
                     AND (l.status IN ('success', 'confirmed')
-                         OR (l.status = 'pending' AND l.expires_at > :now)))    -- 未过期在途
+                         OR (l.status = 'pending' AND l.expires_at > :now)))    -- 本队未过期在途（按队限定）
   AND (2 - (t.member_count - 1)
          - (SELECT COUNT(*) FROM leases l
             WHERE l.code = t.code
@@ -312,6 +312,7 @@ LIMIT 1;
 
 - **快满优先**：剩余 1 个名额的队伍绝对优先，尽快产出一支完整队伍（§5.1）。
 - **FIFO**：同等剩余名额时先到先得，行为可预期。
+- **已加入判定以快照为准**：`NOT EXISTS` 仅限定本队（`l.code = t.code`）——"已加入"的权威门禁是 `users.last_joined_code`（快照观测，join 步骤 2）；租约检查只防重复命中同一队，避免 confirmed 租约 + 快照清空的极端场景把用户全局锁死为 pool_empty。
 - **失败码短期回避**：组队不可逆（不支持退队），`error_kind` 为 `full`/`invalid` 说明该队实测状态与快照不符——置 `teams.fail_until = now + 10min`，冷却期不参与匹配，待下一次快照纠偏后自动恢复（取代 v1.1.2 的 skip 参数补丁）。用列存储而非查询 events 环形日志，避免日志裁剪导致冷却提前失效。
 - **transient 不冷却**（2026-09-12 三次修订）：`error_kind=transient`（验证码残留、酷狗限频等客户端侧抖动/未知错误）不代表队伍状态——不纠偏、不冷却、仅记审计；客户端在本轮流程内通过 `exclude_codes` 避开刚失败的队（network 类除外，网络抖动重试同队合理），下一轮完整流程重新一视同仁。`invalid` 仅在客户端给出显式证据（不存在/无效/已解散/组队码错误）时上报，维持 24h 冷却（§11.2）。
 - DO 单线程串行执行，选队 + 插入租约天然原子，无竞态超发。
@@ -319,6 +320,8 @@ LIMIT 1;
 ### 6.5 限速与防滥用
 
 - 每 uid **令牌桶限速：突发 5、持续 1 req/s**（沿用 v1 的 rate_limit 表增加桶字段，应用到全部 v2 端点）。单次完整流程含 snapshot→join→result→snapshot 共 4 个请求，固定 1 req/s 会把流程内请求挤成 429，必须允许突发。
+- **限速与鉴权顺序**：snapshot 先限速后鉴权（其可为未知 uid 签发 token，先限速防任意 uid 洪泛建户）；join/result/status 先鉴权后限速（防第三方伪造他人 uid 灌空其令牌桶）。
+- **period_id 格式校验**：Worker 入口校验 `^[A-Za-z0-9_-]{1,32}$`，不合法直接 400——防任意字符串批量创建空 DO 实例（限速按 DO 内 uid 记账，换 period_id 即绕过）。
 - join 的幂等租约返回天然防止"反复领取"放大。
 - 请求体 4KB 上限、版本门禁（§9）沿用 v1 机制。
 
@@ -411,7 +414,7 @@ const snapshot = {
   - join 错误响应结构（2026-09-12 实测）：业务失败走 HTTP 502，错误字段在顶层、`data` 为空串，如 `{"error_msg":"队伍不存在","data":"","status":0,"error_code":143001}`；成功为 HTTP 200 + `status:1` + `error_code:0`（`data` 亦为空串，队伍详情需再查 `my/info`）。
   - 酷狗 join 数值错误码（实测）：`143004`=队伍已满员、`143010`=你已经是队伍成员、`143001`=队伍不存在；`classifyJoinError` 数值码优先判定，文案关键词兜底（"满/full"、"已加入/是队伍成员/已参/joined"、"不存在/无效/已解散/组队码错误"），默认 `transient`。
 - **降级与退避**：码池不可达/5xx 时指数退避（5/15/30 分钟），期间酷狗侧建队照常进行；恢复后由心跳自动补报快照。
-- **401 处理**：提示"身份校验失败，本期码池功能停用（下期自动恢复）"并停止请求码池；**不得清除 token 重试**——服务端对已存在 uid 永不重签（防劫持，§6.6）。token 仅在用户主动清除插件数据/重装时丢失，属可接受的小概率事件。
+- **401 处理**：提示"身份校验失败，本期码池功能停用（下期自动恢复）"并停止请求码池；停用按**「期次:账号」粒度**记录（`poolAuthDisabled` 键 = `periodId:uid`），同设备其他账号不受影响；**不得清除 token 重试**——服务端对已存在 uid 永不重签（防劫持，§6.6）。token 仅在用户主动清除插件数据/重装时丢失，属可接受的小概率事件。
 - **手动流程**：手动输入码加入成功 → 触发一次 SNAPSHOT，该码自动入池（外部码有位即可被分配，用户已拍板）；复制自己的码分享给他人 → 对方（无论是否插件用户）加入后，下次快照自动反映人数。
 - **入队即终态**：酷狗不支持退队，`joined` 非空后插件不再发起任何 `/v2/join`（服务端亦会以 `already_joined` 拦截兜底），仅保留心跳快照；本期内的 UI 状态固定为"已加入 <code>"。
 
@@ -498,5 +501,13 @@ const snapshot = {
 
 1. `periodState` 此前只有初始化与心跳读取、无任何赋值路径——补全 GUARD 失败→`error`、期次未开启→`inactive`、进行中→`active` 三处赋值，30min 低频探测自此实际生效。
 2. `join()` 分配租约后补调 `_scheduleNextAlarm()`（此前仅 joinResult success 路径调用；正确性本由懒清扫+时间戳判定兜底，无超发风险，属文档一致性补全）。
+
+**第四次复核修订（2026-09-12 全量审查，5 项完善）：**
+
+1. **period_id 格式校验**（§6.5）：Worker 入口校验 `^[A-Za-z0-9_-]{1,32}$`——防任意字符串批量创建空 DO 实例绕过 per-DO 限速。
+2. **登录触发延迟对齐**（§7.2）：token watcher 补 2s 延迟（`LOGIN_RUN_DELAY_MS` 此前为死常量），等 pinia 设备信息就绪、鉴权头完整。
+3. **§6.4 SQL 对齐实现**：NOT EXISTS 按 `l2.code = t.code` 限定（按队）——"已加入"的权威门禁是快照 `last_joined_code`，全局检查会在 confirmed 租约 + 快照清空的极端场景把用户永久锁死为 pool_empty；实现本就如此，本次修正文档而非代码。
+4. **限速与鉴权顺序**（§6.5）：snapshot 先限速后鉴权；join/result/status 先鉴权后限速，防伪造他人 uid 灌空其令牌桶。
+5. **401 停用粒度**（§7.4）：`poolAuthDisabled` 键改为 `periodId:uid`，多账号设备上一账号 401 不再连坐其他账号（与 token 按 uid 分键的多账号设计对齐）。
 
 无遗留开放问题，可按 §10 提交计划实施。

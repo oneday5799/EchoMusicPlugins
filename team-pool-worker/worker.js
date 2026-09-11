@@ -334,6 +334,7 @@ export class PeriodPool extends DurableObject {
   // ---------- v2 API ----------
 
   // POST /v2/snapshot —— 状态上报（替代 v1 register/sync）
+  // 限速在鉴权前：snapshot 允许为未知 uid 签发 token，先限速防任意 uid 洪泛建户
   async snapshot(body) {
     await this._ready;
     const uid = cleanStr(body?.uid, 64);
@@ -399,15 +400,16 @@ export class PeriodPool extends DurableObject {
   }
 
   // POST /v2/join —— 申请分配（幂等；快满优先 + FIFO）
+  // 先鉴权后限速：防第三方伪造他人 uid 灌空其令牌桶（限速不覆盖未通过鉴权的请求）
   async join(body) {
     await this._ready;
     const uid = cleanStr(body?.uid, 64);
     if (!uid) return { ok: false, status: 400, error: "missing_uid", message: "缺少 uid" };
+    const auth = this._auth(uid, cleanStr(body?.token, 128));
+    if (!auth.ok) return auth;
     if (!this._checkRate(uid)) {
       return { ok: false, status: 429, error: "rate_limited", message: "请求过于频繁，请稍后再试" };
     }
-    const auth = this._auth(uid, cleanStr(body?.token, 128));
-    if (!auth.ok) return auth;
 
     const now = Date.now();
     this._sweepExpired();
@@ -490,16 +492,16 @@ export class PeriodPool extends DurableObject {
     return { ok: true, lease_id: leaseId, code, expires_in: Math.round(LEASE_TTL_MS / 1000) };
   }
 
-  // POST /v2/join/result —— 租约结果回报（幂等）
+  // POST /v2/join/result —— 租约结果回报（幂等；先鉴权后限速，同 join）
   async joinResult(body) {
     await this._ready;
     const uid = cleanStr(body?.uid, 64);
     if (!uid) return { ok: false, status: 400, error: "missing_uid", message: "缺少 uid" };
+    const auth = this._auth(uid, cleanStr(body?.token, 128));
+    if (!auth.ok) return auth;
     if (!this._checkRate(uid)) {
       return { ok: false, status: 429, error: "rate_limited", message: "请求过于频繁，请稍后再试" };
     }
-    const auth = this._auth(uid, cleanStr(body?.token, 128));
-    if (!auth.ok) return auth;
 
     const leaseId = cleanStr(body?.lease_id, 64);
     const result = String(body?.result ?? "");
@@ -568,16 +570,16 @@ export class PeriodPool extends DurableObject {
     return { ok: false, status: 400, error: "unknown_result", message: "未知 result: " + result };
   }
 
-  // POST /v2/status —— 自查 + 聚合（只返回请求者自己的数据）
+  // POST /v2/status —— 自查 + 聚合（只返回请求者自己的数据；先鉴权后限速，同 join）
   async status(body) {
     await this._ready;
     const uid = cleanStr(body?.uid, 64);
     if (!uid) return { ok: false, status: 400, error: "missing_uid", message: "缺少 uid" };
+    const auth = this._auth(uid, cleanStr(body?.token, 128));
+    if (!auth.ok) return auth;
     if (!this._checkRate(uid)) {
       return { ok: false, status: 429, error: "rate_limited", message: "请求过于频繁，请稍后再试" };
     }
-    const auth = this._auth(uid, cleanStr(body?.token, 128));
-    if (!auth.ok) return auth;
 
     const now = Date.now();
     this._sweepExpired();
@@ -835,6 +837,8 @@ export default {
 
     const periodId = String(body.period_id || url.searchParams.get("period_id") || "");
     if (!periodId) return err("missing_period_id", "缺少 period_id", 400);
+    // 格式校验：防任意字符串批量创建空 DO 实例（限速按 DO 内 uid 记账，换 period_id 即绕过）
+    if (!/^[A-Za-z0-9_-]{1,32}$/.test(periodId)) return err("bad_period_id", "period_id 格式不合法", 400);
 
     let result;
     try {

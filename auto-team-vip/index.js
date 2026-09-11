@@ -48,7 +48,7 @@ let cssDispose = null;
 let teleportDispose = null;
 let moreMenuDispose = null;
 
-// 码池侧状态：退避 + 401 停用（按期次）
+// 码池侧状态：退避 + 401 停用（键 = 期次:账号，多账号设备互不连坐）
 const poolBackoff = { step: 0, nextAttemptAt: 0 };
 let disabledPeriods = new Set();
 
@@ -333,17 +333,19 @@ async function setPoolToken(c, uid, token) {
   await c.storage.set("poolTokens", all);
 }
 
-async function isPoolDisabled(c, periodId) {
-  if (disabledPeriods.has(periodId)) return true;
+async function isPoolDisabled(c, periodId, uid) {
+  const key = periodId + ":" + uid;
+  if (disabledPeriods.has(key)) return true;
   const map = await c.storage.get("poolAuthDisabled");
-  return Boolean(map && typeof map === "object" && map[periodId]);
+  return Boolean(map && typeof map === "object" && map[key]);
 }
 
-async function disablePool(c, periodId) {
-  disabledPeriods.add(periodId);
+async function disablePool(c, periodId, uid) {
+  const key = periodId + ":" + uid;
+  disabledPeriods.add(key);
   try {
     const map = (await c.storage.get("poolAuthDisabled")) || {};
-    map[periodId] = true;
+    map[key] = true;
     await c.storage.set("poolAuthDisabled", map);
   } catch {
     // 存储失败不影响本轮判定（内存 Set 已生效）
@@ -417,7 +419,7 @@ async function poolResult(c, periodId, uid, leaseId, result, errorKind) {
 
 // 上报快照；返回 "ok" | "disabled" | "down"
 async function doSnapshot(c, periodId, uid, teamInfo) {
-  if (await isPoolDisabled(c, periodId)) {
+  if (await isPoolDisabled(c, periodId, uid)) {
     if (uiState) uiState.poolDisabled = true;
     return "disabled";
   }
@@ -459,7 +461,7 @@ async function doSnapshot(c, periodId, uid, teamInfo) {
     return "ok";
   }
   if (r.status === 401) {
-    await disablePool(c, periodId);
+    await disablePool(c, periodId, uid);
     if (uiState) uiState.poolDisabled = true;
     setLastError("身份校验失败，本期码池功能停用（下期自动恢复）", "pool_unauthorized", { periodId, uid });
     return "disabled";
@@ -554,7 +556,7 @@ async function runFullFlow(c, reason, opts = {}) {
       const joinRes = await poolJoin(c, periodId, uid, [...excludedCodes]);
       if (!joinRes.ok) {
         if (joinRes.status === 401) {
-          await disablePool(c, periodId);
+          await disablePool(c, periodId, uid);
           if (uiState) uiState.poolDisabled = true;
           setLastError("身份校验失败，本期码池功能停用（下期自动恢复）", "pool_unauthorized", { periodId, uid });
         } else if (!joinRes.needUpdate) {
@@ -917,7 +919,8 @@ export async function activate(_ctx) {
   _ctx.vue.watch(
     () => _ctx.pinia?.state?.value?.user?.info?.token,
     (token) => {
-      if (token) requestRun(_ctx, "login");
+      // 登录触发延迟 2s（方案 §7.2）：等 pinia 的设备信息就绪，保证鉴权头完整
+      if (token) setTimeout(() => requestRun(_ctx, "login"), LOGIN_RUN_DELAY_MS);
     },
   );
 
