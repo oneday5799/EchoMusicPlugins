@@ -347,6 +347,7 @@ export class PeriodPool extends DurableObject {
     if (!auth.ok) return auth;
 
     const now = Date.now();
+    this._sweepExpired(); // 懒清扫与其他 v2 端点对齐（过期租约的 expire 审计与状态归档及时性）
     this._exec(`UPDATE users SET last_seen_at = ? WHERE uid = ?`, now, uid);
 
     const created = body?.created && body.created.code ? body.created : null;
@@ -787,7 +788,10 @@ export class PeriodPool extends DurableObject {
     const nextLease = rows.length > 0 ? Number(rows[0].next ?? 0) : 0;
     const daily = Date.now() + CLEANUP_INTERVAL_MS;
     const next = nextLease > Date.now() ? Math.min(nextLease, daily) : daily;
-    await this.ctx.storage.setAlarm(next);
+    // 与现有 alarm 取 min：覆盖式 setAlarm 会把更早租约的到期回收推迟到更晚
+    // （正确性由懒清扫+时间戳判定兜底，此处保证 alarm 回收与 expire 审计的及时性）
+    const existing = await this.ctx.storage.getAlarm();
+    await this.ctx.storage.setAlarm(existing != null ? Math.min(existing, next) : next);
   }
 }
 

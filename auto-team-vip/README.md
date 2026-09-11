@@ -48,6 +48,17 @@
 
 见 [`team-pool-worker/`](../team-pool-worker/)。
 
+### 上线 checklist（按序执行）
+
+1. `wrangler secret put ADMIN_TOKEN` 配置管理端点门禁密钥
+2. `wrangler deploy` 部署 Worker（v2 直接切换：部署后 v1 端点 404、v1.1.x 客户端码池功能 403）
+3. 验证 `POST /v2/health`（携带 `X-Admin-Token` 与 `X-Plugin-Version` 头）返回聚合计数
+4. 确认 Cloudflare WAF 跳过规则放行 `/v2/*`（或携带 `X-Plugin-Version` 的请求），避免 403
+5. 插件 1.2.0 发版（与步骤 2 紧凑衔接，避免长时间功能空窗）
+6. 浏览器打开 [`admin.html`](../team-pool-worker/admin.html) 看板核对数据面
+
+### 其他说明
+
 - 部署后得到 Worker 地址（自定义域 `echo-team-pool.oneday.vip` 或 `*.workers.dev` 兜底）。
 - 插件端码池地址为内置常量，修改需同步 `index.js` 的 `POOL_URL`。
 - 查看码池数据：`wrangler secret put ADMIN_TOKEN` 配置密钥后，浏览器打开 [`team-pool-worker/admin.html`](../team-pool-worker/admin.html)（填 API 地址 / 期次 ID / 密钥），或命令行调用 `/v2/admin/data`（详见设计文档 §6.8）。

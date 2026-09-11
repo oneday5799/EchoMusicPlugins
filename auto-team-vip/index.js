@@ -17,6 +17,7 @@ const SNAPSHOT_INTERVAL_MS = 5 * 60_000;    // 保活快照间隔
 const FULLFLOW_INTERVAL_MS = 10 * 60_000;   // 等待新码的完整流程间隔
 const INACTIVE_PROBE_INTERVAL_MS = 30 * 60_000; // 期次未开启时的低频探测（下一期自动开始）
 const POOL_BACKOFF_STEPS_MS = [5, 15, 30].map((m) => m * 60_000); // 码池不可用退避
+const POOL_RATE_LIMIT_BACKOFF_MS = 60_000; // 码池限速（429）短退避：令牌桶持续 1r/s，很快恢复，不适用指数退避
 const REFRESH_THROTTLE_MS = 3000;
 const AUTO_RUN_DELAY_MS = 3000;
 const LOGIN_RUN_DELAY_MS = 2000;
@@ -50,6 +51,7 @@ let moreMenuDispose = null;
 
 // 码池侧状态：退避 + 401 停用（键 = 期次:账号，多账号设备互不连坐）
 const poolBackoff = { step: 0, nextAttemptAt: 0 };
+let pool429Until = 0; // 429 短退避截止（与网络故障的指数退避分离）
 let disabledPeriods = new Set();
 
 function poolDown() {
@@ -59,13 +61,19 @@ function poolDown() {
   dlog("[码池退避]", Math.round((poolBackoff.nextAttemptAt - Date.now()) / 1000) + "s");
 }
 
+function poolRateLimited() {
+  pool429Until = Date.now() + POOL_RATE_LIMIT_BACKOFF_MS;
+  dlog("[码池限速退避]", Math.round(POOL_RATE_LIMIT_BACKOFF_MS / 1000) + "s");
+}
+
 function poolUp() {
   poolBackoff.step = 0;
   poolBackoff.nextAttemptAt = 0;
+  pool429Until = 0;
 }
 
 function poolAvailable() {
-  return Date.now() >= poolBackoff.nextAttemptAt;
+  return Date.now() >= poolBackoff.nextAttemptAt && Date.now() >= pool429Until;
 }
 
 // ---------- 通用 ----------
@@ -466,6 +474,11 @@ async function doSnapshot(c, periodId, uid, teamInfo) {
     setLastError("身份校验失败，本期码池功能停用（下期自动恢复）", "pool_unauthorized", { periodId, uid });
     return "disabled";
   }
+  if (r.status === 429) {
+    poolRateLimited();
+    setLastError("码池请求过于频繁，稍后自动重试", "pool_rate_limited", { periodId, uid });
+    return "down";
+  }
   if (r.needUpdate) return "disabled";
   poolDown();
   return "down";
@@ -559,6 +572,9 @@ async function runFullFlow(c, reason, opts = {}) {
           await disablePool(c, periodId, uid);
           if (uiState) uiState.poolDisabled = true;
           setLastError("身份校验失败，本期码池功能停用（下期自动恢复）", "pool_unauthorized", { periodId, uid });
+        } else if (joinRes.status === 429) {
+          poolRateLimited();
+          setLastError("码池请求过于频繁，稍后自动重试", "pool_rate_limited", { periodId, uid });
         } else if (!joinRes.needUpdate) {
           poolDown();
           setLastError("码池暂时不可用，稍后自动重试", "pool_down", { periodId, uid, error: joinRes.error });
