@@ -15,6 +15,7 @@ const MIN_RUN_INTERVAL_MS = 10_000;   // 触发合并窗口
 const HEARTBEAT_TICK_MS = 60_000;     // 心跳巡检周期
 const SNAPSHOT_INTERVAL_MS = 5 * 60_000;    // 保活快照间隔
 const FULLFLOW_INTERVAL_MS = 10 * 60_000;   // 等待新码的完整流程间隔
+const INACTIVE_PROBE_INTERVAL_MS = 30 * 60_000; // 期次未开启时的低频探测（下一期自动开始）
 const POOL_BACKOFF_STEPS_MS = [5, 15, 30].map((m) => m * 60_000); // 码池不可用退避
 const REFRESH_THROTTLE_MS = 3000;
 const AUTO_RUN_DELAY_MS = 3000;
@@ -38,6 +39,7 @@ let runChain = null;
 let lastRunAt = 0;
 let lastSnapshotAt = 0;
 let lastFullAt = 0;
+let lastInactiveProbeAt = 0;
 let heartbeatTimer = null;
 let versionMismatchReported = false;
 
@@ -520,7 +522,14 @@ async function runFullFlow(c, reason, opts = {}) {
     // ② MYINFO：无自己创建的队伍 → 创建 → 重查
     let myInfo = await getMyTeamInfo(c, periodId);
     if (myInfo.ok && !myInfo.created) {
-      await createTeam(c, periodId);
+      const createdRes = await createTeam(c, periodId);
+      const createdParsed = createdRes?.ok ? parseJoinResponse(createdRes) : null;
+      if (!createdParsed?.httpOk || !createdParsed?.bizOk) {
+        // 建队失败不阻断分配流程（仍可以队员身份加入他人队伍），但给出可见提示
+        const detail = createdParsed?.errorMsg || String(createdRes?.error || "请求失败");
+        setLastError(`自动创建队伍失败（${detail}），仍可加入其他队伍`, "create_team_failed", { periodId, detail });
+        dlog("[建队失败]", detail);
+      }
       myInfo = await getMyTeamInfo(c, periodId);
     }
     if (!myInfo.ok) {
@@ -694,6 +703,7 @@ export async function activate(_ctx) {
     startTime: "",
     endTime: "",
     periodActive: false,
+    periodState: "unknown", // unknown | error | active | inactive：驱动心跳自愈与期次探测
     myCode: "",
     myMemberCount: 0,
     myVipDesc: "",
@@ -912,14 +922,22 @@ export async function activate(_ctx) {
   // 登录后延迟启动完整流程（等 pinia 状态就绪）
   setTimeout(() => requestRun(_ctx, "startup"), AUTO_RUN_DELAY_MS);
 
-  // 心跳：面板打开或自动开关开启时保活；本期未完成时定期触发完整流程等新码
+  // 心跳：面板打开或自动开关开启时保活；本期未完成时定期触发完整流程等新码。
+  // 以 periodState 取代 periodActive 硬门控：error/unknown 照常按常规间隔重试（自愈）、
+  // active 走保活/等待循环、inactive 仅每 30min 低频探测（下一期自动开始）。
   heartbeatTimer = setInterval(() => {
     if (!uiState || !dialogOpen) return;
     const panelOpen = Boolean(dialogOpen.value);
     const autoOn = autoTeam.value;
     if (!panelOpen && !autoOn) return;
-    if (!uiState.periodActive) return;
     const now = Date.now();
+    if (uiState.periodState === "inactive") {
+      if (now - lastInactiveProbeAt >= INACTIVE_PROBE_INTERVAL_MS) {
+        lastInactiveProbeAt = now;
+        requestRun(_ctx, "period_probe", { force: true });
+      }
+      return;
+    }
     const completed = uiState.joined && uiState.myMemberCount >= uiState.targetMembers;
     if (autoOn && !completed && now - lastFullAt >= FULLFLOW_INTERVAL_MS) {
       lastFullAt = now;

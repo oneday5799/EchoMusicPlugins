@@ -485,4 +485,11 @@ const snapshot = {
 2. **member_count 单调性审计补全**：快照观测值较上次减少即记 events（不再限定 prev 状态为 full），对齐 §5.2。
 3. **join 检查顺序对调**：`last_joined_code`（快照观测）优先于活跃租约幂等检查，消除 120s 租约残留窗口内旧租约覆盖"已加入"事实的极端场景。
 
+**实现加固（2026-09-12 审查终检）：**
+
+1. alarm 空池 deleteAll 后立即 `_init()` 重建表结构与 alarm——同内存实例的构造器不会重跑，防残留实例因缺表 500。
+2. 租约分配/转 success 后调用 `_scheduleNextAlarm()`，与 §6.3「alarm 时间 = min(最近租约到期, 每日清理点)」完全一致（此前仅在 alarm 内调度，靠请求路径懒清扫兜底）。
+3. 插件端心跳以 `periodState`（unknown/error/active/inactive）取代 periodActive 硬门控：GUARD 失败按常规间隔自动重试自愈；期次未开启每 30min 低频探测，下一期自动开始。
+4. 建队失败显式提示（不阻断分配流程，仍可以队员身份加入他人队伍）；README 注明同账号多设备仅最先上报快照的一台可用码池（防劫持设计取舍）。
+
 无遗留开放问题，可按 §10 提交计划实施。

@@ -522,6 +522,11 @@ export class PeriodPool extends DurableObject {
         now + SUCCESS_CONFIRM_MS, leaseId
       );
       this._event("result", uid, code, "success");
+      try {
+        await this._scheduleNextAlarm(); // success 有 10min 确认窗口，到期需 alarm 回收
+      } catch {
+        // ignore
+      }
       return { ok: true };
     }
 
@@ -752,6 +757,9 @@ export class PeriodPool extends DurableObject {
         count("users") + count("teams") + count("leases") + count("events") + count("rate_limit");
       if (total === 0) {
         await this.ctx.storage.deleteAll();
+        // deleteAll 后同内存实例的构造器不会重跑，立即重建表结构与 alarm，
+        // 避免残留实例收到请求时因缺表而 500（_init 幂等）
+        await this._init();
         return;
       }
       await this._scheduleNextAlarm();
