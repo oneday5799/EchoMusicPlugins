@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>码池数据看板 · echo-team-pool</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --border: #e4e7ec; --text: #1f2329;
+    --muted: #6b7280; --accent: #2563eb; --accent-weak: #eff6ff;
+    --green: #16a34a; --green-bg: #f0fdf4; --red: #dc2626; --red-bg: #fef2f2;
+    --amber: #d97706; --amber-bg: #fffbeb; --gray-bg: #f3f4f6;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px; background: var(--bg); color: var(--text);
+         font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 12px; margin-bottom: 20px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+          padding: 16px; margin-bottom: 16px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 3px; }
+  input[type="text"], input[type="password"] {
+    padding: 7px 10px; border: 1px solid var(--border); border-radius: 6px;
+    font-size: 13px; width: 260px; background: #fff; color: var(--text);
+  }
+  #period { width: 120px; }
+  button { padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer;
+           font-size: 13px; background: var(--accent); color: #fff; }
+  button.secondary { background: var(--gray-bg); color: var(--text); }
+  button:disabled { opacity: 0.5; cursor: wait; }
+  .banner { display: none; padding: 10px 14px; border-radius: 8px; margin-bottom: 14px;
+            font-size: 13px; white-space: pre-wrap; word-break: break-all; }
+  .banner.error { display: block; background: var(--red-bg); color: var(--red); border: 1px solid #fecaca; }
+  .banner.ok { display: block; background: var(--green-bg); color: var(--green); border: 1px solid #bbf7d0; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; }
+  .stat { background: var(--accent-weak); border-radius: 8px; padding: 10px 12px; }
+  .stat .n { font-size: 20px; font-weight: 700; }
+  .stat .t { font-size: 12px; color: var(--muted); }
+  .stat.warn { background: var(--amber-bg); } .stat.bad { background: var(--red-bg); }
+  h2 { font-size: 15px; margin: 0 0 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; background: #fafbfc; }
+  tr:hover td { background: #fafbfc; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
+  .b-open { background: var(--green-bg); color: var(--green); }
+  .b-full { background: var(--gray-bg); color: var(--muted); }
+  .b-stale { background: var(--amber-bg); color: var(--amber); }
+  .b-cool { background: var(--red-bg); color: var(--red); }
+  .b-pending { background: var(--amber-bg); color: var(--amber); }
+  .b-success { background: var(--accent-weak); color: var(--accent); }
+  .b-confirmed { background: var(--green-bg); color: var(--green); }
+  .b-failed, .b-expired { background: var(--gray-bg); color: var(--muted); }
+  .members { display: flex; flex-wrap: wrap; gap: 6px; }
+  .member { background: var(--gray-bg); border-radius: 6px; padding: 3px 8px; font-size: 12px; }
+  .member b { font-weight: 600; }
+  .member .cap { color: var(--accent); }
+  .member .rw { color: var(--green); }
+  .muted { color: var(--muted); font-size: 12px; }
+  .mono { font-family: Consolas, monospace; font-size: 12px; }
+  details > summary { cursor: pointer; font-size: 15px; font-weight: 600; padding: 4px 0; }
+  .hidden { display: none; }
+  .foot { color: var(--muted); font-size: 12px; margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<h1>码池数据看板</h1>
+<div class="sub">echo-team-pool · /v2/admin/data（需 Admin Token）· 数据仅在本页与你的浏览器间传输</div>
+
+<div class="card">
+  <div class="row">
+    <div><label>API 地址</label><input type="text" id="api" placeholder="https://echo-team-pool.oneday.vip" /></div>
+    <div><label>期次 ID（period_id）</label><input type="text" id="period" placeholder="如 288" /></div>
+    <div><label>Admin Token</label><input type="password" id="token" placeholder="wrangler secret 配置的密钥" /></div>
+    <div style="align-self: flex-end;">
+      <button id="btnData">查询全量数据</button>
+      <button id="btnHealth" class="secondary">仅健康聚合</button>
+      <label style="display:inline; margin-left:8px;"><input type="checkbox" id="auto" /> 每 30s 自动刷新</label>
+    </div>
+  </div>
+  <div class="foot">配置保存在浏览器 localStorage，仅本机可见。期次 ID 见插件面板或插件日志（/team/period/info 的 id 字段）。</div>
+</div>
+
+<div id="banner" class="banner"></div>
+<div id="content" class="hidden">
+
+  <div class="card">
+    <h2>聚合概览 <span class="muted" id="snapTime"></span></h2>
+    <div class="stats" id="stats"></div>
+  </div>
+
+  <div class="card">
+    <h2>队伍（<span id="teamCount">0</span>）</h2>
+    <table><thead><tr>
+      <th>队伍码</th><th>队长 uid</th><th>人数</th><th>状态</th><th>成员（昵称 / 奖励）</th><th>最近快照</th><th>冷却至</th><th>在途租约</th>
+    </tr></thead><tbody id="teamsBody"></tbody></table>
+  </div>
+
+  <details class="card">
+    <summary>租约记录（最近 200 条）</summary>
+    <table><thead><tr>
+      <th>租约 ID</th><th>uid</th><th>队伍码</th><th>状态</th><th>分配时间</th><th>到期</th><th>解决时间</th>
+    </tr></thead><tbody id="leaseBody"></tbody></table>
+  </details>
+
+  <details class="card">
+    <summary>用户（<span id="userCount">0</span>，最近 500 条）</summary>
+    <table><thead><tr>
+      <th>uid</th><th>最近加入队伍码</th><th>首次出现</th><th>最近活跃</th>
+    </tr></thead><tbody id="userBody"></tbody></table>
+  </details>
+
+  <details class="card">
+    <summary>审计事件（最近 100 条）</summary>
+    <table><thead><tr>
+      <th>时间</th><th>类型</th><th>uid</th><th>队伍码</th><th>详情</th>
+    </tr></thead><tbody id="eventBody"></tbody></table>
+  </details>
+
+</div>
+
+<script>
+"use strict";
+const ADMIN_VERSION = "999.0.0"; // 管理请求需通过版本门禁，固定高版本号（非插件身份，仅用于通过校验）
+const $ = (id) => document.getElementById(id);
+
+["api", "period", "token"].forEach((k) => {
+  const v = localStorage.getItem("pool_" + k);
+  if (v) $(k).value = v;
+});
+["api", "period", "token"].forEach((k) =>
+  $(k).addEventListener("change", () => localStorage.setItem("pool_" + k, $(k).value.trim()))
+);
+
+let autoTimer = null;
+$("auto").addEventListener("change", () => {
+  clearInterval(autoTimer);
+  if ($("auto").checked) autoTimer = setInterval(() => query("data"), 30_000);
+});
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function banner(msg, ok) {
+  const el = $("banner");
+  el.className = "banner " + (ok ? "ok" : "error");
+  el.textContent = msg || "";
+}
+function badge(status) { return '<span class="badge b-' + esc(status) + '">' + esc(status) + "</span>"; }
+function shortTime(iso) { return iso ? esc(String(iso).replace("T", " ").slice(0, 19)) : "—"; }
+
+async function callPool(endpoint) {
+  const base = $("api").value.trim().replace(/\/+$/, "");
+  const period = $("period").value.trim();
+  const token = $("token").value.trim();
+  if (!base || !period || !token) throw new Error("请先填写 API 地址、期次 ID 与 Admin Token");
+  const res = await fetch(base + endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Admin-Token": token, "X-Plugin-Version": ADMIN_VERSION },
+    body: JSON.stringify({ period_id: period }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 404) throw new Error("404：ADMIN_TOKEN 未在 Worker 配置、密钥不匹配，或该端点尚未部署（旧版 Worker）");
+  if (res.status === 403) throw new Error("403 版本门禁：" + (data.message || "请更新 Worker 或检查 X-Plugin-Version"));
+  if (!res.ok || data.ok === false) throw new Error(res.status + "：" + (data.message || data.error || "请求失败"));
+  return data;
+}
+
+function renderStats(s) {
+  if (!s) return;
+  const cells = [
+    ["开放队伍", s.teams.open, ""], ["满员队伍", s.teams.full, ""],
+    ["过期(stale)", s.teams.stale, "warn"], ["冷却中", s.teams.cooldown, "bad"],
+    ["租约 pending", s.leases.pending, "warn"], ["租约 success", s.leases.success, ""],
+    ["租约 confirmed", s.leases.confirmed, ""], ["租约 failed", s.leases.failed, ""],
+    ["租约 expired", s.leases.expired, ""],
+    ["用户总数", s.users.total, ""], ["等待中(30min)", s.users.waiting, "warn"],
+    ["24h 鉴权失败", s.events_24h.auth_fail, "bad"], ["24h 限速", s.events_24h.rate_limited, "warn"],
+    ["24h 过期回收", s.events_24h.expired_leases, ""], ["24h 异常", s.events_24h.anomalies, "bad"],
+  ];
+  $("stats").innerHTML = cells
+    .map(([t, n, cls]) => '<div class="stat ' + cls + '"><div class="n">' + esc(n ?? 0) + '</div><div class="t">' + esc(t) + "</div></div>")
+    .join("");
+  if (s.now_iso) $("snapTime").textContent = "· 服务端时间 " + shortTime(s.now_iso);
+}
+
+function teamStatus(t) {
+  const st = t.status === "full" ? ["full", "b-full"] : t.status === "stale" ? ["stale", "b-stale"] : ["open", "b-open"];
+  const cool = t.fail_until_iso ? ' <span class="badge b-cool">冷却</span>' : "";
+  return '<span class="badge ' + st[1] + '">' + st[0] + "</span>" + cool;
+}
+
+function renderTeams(teams) {
+  $("teamCount").textContent = teams.length;
+  $("teamsBody").innerHTML = teams
+    .map((t) => {
+      const members = (t.members || [])
+        .map((m) =>
+          '<span class="member"><b class="' + (m.role === 1 ? "cap" : "") + '">' + esc(m.nick || "（无昵称）") +
+          '</b> <span class="mono">' + esc(m.userid) + "</span>" +
+          (m.reward ? ' <span class="rw">' + esc(m.reward) + "</span>" : "") +
+          (m.role === 1 ? ' <span class="cap">队长</span>' : "") + "</span>"
+        )
+        .join("");
+      return "<tr><td class='mono'>" + esc(t.code) + "</td><td class='mono'>" + esc(t.captain_uid || "—") +
+        "</td><td>" + t.member_count + "</td><td>" + teamStatus(t) + "</td><td><div class='members'>" +
+        (members || '<span class="muted">暂无名单</span>') + "</div></td><td class='mono'>" + shortTime(t.snapshot_at_iso) +
+        "</td><td class='mono'>" + (t.fail_until_iso ? shortTime(t.fail_until_iso) : "—") +
+        "</td><td>" + (t.inflight || 0) + "</td></tr>";
+    })
+    .join("");
+}
+
+function renderLeases(leases) {
+  $("leaseBody").innerHTML = leases
+    .map((l) =>
+      "<tr><td class='mono'>" + esc(l.id.slice(0, 8)) + "…</td><td class='mono'>" + esc(l.uid) +
+      "</td><td class='mono'>" + esc(l.code) + "</td><td>" + badge(l.status) +
+      "</td><td class='mono'>" + shortTime(l.assigned_at_iso) + "</td><td class='mono'>" + shortTime(l.expires_at_iso) +
+      "</td><td class='mono'>" + shortTime(l.resolved_at_iso) + "</td></tr>"
+    )
+    .join("");
+}
+
+function renderUsers(users, total) {
+  $("userCount").textContent = "共 " + total;
+  $("userBody").innerHTML = users
+    .map((u) =>
+      "<tr><td class='mono'>" + esc(u.uid) + "</td><td class='mono'>" + esc(u.last_joined_code || "—") +
+      "</td><td class='mono'>" + shortTime(u.created_at_iso) + "</td><td class='mono'>" + shortTime(u.last_seen_at_iso) + "</td></tr>"
+    )
+    .join("");
+}
+
+function renderEvents(events) {
+  $("eventBody").innerHTML = events
+    .map((e) =>
+      "<tr><td class='mono'>" + shortTime(e.ts_iso) + "</td><td>" + esc(e.kind) + "</td><td class='mono'>" +
+      esc(e.uid || "—") + "</td><td class='mono'>" + esc(e.code || "—") + "</td><td>" + esc(e.detail || "—") + "</td></tr>"
+    )
+    .join("");
+}
+
+async function query(kind) {
+  banner("", false);
+  $("btnData").disabled = true;
+  $("btnHealth").disabled = true;
+  try {
+    if (kind === "health") {
+      const h = await callPool("/v2/health");
+      $("content").classList.remove("hidden");
+      renderStats(h);
+      banner("健康聚合查询成功（仅聚合计数，明细请用「查询全量数据」）", true);
+    } else {
+      const d = await callPool("/v2/admin/data");
+      $("content").classList.remove("hidden");
+      renderStats(d.summary);
+      renderTeams(d.teams || []);
+      renderLeases(d.leases || []);
+      renderUsers(d.users || [], (d.totals && d.totals.users) || 0);
+      renderEvents(d.events || []);
+      banner("查询成功：" + (d.totals ? "队伍 " + d.totals.teams + " · 用户 " + d.totals.users + " · 租约 " + d.totals.leases : ""), true);
+    }
+  } catch (e) {
+    banner("查询失败：" + (e.message || e) + "\n（若为网络错误，请检查 API 地址与 Cloudflare WAF 是否放行）", false);
+  } finally {
+    $("btnData").disabled = false;
+    $("btnHealth").disabled = false;
+  }
+}
+
+$("btnData").addEventListener("click", () => query("data"));
+$("btnHealth").addEventListener("click", () => query("health"));
+</script>
+</body>
+</html>

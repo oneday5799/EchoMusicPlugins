@@ -49,6 +49,7 @@
 
 - 部署后得到 Worker 地址（自定义域 `echo-team-pool.oneday.vip` 或 `*.workers.dev` 兜底）。
 - 插件端码池地址为内置常量，修改需同步 `index.js` 的 `POOL_URL`。
+- 查看码池数据：`wrangler secret put ADMIN_TOKEN` 配置密钥后，浏览器打开 [`team-pool-worker/admin.html`](../team-pool-worker/admin.html)（填 API 地址 / 期次 ID / 密钥），或命令行调用 `/v2/admin/data`（详见设计文档 §6.8）。
 
 ## 版本校验
 

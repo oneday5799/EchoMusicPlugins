@@ -766,11 +766,25 @@ export class PeriodPool extends DurableObject {
 
 // ---------- Worker 入口 ----------
 
+// 仅两个管理端点开放 CORS：供本地看板（admin.html）与运维面板跨域调用。
+// 端点本身仍受 X-Admin-Token 门禁；不涉及 Cookie 凭证，ACAO=* 不引入额外风险。
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, X-Admin-Token, X-Plugin-Version",
+  "Access-Control-Max-Age": "86400",
+};
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
     if (path === "/") return json({ name: "echo-team-pool", api: 2, ok: true });
+
+    const isAdminPath = path === "/v2/health" || path === "/v2/admin/data";
+    if (isAdminPath && request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
+    }
     if (request.method !== "POST") return err("method_not_allowed", "仅支持 POST", 405);
 
     // 版本门禁（保留 v1 机制）
@@ -842,6 +856,8 @@ export default {
 
     const status = result && result.ok === false && result.status ? result.status : 200;
     if (result && result.status !== undefined) delete result.status;
-    return json(result, status);
+    const response = json(result, status);
+    if (isAdminPath) for (const [k, v] of Object.entries(CORS_HEADERS)) response.headers.set(k, v);
+    return response;
   },
 };

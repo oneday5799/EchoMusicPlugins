@@ -340,6 +340,7 @@ LIMIT 1;
 - `POST /v2/health`：请求头 `X-Admin-Token` 与 Worker secret 比对，请求体 `{ "period_id": "…" }`。返回该期 DO 的聚合指标——开放/满员/过期/冷却队伍数、租约各状态数、用户数、24h 异常事件计数。仅聚合、不含 uid/code 明细。供运维监控与容量观察，非客户端功能依赖。
 - `POST /v2/admin/data`：同门禁（`X-Admin-Token`，校验失败返回 404 不暴露端点存在性），站长只读全量明细——当前期全部队伍（code、队长 uid、人数、open/full/stale 状态、最近快照/冷却截止时间、在途租约数）、用户列表（uid、最近加入码、活跃时间；**不含 token**）、最近 200 条租约、最近 100 条审计事件、聚合 summary。
 - 成员名单/昵称/奖励（`members_json`，含每人 `vip_desc`）自 v2.1 起随快照存储，**仅站长端点 `/v2/admin/data` 可见**，普通客户端的 `/v2/status` 仍只返回自身数据；请求需携带 `X-Plugin-Version` 头（版本门禁在前）。
+- 查看方式：(a) **本地看板** `team-pool-worker/admin.html`——浏览器直接打开，填入 API 地址 / 期次 ID / Admin Token 即可查看全量数据与成员明细，支持 30s 自动刷新；两个管理端点已开放 CORS 与 OPTIONS 预检（仍受 Token 门禁）；(b) **命令行**：`curl -X POST <worker>/v2/admin/data -H "X-Admin-Token: <密钥>" -H "X-Plugin-Version: 1.2.0" -H "Content-Type: application/json" -d '{"period_id":"<期次>"}'`。
 
 ---
 
