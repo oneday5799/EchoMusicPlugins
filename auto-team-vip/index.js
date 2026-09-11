@@ -140,21 +140,32 @@ async function teamRequest(c, method, url, params, data) {
   };
   if (data !== undefined && data !== null) cfg.data = data;
 
+  dlog("[酷狗请求]", method, url, "params:", params, "data:", data ?? "无");
+
   let res;
   try {
     res = await c.electron.api.request(cfg);
   } catch (e) {
+    dlog("[酷狗异常]", method, url, String(e?.message || e));
     return { ok: false, error: String(e?.message || e) };
   }
+
+  dlog("[酷狗响应]", method, url, "status:", res?.status, "body:", res?.body);
 
   const body = res?.body;
   const eventId = pick(body, ["ssaCode", "eventId"], "") || pick(res?.headers, ["ssa-code", "SSA-CODE"], "");
   const errorCode = Number(pick(body, ["error_code", "errcode"], 0));
   const failed = Number(pick(body, ["status"], 1)) === 0;
   if (eventId && (errorCode === 20028 || failed)) {
+    dlog("[酷狗验证]", method, url, "eventId:", eventId, "errorCode:", errorCode);
     try {
       const verified = await c.kugouVerification.request(eventId);
-      if (verified?.ok) res = await c.electron.api.request(cfg);
+      dlog("[酷狗验证结果]", method, url, verified);
+      if (verified?.ok) {
+        dlog("[酷狗重试]", method, url);
+        res = await c.electron.api.request(cfg);
+        dlog("[酷狗重试响应]", method, url, "status:", res?.status, "body:", res?.body);
+      }
     } catch (e) {
       console.warn("[auto-team-vip] verification failed:", e);
     }
@@ -297,8 +308,10 @@ async function poolRegister(c, periodId, code, creator, members, remaining) {
   return poolRequest(c, "/pool/register", { period_id: periodId, code, creator, members, remaining });
 }
 
-async function poolJoin(c, periodId, uid) {
-  return poolRequest(c, "/pool/join", { period_id: periodId, uid });
+async function poolJoin(c, periodId, uid, skip) {
+  const payload = { period_id: periodId, uid };
+  if (skip) payload.skip = skip;
+  return poolRequest(c, "/pool/join", payload);
 }
 
 async function poolReport(c, periodId, code, status) {
@@ -447,13 +460,40 @@ async function runOncePool(c, baseResult) {
         }
       } else {
         const { kind, errorCode, errorMsg: joinErrorMsg } = classifyJoinError(r.body);
-        if (kind === "full" || kind === "invalid") {
-          await poolReport(c, periodId, code, "failed");
-        } else if (kind === "already_joined") {
+        if (kind === "already_joined") {
           joined = true;
           myTeam = await getMyTeamInfo(c, periodId);
+        } else if (kind === "full" || kind === "invalid") {
+          dlog("[重试]", code, kind, "→ 请求新码");
+          const retryRes = await poolJoin(c, periodId, uid, code);
+          if (retryRes.ok && retryRes.data?.code) {
+            const newCode = retryRes.data.code;
+            const r2 = await joinTeam(c, newCode);
+            const { httpOk: h2, bizOk: b2 } = parseJoinResponse(r2);
+            if (h2 && b2) {
+              dlog("[重试成功]", newCode);
+              joined = true;
+              await poolReport(c, periodId, code, "failed");
+              myTeam = await getMyTeamInfo(c, periodId);
+              if (myTeam.ok && myTeam.joinedCode) {
+                const remaining = calcRemaining(myTeam.joinedMemberCount);
+                await poolRegister(c, periodId, myTeam.joinedCode, JOINED_CREATOR, [uid], remaining);
+              }
+            } else {
+              const { kind: k2, errorCode: e2, errorMsg: m2 } = classifyJoinError(r2.body);
+              dlog("[重试失败]", newCode, k2);
+              await poolReport(c, periodId, newCode, "failed");
+              await poolReport(c, periodId, code, "failed");
+              setLastError("加入队伍未成功（" + k2 + "）", "join_" + k2, { code: newCode, periodId, uid, errorCode: e2, errorMsg: m2 });
+            }
+          } else {
+            dlog("[重试无码]", code);
+            await poolReport(c, periodId, code, "failed");
+            setLastError("暂无可加入的队伍，可手动组队或耐心等待", "pool_empty", { periodId, uid });
+          }
+        } else {
+          setLastError("加入队伍未成功（" + kind + "）", "join_" + kind, { code, periodId, uid, errorCode, errorMsg: joinErrorMsg });
         }
-        setLastError("加入队伍未成功（" + kind + "）", "join_" + kind, { code, periodId, uid, errorCode, errorMsg: joinErrorMsg });
       }
     } else {
       setLastError("暂无可加入的队伍，可手动组队或耐心等待", "pool_empty", { periodId, uid });

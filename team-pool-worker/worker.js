@@ -97,19 +97,22 @@ var PeriodPool = class extends DurableObject {
       return { ok: false, error: "internal", message: String(e?.message) };
     }
   }
-  async join(uid) {
+  async join(uid, skip) {
     await this._ready;
     if (!this._checkRate(uid)) return { ok: false, error: "rate_limited", message: "请求过于频繁，请稍后再试" };
     try {
-      const cur = this.ctx.storage.sql.exec(
-        `SELECT code FROM codes
+      let sql = `SELECT code FROM codes
          WHERE remaining > 0
            AND creator <> ?
            AND creator <> 'unknown'
-           AND NOT EXISTS (SELECT 1 FROM json_each(members) WHERE value = ?)
-         ORDER BY created_at ASC LIMIT 1`,
-        uid, uid
-      ).toArray();
+           AND NOT EXISTS (SELECT 1 FROM json_each(members) WHERE value = ?)`;
+      const params = [uid, uid];
+      if (skip) {
+        sql += ` AND code <> ?`;
+        params.push(skip);
+      }
+      sql += ` ORDER BY created_at ASC LIMIT 1`;
+      const cur = this.ctx.storage.sql.exec(sql, ...params).toArray();
       if (cur.length === 0) return { ok: true, code: null };
       const code = cur[0].code;
       this.ctx.storage.sql.exec(
@@ -245,7 +248,7 @@ var worker_default = {
           result = await stub.register(body.code, body.creator ?? "unknown", body.members ?? [], Number(body.remaining ?? 2));
           break;
         case "/pool/join":
-          result = await stub.join(body.uid);
+          result = await stub.join(body.uid, body.skip);
           break;
         case "/pool/report":
           result = await stub.reportResult(body.code, body.status);
