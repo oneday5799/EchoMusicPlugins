@@ -605,6 +605,13 @@ async function runFullFlow(c, reason, opts = {}) {
         return;
       }
 
+      // 防御守卫（第七轮复核）：分配响应必须同时携带 lease_id 与 code——
+      // 协议异常（缺 lease_id）时不向酷狗发起无租约的 join、不回报空 lease_id 的 result
+      if (!d.lease_id || !d.code) {
+        setLastError("码池响应异常，稍后自动重试", "pool_bad_response", { periodId, uid });
+        return;
+      }
+
       const leaseId = String(d.lease_id || "");
       const code = String(d.code);
       const joinKugou = await joinTeam(c, code);
