@@ -25,10 +25,14 @@
     font-size: 13px; width: 260px; background: #fff; color: var(--text);
   }
   #period { width: 120px; }
+  #admAction { width: 300px; }
+  #admTarget { width: 320px; }
   button { padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer;
            font-size: 13px; background: var(--accent); color: #fff; }
   button.secondary { background: var(--gray-bg); color: var(--text); }
   button:disabled { opacity: 0.5; cursor: wait; }
+  .row-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; align-self: flex-end; }
+  .auto-lbl { display: inline; margin: 0; white-space: nowrap; }
   .banner { display: none; padding: 10px 14px; border-radius: 8px; margin-bottom: 14px;
             font-size: 13px; white-space: pre-wrap; word-break: break-all; }
   .banner.error { display: block; background: var(--red-bg); color: var(--red); border: 1px solid #fecaca; }
@@ -62,6 +66,35 @@
   details > summary { cursor: pointer; font-size: 15px; font-weight: 600; padding: 4px 0; }
   .hidden { display: none; }
   .foot { color: var(--muted); font-size: 12px; margin-top: 8px; }
+
+  /* ---------- 移动端适配（≤768px 生效，PC 端样式不受影响） ---------- */
+  @media (max-width: 768px) {
+    body { padding: 14px 12px; }
+    h1 { font-size: 18px; }
+    .row { flex-direction: column; align-items: stretch; }
+    .row-actions { align-self: auto; }
+    input[type="text"], input[type="password"], select { width: 100%; font-size: 16px; } /* 16px 防 iOS 聚焦缩放 */
+    #period, #admAction, #admTarget { width: 100%; }
+    button { padding: 10px 14px; font-size: 14px; }
+    .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .table-wrap table { min-width: 560px; }
+    #leaseCard table { min-width: 660px; }
+    /* 队伍表降级为按队伍分组的卡片布局 */
+    #teamsCard table, #teamsCard tbody, #teamsCard tr, #teamsCard td { display: block; }
+    #teamsCard thead { display: none; }
+    #teamsCard tr { border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; margin-bottom: 10px; }
+    #teamsCard tr:hover td { background: transparent; }
+    #teamsCard td { border-bottom: 0; padding: 3px 0; overflow-wrap: anywhere; }
+    #teamsCard .member { overflow-wrap: anywhere; }
+    #teamsCard td::before {
+      content: attr(data-label);
+      display: inline-block;
+      min-width: 64px;
+      margin-right: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+  }
 </style>
 </head>
 <body>
@@ -74,11 +107,11 @@
     <div><label>API 地址</label><input type="text" id="api" placeholder="https://pool.example.com" /></div>
     <div><label>期次 ID（period_id）</label><input type="text" id="period" placeholder="请输入期次编号" /></div>
     <div><label>Admin Token</label><input type="password" id="token" placeholder="wrangler secret 配置的密钥" /></div>
-    <div style="align-self: flex-end;">
+    <div class="row-actions">
       <button id="btnData">查询全量数据</button>
       <button id="btnHealth" class="secondary">仅健康聚合</button>
       <button id="btnClear" class="secondary">清除本机配置</button>
-      <label style="display:inline; margin-left:8px;"><input type="checkbox" id="auto" /> 每 30s 自动刷新</label>
+      <label class="auto-lbl"><input type="checkbox" id="auto" /> 每 30s 自动刷新</label>
     </div>
   </div>
   <div class="foot">三项配置均需手填，仅保存在本浏览器 localStorage，不上传、不同步；点「清除本机配置」可随时抹除。期次 ID 见插件面板或插件日志（/team/period/info 的 id 字段）。</div>
@@ -89,7 +122,7 @@
   <div class="row">
     <div>
       <label>操作</label>
-      <select id="admAction" style="width: 300px;">
+      <select id="admAction">
         <option value="delete_user">删除用户 —— 解除 token 绑定（多设备/丢 token 恢复）</option>
         <option value="delete_team">删除队伍 —— 同时清除该队全部租约</option>
         <option value="expire_lease">强制过期租约 —— 立即腾出在途名额</option>
@@ -97,9 +130,9 @@
     </div>
     <div>
       <label id="admTargetLabel">目标 uid</label>
-      <input type="text" id="admTarget" placeholder="按所选操作填写对应值" style="width: 320px;" />
+      <input type="text" id="admTarget" placeholder="按所选操作填写对应值" />
     </div>
-    <div style="align-self: flex-end;">
+    <div class="row-actions">
       <button id="btnAdm" class="secondary">执行</button>
     </div>
   </div>
@@ -114,32 +147,32 @@
     <div class="stats" id="stats"></div>
   </div>
 
-  <div class="card">
-    <h2>队伍（<span id="teamCount">0</span>）</h2>
+  <details class="card" id="teamsCard" open>
+    <summary>队伍（<span id="teamCount">0</span>）</summary>
     <table><thead><tr>
       <th>队伍码</th><th>队长 uid</th><th>人数</th><th>状态</th><th>成员（昵称 / 奖励）</th><th>最近快照</th><th>冷却至</th><th>在途租约</th>
     </tr></thead><tbody id="teamsBody"></tbody></table>
-  </div>
+  </details>
 
-  <details class="card">
+  <details class="card" id="leaseCard">
     <summary>租约记录（最近 200 条）</summary>
-    <table><thead><tr>
+    <div class="table-wrap"><table><thead><tr>
       <th>租约 ID</th><th>uid</th><th>队伍码</th><th>状态</th><th>分配时间</th><th>到期</th><th>解决时间</th>
-    </tr></thead><tbody id="leaseBody"></tbody></table>
+    </tr></thead><tbody id="leaseBody"></tbody></table></div>
   </details>
 
-  <details class="card">
+  <details class="card" id="userCard">
     <summary>用户（<span id="userCount">0</span>，最近 500 条）</summary>
-    <table><thead><tr>
+    <div class="table-wrap"><table><thead><tr>
       <th>uid</th><th>最近加入队伍码</th><th>首次出现</th><th>最近活跃</th>
-    </tr></thead><tbody id="userBody"></tbody></table>
+    </tr></thead><tbody id="userBody"></tbody></table></div>
   </details>
 
-  <details class="card">
+  <details class="card" id="eventCard">
     <summary>审计事件（最近 100 条）</summary>
-    <table><thead><tr>
+    <div class="table-wrap"><table><thead><tr>
       <th>时间</th><th>类型</th><th>uid</th><th>队伍码</th><th>详情</th>
-    </tr></thead><tbody id="eventBody"></tbody></table>
+    </tr></thead><tbody id="eventBody"></tbody></table></div>
   </details>
 
 </div>
@@ -270,6 +303,7 @@ function teamStatus(t) {
   return '<span class="badge ' + st[1] + '">' + st[0] + "</span>" + cool;
 }
 
+// data-label 供移动端卡片布局显示字段名（≤768px 时 td::before 读取）
 function renderTeams(teams) {
   $("teamCount").textContent = teams.length;
   $("teamsBody").innerHTML = teams
@@ -282,11 +316,16 @@ function renderTeams(teams) {
           (m.role === 1 ? ' <span class="cap">队长</span>' : "") + "</span>"
         )
         .join("");
-      return "<tr><td class='mono'>" + esc(t.code) + "</td><td class='mono'>" + esc(t.captain_uid || "—") +
-        "</td><td>" + t.member_count + "</td><td>" + teamStatus(t) + "</td><td><div class='members'>" +
-        (members || '<span class="muted">暂无名单</span>') + "</div></td><td class='mono'>" + shortTime(t.snapshot_at_iso) +
-        "</td><td class='mono'>" + (t.fail_until_iso ? shortTime(t.fail_until_iso) : "—") +
-        "</td><td>" + (t.inflight || 0) + "</td></tr>";
+      return "<tr>" +
+        "<td class='mono' data-label='队伍码'>" + esc(t.code) + "</td>" +
+        "<td class='mono' data-label='队长 uid'>" + esc(t.captain_uid || "—") + "</td>" +
+        "<td data-label='人数'>" + t.member_count + "</td>" +
+        "<td data-label='状态'>" + teamStatus(t) + "</td>" +
+        "<td data-label='成员'><div class='members'>" +
+        (members || '<span class="muted">暂无名单</span>') + "</div></td>" +
+        "<td class='mono' data-label='最近快照'>" + shortTime(t.snapshot_at_iso) + "</td>" +
+        "<td class='mono' data-label='冷却至'>" + (t.fail_until_iso ? shortTime(t.fail_until_iso) : "—") + "</td>" +
+        "<td data-label='在途租约'>" + (t.inflight || 0) + "</td></tr>";
     })
     .join("");
 }
