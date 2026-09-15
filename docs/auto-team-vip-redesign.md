@@ -127,6 +127,14 @@
 - 租约 `success` 后仍计占用，直到下一次快照确认人数已含该成员（租约转 `confirmed`，不再单独计）——防止确认窗口期超发。
 - `success` 租约超过 10 分钟无快照确认 → 释放占用（`expired`）。若实际人数已满，后续快照会再次压低可用名额；若未满，名额及时回池。**任何路径都不会永久泄漏。**
 
+> 2026-09-15 实现约定（F3）：上式里的"未过期"对 `pending` **和** `success` **一视同仁**——三处用到
+> 在途名额的地方（`_inflightCount`、`join` 的选队 `avail` 子查询、`adminData.inflight`）都必须写成
+> `expires_at > now AND (status = 'success' OR status = 'pending')`。
+> 反例（修复前的写法）：`status='success' OR (status='pending' AND expires_at > now)` —— `success`
+> 完全不校验过期，一旦 `_sweepExpired` 失效，过期租约会长期占位，把 `avail` 压到 0；更严重的是
+> §6.4 的 full 纠偏会因此把队伍误置为 `full`（期内不可逆）。`confirmed` 恒占（该用户确实已在队中），
+> 由 `join` 的 `NOT EXISTS` 独立口径处理；`failed`/`expired` 不占。
+
 ### 5.3 队伍生命周期
 
 ```
@@ -134,7 +142,15 @@ open ──(member_count ≥ 3)──► full          （快照驱动；不支�
 open/full ──(6 小时无快照)──► stale        （选队时排除；新快照立即复活）
 ```
 
-full 状态在期内**不会回退**（无退队接口），full 队伍的保活快照仅用于 staleness 与统计，不再参与匹配计算。
+full 状态在期内**正常不会回退**（无退队接口），full 队伍的保活快照仅用于 staleness 与统计，不再参与匹配计算。
+
+> 2026-09-15 澄清（F18②）：`full` 由快照驱动，而酷狗是唯一真相源。若后续快照观测到人数**下降**
+> （异常：官方数据抖动、观测错误、或此前被 `joinResult` 误置），`_upsertTeam` 会**照实覆盖**并把
+> `status` 改回 `open`，同时记一条 `member_count_decrease` 事件供排查（与 §5.2 的"照实覆盖 + 记
+> events"一致）。即"不可逆"指的是**业务语义**（成员无法退出），而非实现的硬约束——实现上保留
+> 由快照纠偏的通道，这是刻意的安全设计（否则一次误判会让该队在本期内永久不可用）。
+> 另见 §6.4：`joinResult` 的 full 纠偏**必须**先以 `expires_at > now` 计算在途名额，否则过期
+> `success` 租约会把 `availExcluding` 压到 ≤0，把队伍误置为 `full`。
 
 > 调优备注：失败即纠偏（§6.4）落地后，stale 阈值可评估从 6h 收紧至 1~2h 以增加池子供给（最坏一次无效分配且可自愈）；首版维持 6h，上线观察后再调。
 

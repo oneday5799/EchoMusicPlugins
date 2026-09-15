@@ -101,7 +101,7 @@ export class PeriodPool extends DurableObject {
       if (rows.length > 0) schemaVersion = String(rows[0].value ?? "");
     }
     if (schemaVersion !== SCHEMA_VERSION) {
-      for (const t of ["codes", "rate_limit", "users", "teams", "leases", "events", "meta"]) {
+      for (const t of ["codes", "rate_limit", "users", "teams", "leases", "events", "event_hourly", "meta"]) {
         sql.exec(`DROP TABLE IF EXISTS ${t}`);
       }
       sql.exec(`
@@ -158,6 +158,20 @@ export class PeriodPool extends DurableObject {
         SCHEMA_VERSION
       );
     }
+    // 追加式 DDL（幂等，始终执行）——新增表/索引**不 bump SCHEMA_VERSION**：
+    // 版本号不等会走上方 DROP 分支清空全部业务表，users 被清后所有客户端都要重走一次
+    // issue 重签，期间会有短暂 401 与 pool_empty。故新增结构一律走追加式 DDL。
+    // 约定：新表需同步补进上方版本重建的 DROP 列表与 alarm() 的判空统计。
+    sql.exec(`
+      CREATE TABLE IF NOT EXISTS event_hourly (
+        kind   TEXT NOT NULL,          -- snapshot|assign|result|expire|error|auth|rate|correct|admin_delete
+        bucket TEXT NOT NULL,          -- UTC 小时桶 YYYY-MM-DDTHH
+        n      INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (kind, bucket)
+      );
+      CREATE INDEX IF NOT EXISTS idx_teams_captain ON teams(captain_uid);
+      CREATE INDEX IF NOT EXISTS idx_teams_open    ON teams(status, snapshot_at);
+    `);
     if ((await this.ctx.storage.getAlarm()) === null) {
       await this.ctx.storage.setAlarm(Date.now() + CLEANUP_INTERVAL_MS);
     }
@@ -181,6 +195,15 @@ export class PeriodPool extends DurableObject {
         detail ? String(detail).slice(0, 500) : null
       );
       this._exec(`DELETE FROM events WHERE id <= (SELECT MAX(id) FROM events) - ?`, EVENTS_KEEP);
+      // 2026-09-15 修复：events 是环形日志，实测高流量下仅覆盖约 25 分钟，
+      // 使 health() 的 events_24h 统计严重失真（anomalies/auth_fail 恒为 0）。
+      // 另记小时桶（行数降到 kind × 24 量级）供 24h 聚合 O(1) 扫描。
+      const bucket = new Date().toISOString().slice(0, 13); // YYYY-MM-DDTHH（UTC，字符串比较即时间比较）
+      this._exec(
+        `INSERT INTO event_hourly (kind, bucket, n) VALUES (?, ?, 1)
+         ON CONFLICT(kind, bucket) DO UPDATE SET n = n + 1`,
+        kind, bucket
+      );
     } catch {
       // 审计失败不影响主流程
     }
@@ -257,17 +280,21 @@ export class PeriodPool extends DurableObject {
       );
       const n = Number(cursor?.rowsWritten ?? 0);
       if (n > 0) this._event("expire", null, null, "expired_leases=" + n);
-    } catch {
-      // 清扫失败不影响主流程（查询侧仍以时间戳兜底）
+    } catch (e) {
+      // 清扫失败不影响主流程（查询侧仍以 expires_at 时间戳兜底）。
+      // 2026-09-15：原为静默 catch，导致清扫失效长期不可见；改为留下可观测痕迹。
+      console.warn("sweepExpired failed", e?.message ?? e);
     }
   }
 
-  // 某队当前在途占用（未过期 pending/success 租约数），可排除指定租约
+  // 某队当前在途占用（未过期 pending/success 租约数），可排除指定租约。
+  // 2026-09-15 修复：success 此前不校验 expires_at，一旦清扫失效，过期租约会被长期计为在途，
+  // 在 joinResult 纠偏里把 availExcluding 压到 ≤ 0，从而把队伍误置为**期内不可逆**的 full。
   _inflightCount(code, excludeLeaseId) {
     const rows = this._sql(
       `SELECT COUNT(*) AS c FROM leases
-       WHERE code = ? AND id <> ?
-         AND (status = 'success' OR (status = 'pending' AND expires_at > ?))`,
+       WHERE code = ? AND id <> ? AND expires_at > ?
+         AND (status = 'success' OR status = 'pending')`,
       code, excludeLeaseId || "", Date.now()
     );
     return Number(rows[0]?.c ?? 0);
@@ -424,39 +451,54 @@ export class PeriodPool extends DurableObject {
       return { ok: true, code: lastJoined, reason: "already_joined" };
     }
 
+    // 客户端本轮流程内已失败的队（exclude_codes）：仅本次选队生效，不落库。
+    // 2026-09-15 修复：解析此前位于幂等分支**之后**，导致幂等返回完全绕过该字段
+    // （详见下方幂等分支的处理说明）。
+    const excludeCodes = Array.isArray(body?.exclude_codes)
+      ? body.exclude_codes.map((c) => cleanStr(c, 64)).filter(Boolean).slice(0, 3)
+      : [];
+
     // 幂等：已有未过期 pending/success 租约 → 原样返回（防止重复分配）
     const active = this._sql(
-      `SELECT id, code, expires_at FROM leases
+      `SELECT id, code, status, expires_at FROM leases
        WHERE uid = ? AND ((status = 'pending' AND expires_at > ?) OR (status = 'success' AND expires_at > ?))
        ORDER BY assigned_at DESC LIMIT 1`,
       uid, now, now
     );
     if (active.length > 0) {
       const l = active[0];
-      return {
-        ok: true,
-        lease_id: String(l.id),
-        code: String(l.code),
-        expires_in: Math.max(1, Math.round((Number(l.expires_at) - now) / 1000)),
-      };
+      // 2026-09-15 修复：客户端已明确避开该队码（本轮该队 join 失败），说明这条租约的
+      // 结果回报没能送达（网络/5xx/429）。此时若仍原样返回，客户端的 exclude_codes 完全失效、
+      // 重试全部落在同一坏队上（已端到端实测复现）。
+      // 只处理 pending：客户端一旦回报 success 即提前 return，不会把该码放进 exclude_codes，
+      // 故此处不会误伤已成功的租约。
+      if (String(l.status) === "pending" && excludeCodes.includes(String(l.code))) {
+        this._exec(`UPDATE leases SET status = 'failed', resolved_at = ? WHERE id = ?`, now, String(l.id));
+        this._event("result", uid, String(l.code), "stale_lease_released_by_exclude");
+      } else {
+        return {
+          ok: true,
+          lease_id: String(l.id),
+          code: String(l.code),
+          expires_in: Math.max(1, Math.round((Number(l.expires_at) - now) / 1000)),
+        };
+      }
     }
 
-    // 客户端本轮流程内已失败的队（exclude_codes，2026-09-12 新增）：仅本次选队生效，不落库
-    const excludeCodes = Array.isArray(body?.exclude_codes)
-      ? body.exclude_codes.map((c) => cleanStr(c, 64)).filter(Boolean).slice(0, 3)
-      : [];
     const excludeSql =
       excludeCodes.length > 0
         ? `AND t.code NOT IN (${excludeCodes.map(() => "?").join(", ")})`
         : "";
 
-    // 选队：快满优先（可用名额少者优先）+ FIFO；排除自己创建的队、stale、冷却中的队
+    // 选队：快满优先（可用名额少者优先）+ FIFO；排除自己创建的队、stale、冷却中的队。
+    // 在途占用口径（2026-09-15 统一，与 _inflightCount / adminData 一致）：
+    //   pending / success 仅在 expires_at > now 时占名额；confirmed 恒占（确实已在队中）。
     const fresh = now - FRESH_CUTOFF_MS;
     const candidates = this._sql(
       `SELECT t.code,
               (${MEMBER_SLOTS} - (t.member_count - 1) - (SELECT COUNT(*) FROM leases l
-                  WHERE l.code = t.code
-                    AND (l.status = 'success' OR (l.status = 'pending' AND l.expires_at > ?)))) AS avail
+                  WHERE l.code = t.code AND l.expires_at > ?
+                    AND (l.status = 'success' OR l.status = 'pending'))) AS avail
        FROM teams t
        WHERE t.status = 'open'
          AND t.snapshot_at > ?
@@ -464,12 +506,12 @@ export class PeriodPool extends DurableObject {
          AND t.captain_uid <> ?
          ${excludeSql}
          AND (${MEMBER_SLOTS} - (t.member_count - 1) - (SELECT COUNT(*) FROM leases l
-                  WHERE l.code = t.code
-                    AND (l.status = 'success' OR (l.status = 'pending' AND l.expires_at > ?)))) > 0
+                  WHERE l.code = t.code AND l.expires_at > ?
+                    AND (l.status = 'success' OR l.status = 'pending'))) > 0
          AND NOT EXISTS (SELECT 1 FROM leases l2
                   WHERE l2.uid = ? AND l2.code = t.code
-                    AND (l2.status IN ('success', 'confirmed')
-                         OR (l2.status = 'pending' AND l2.expires_at > ?)))
+                    AND (l2.status = 'confirmed'
+                         OR (l2.status IN ('pending', 'success') AND l2.expires_at > ?)))
        ORDER BY avail ASC, t.created_at ASC
        LIMIT 1`,
       now, fresh, now, uid, ...excludeCodes, now, uid, now
@@ -634,7 +676,14 @@ export class PeriodPool extends DurableObject {
     const fresh = now - FRESH_CUTOFF_MS;
     const one = (q, ...p) => Number(this._sql(q, ...p)[0]?.c ?? 0);
     const leaseBy = (st) => one(`SELECT COUNT(*) AS c FROM leases WHERE status = ?`, st);
-    const day = now - 24 * 3_600_000;
+    // 2026-09-15 修复：events_24h 此前扫环形日志（仅保留最近 EVENTS_KEEP 条），
+    // 高流量下窗口远短于 24h，统计严重偏低甚至恒 0。改读小时桶。
+    const since = new Date(now - 24 * 3_600_000).toISOString().slice(0, 13);
+    const cnt24 = (kind) =>
+      Number(this._sql(
+        `SELECT COALESCE(SUM(n), 0) AS c FROM event_hourly WHERE kind = ? AND bucket >= ?`,
+        kind, since
+      )[0]?.c ?? 0);
     return {
       ok: true,
       teams: {
@@ -655,10 +704,10 @@ export class PeriodPool extends DurableObject {
         waiting: one(`SELECT COUNT(*) AS c FROM users WHERE last_joined_code = '' AND last_seen_at > ?`, now - WAITING_ACTIVE_MS),
       },
       events_24h: {
-        auth_fail: one(`SELECT COUNT(*) AS c FROM events WHERE kind = 'auth' AND ts > ?`, day),
-        rate_limited: one(`SELECT COUNT(*) AS c FROM events WHERE kind = 'rate' AND ts > ?`, day),
-        expired_leases: one(`SELECT COUNT(*) AS c FROM events WHERE kind = 'expire' AND ts > ?`, day),
-        anomalies: one(`SELECT COUNT(*) AS c FROM events WHERE kind = 'error' AND ts > ?`, day),
+        auth_fail: cnt24("auth"),
+        rate_limited: cnt24("rate"),
+        expired_leases: cnt24("expire"),
+        anomalies: cnt24("error"),
       },
     };
   }
@@ -676,8 +725,8 @@ export class PeriodPool extends DurableObject {
     const teams = this._sql(
       `SELECT t.code, t.captain_uid, t.member_count, t.members_json, t.status, t.snapshot_at, t.fail_until, t.created_at,
               (SELECT COUNT(*) FROM leases l
-                WHERE l.code = t.code
-                  AND (l.status = 'success' OR (l.status = 'pending' AND l.expires_at > ?))) AS inflight
+                WHERE l.code = t.code AND l.expires_at > ?
+                  AND (l.status = 'success' OR l.status = 'pending')) AS inflight
        FROM teams t ORDER BY t.created_at DESC LIMIT 1000`,
       now
     ).map((r) => {
@@ -772,9 +821,12 @@ export class PeriodPool extends DurableObject {
     if (action === "delete_user") {
       const leases = this._exec(`DELETE FROM leases WHERE uid = ?`, target);
       const users = this._exec(`DELETE FROM users WHERE uid = ?`, target);
+      // 2026-09-15：同步清除令牌桶，避免删号后残留限速记账（同 uid 重新签发时被旧桶拖累）
+      const rate = this._exec(`DELETE FROM rate_limit WHERE uid = ?`, target);
       const nU = Number(users?.rowsWritten ?? 0);
       const nL = Number(leases?.rowsWritten ?? 0);
-      this._event("admin_delete", nU > 0 ? target : null, null, "user;leases=" + nL);
+      const nR = Number(rate?.rowsWritten ?? 0);
+      this._event("admin_delete", nU > 0 ? target : null, null, "user;leases=" + nL + ";rate=" + nR);
       return {
         ok: true, action, target, deleted_users: nU, deleted_leases: nL,
         note: nU === 0 ? "用户不存在（可能已删除）" : "已删除；该账号下次快照将自动重签 token",
@@ -815,11 +867,14 @@ export class PeriodPool extends DurableObject {
       this._exec(`DELETE FROM users WHERE last_seen_at < ?`, cutoff);
       this._exec(`DELETE FROM leases WHERE assigned_at < ?`, cutoff);
       this._exec(`DELETE FROM events WHERE ts < ?`, cutoff);
+      this._exec(`DELETE FROM event_hourly WHERE bucket < ?`,
+        new Date(cutoff).toISOString().slice(0, 13));
       this._exec(`DELETE FROM rate_limit WHERE updated_at < ?`, Date.now() - 3_600_000);
       // 判空 deleteAll 以全部业务表为准（meta 不计，随 deleteAll 一并清除，下次访问重新初始化）
       const count = (t) => Number(this._sql(`SELECT COUNT(*) AS c FROM ${t}`)[0]?.c ?? 0);
       const total =
-        count("users") + count("teams") + count("leases") + count("events") + count("rate_limit");
+        count("users") + count("teams") + count("leases") + count("events") +
+        count("event_hourly") + count("rate_limit");
       if (total === 0) {
         await this.ctx.storage.deleteAll();
         // deleteAll 后同内存实例的构造器不会重跑，立即重建表结构与 alarm，
@@ -867,39 +922,58 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
-    if (path === "/") return json({ name: "echo-team-pool", api: 2, ok: true });
-
     const isAdminPath = path === "/v2/health" || path === "/v2/admin/data" || path === "/v2/admin/delete";
+    // 2026-09-15 修复：CORS 此前只补在成功路径上（原 L1015），导致 403（版本门禁）与
+    // 404（Admin Token 不匹配）的错误体被浏览器 CORS 拦截，admin.html 只能显示
+    // "网络错误，请检查 WAF"，把排查方向带偏。现改为**单一出口统一补齐**：成功与失败都补。
+    const respond = (res) => {
+      if (isAdminPath) for (const [k, v] of Object.entries(CORS_HEADERS)) res.headers.set(k, v);
+      return res;
+    };
+    // err() 的 CORS 包装（签名与 err 完全一致）
+    const fail = (code, message, status) => respond(err(code, message, status));
+
+    if (path === "/") return respond(json({ name: "echo-team-pool", api: 2, ok: true }));
+
     if (isAdminPath && request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: CORS_HEADERS });
+      return respond(new Response(null, { status: 204, headers: CORS_HEADERS }));
     }
-    if (request.method !== "POST") return err("method_not_allowed", "仅支持 POST", 405);
+    if (request.method !== "POST") return fail("method_not_allowed", "仅支持 POST", 405);
 
     // 版本门禁（保留 v1 机制）
     const minVersion = env.MIN_CLIENT_VERSION || "1.2.0";
     const v = request.headers.get("X-Plugin-Version") || "";
-    if (!v) return err("version_missing", "缺少插件版本信息，请更新插件后重试", 403);
+    if (!v) return fail("version_missing", "缺少插件版本信息，请更新插件后重试", 403);
     if (!versionGte(v, minVersion)) {
-      return err("version_mismatch", `插件版本过低（${v}），请更新至 ${minVersion} 或更高版本`, 403);
+      return fail("version_mismatch", `插件版本过低（${v}），请更新至 ${minVersion} 或更高版本`, 403);
     }
 
     const cl = Number(request.headers.get("content-length") || 0);
-    if (cl > MAX_BODY_SIZE) return err("payload_too_large", "请求体超过 4KB", 413);
+    if (cl > MAX_BODY_SIZE) return fail("payload_too_large", "请求体超过 4KB", 413);
     let body = {};
     if (cl > 0) {
       try {
         const text = await request.text();
-        if (text.length > MAX_BODY_SIZE) return err("payload_too_large", "请求体超过 4KB", 413);
+        // 2026-09-15 修复：原判定混用口径——Content-Length 按**字节**、text.length 按 **UTF-16 码元**，
+        // 含中文时实际可用字节可达上限约 3 倍。统一按字节判定。
+        if (new TextEncoder().encode(text).length > MAX_BODY_SIZE) {
+          return fail("payload_too_large", "请求体超过 4KB", 413);
+        }
         body = text ? JSON.parse(text) : {};
       } catch {
-        return err("bad_request", "请求体不是合法 JSON", 400);
+        return fail("bad_request", "请求体不是合法 JSON", 400);
       }
     }
 
     const periodId = String(body.period_id || url.searchParams.get("period_id") || "");
-    if (!periodId) return err("missing_period_id", "缺少 period_id", 400);
-    // 格式校验：防任意字符串批量创建空 DO 实例（限速按 DO 内 uid 记账，换 period_id 即绕过）
-    if (!/^[A-Za-z0-9_-]{1,32}$/.test(periodId)) return err("bad_period_id", "period_id 格式不合法", 400);
+    if (!periodId) return fail("missing_period_id", "缺少 period_id", 400);
+    // 格式校验：防任意字符串批量创建空 DO 实例（限速按 DO 内 uid 记账，换 period_id 即绕过）。
+    // 2026-09-15 复核结论：格式校验**不足以**达成该目标——任意合法串（a1、a2…）都会经下方
+    // getByName 实例化 DO，而 rate_limit 是 DO 内表，换 period_id 即重置。
+    // 已确认的处置：F13 采用**方案 A**，在 Cloudflare 侧对 /v2/* 配 WAF Rate Limiting
+    // （60 次/分钟/IP → 429），代码侧不再引入期次白名单（避免超过上限后拒绝新期次）。
+    // 残留风险：WAF 规则失效或被绕过时，DO 数量仍可被放大。
+    if (!/^[A-Za-z0-9_-]{1,32}$/.test(periodId)) return fail("bad_period_id", "period_id 格式不合法", 400);
 
     let result;
     try {
@@ -922,7 +996,7 @@ export default {
           // 注意版本门禁在前——管理请求也需携带 X-Plugin-Version 头。
           const admin = String(env.ADMIN_TOKEN || "");
           if (!admin || request.headers.get("X-Admin-Token") !== admin) {
-            return err("not_found", "路径不存在", 404);
+            return fail("not_found", "路径不存在", 404);
           }
           result = await stub.health(body);
           break;
@@ -931,7 +1005,7 @@ export default {
           // 站长全量明细：同 health 的门禁策略（X-Admin-Token，失败 404），只读。
           const adminData = String(env.ADMIN_TOKEN || "");
           if (!adminData || request.headers.get("X-Admin-Token") !== adminData) {
-            return err("not_found", "路径不存在", 404);
+            return fail("not_found", "路径不存在", 404);
           }
           result = await stub.adminData(body);
           break;
@@ -941,23 +1015,22 @@ export default {
           // （服务端另有 confirm:true 二次确认）。
           const adminDelete = String(env.ADMIN_TOKEN || "");
           if (!adminDelete || request.headers.get("X-Admin-Token") !== adminDelete) {
-            return err("not_found", "路径不存在", 404);
+            return fail("not_found", "路径不存在", 404);
           }
           result = await stub.adminDelete(body);
           break;
         }
         default:
           // v1 端点（/pool/*）随 v2 全部下线
-          return err("not_found", "路径不存在", 404);
+          return fail("not_found", "路径不存在", 404);
       }
     } catch (e) {
-      return err("internal_error", String(e?.message ?? e), 500);
+      return fail("internal_error", String(e?.message ?? e), 500);
     }
 
     const status = result && result.ok === false && result.status ? result.status : 200;
     if (result && result.status !== undefined) delete result.status;
-    const response = json(result, status);
-    if (isAdminPath) for (const [k, v] of Object.entries(CORS_HEADERS)) response.headers.set(k, v);
-    return response;
+    // CORS 统一由 respond() 补齐（原此处的成功路径补 CORS 已上移，避免只有成功才有 CORS）
+    return respond(json(result, status));
   },
 };

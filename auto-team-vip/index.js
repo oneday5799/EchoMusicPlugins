@@ -1,12 +1,17 @@
-// auto-team-vip v1.2.1 —— v2 快照/租约协议
+// auto-team-vip v1.2.2 —— v2 快照/租约协议
 // 架构设计：docs/auto-team-vip-redesign.md（§4 §7）
 //
 // 职责边界：
 //   - 酷狗服务器：队伍真实构成的唯一权威（本插件是其唯一可靠观察者 + 组队操作执行器）。
 //   - 码池服务器：存储快照、计算名额、以租约方式下发组队码。
 //   - 本插件：①GUARD → ②MYINFO → ③SNAPSHOT → ④DECIDE → ⑤ASSIGN → ⑥JOIN_KUGOU → ⑦RESULT → ⑧VERIFY。
+//
+// 自动组队开关（默认关闭，需手动开启）：
+//   - 开启：走完整 ①→⑧，与码池服务器交互（上报快照 / 申请组队码 / 回报结果）。
+//   - 关闭：**与码池服务器零交流**，只读酷狗（期次 + 我的队伍信息），并保留手动加入队伍的能力
+//     （组队码由用户自行输入，不来自码池）。此模式下不会自动建队、不上报快照、不申请组队码。
 
-const TARGET_MEMBERS = 3; // 1 队长 + 2 队员
+const TARGET_MEMBERS = 3; // 1 队长 + 2 队员（与 team-pool-worker/worker.js 的 TEAM_CAPACITY 保持一致）
 const POOL_URL = "https://echo-team-pool.oneday.vip";
 const POOL_RETRY_DELAY_MS = 500;      // 瞬时故障（网络/5xx）的一次补射间隔
 const RETRY_MAX = 3;                  // 当轮 join 重试上限（含首次）
@@ -21,7 +26,9 @@ const POOL_RATE_LIMIT_BACKOFF_MS = 60_000; // 码池限速（429）短退避：�
 const REFRESH_THROTTLE_MS = 3000;
 const AUTO_RUN_DELAY_MS = 3000;
 const LOGIN_RUN_DELAY_MS = 2000;
-const INPUT_STYLE = "flex: 1; min-width: 0; height: 32px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--border-subtle, rgba(255,255,255,0.12)); background: var(--control-muted-bg, rgba(255,255,255,0.06)); color: var(--color-text-main); font-size: 13px; outline: none;";
+// 2026-09-15（F9）：兜底色统一为中性灰——原值全为暗色（rgba(255,255,255,x)），
+// 浅色主题下若宿主变量缺失会出现输入框/按钮"深底浅字"或背景不可见。
+const INPUT_STYLE = "flex: 1; min-width: 0; height: 32px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--border-subtle, rgba(127,127,127,0.2)); background: var(--control-muted-bg, rgba(127,127,127,0.08)); color: var(--color-text-main); font-size: 13px; outline: none;";
 let PLUGIN_VERSION = "0.0.0";
 
 const _DEBUG = false;
@@ -42,6 +49,10 @@ let lastSnapshotAt = 0;
 let lastFullAt = 0;
 let lastInactiveProbeAt = 0;
 let heartbeatTimer = null;
+// 2026-09-15 补：此前 watch 句柄与两个启动 setTimeout 均未保存，停用/热重载后会打到已销毁的
+// 上下文（虽被 runFullFlow 全捕获兜住不崩，但会发一次无效请求），且重复激活会叠加 interval。
+let stopTokenWatch = null;
+let startupTimers = [];
 let versionMismatchReported = false;
 // 143005「设备已绑队但本期查不到队伍」的 toast 只弹一次（每次插件激活重置）；
 // 面板提示不受此标志影响，仍每轮照常设置并常驻。
@@ -51,6 +62,16 @@ let dialogOpen = null;
 let cssDispose = null;
 let teleportDispose = null;
 let moreMenuDispose = null;
+
+// 自动组队开关（F14/F15）：由 activate 注入同一个 ref 实例，runFullFlow 据此决定是否接触码池。
+// 关闭时全程不与码池服务器通信（只读酷狗 + 手动加入）。
+let autoTeamRef = null;
+// 设置读取完成的 Promise：启动/登录触发需等它 resolve，否则会用默认值误判开关状态。
+let settingsReady = null;
+
+function autoTeamOn() {
+  return autoTeamRef ? Boolean(autoTeamRef.value) : false;
+}
 
 // 码池侧状态：退避 + 401 停用（键 = 期次:账号，多账号设备互不连坐）
 const poolBackoff = { step: 0, nextAttemptAt: 0 };
@@ -236,7 +257,8 @@ async function teamRequest(c, method, url, params, data) {
 
   const body = res?.body;
   const eventId = pick(body, ["ssaCode", "eventId"], "") || pick(res?.headers, ["ssa-code", "SSA-CODE"], "");
-  const errorCode = Number(pick(body, ["error_code", "errcode"], 0));
+  // 2026-09-15（F12）：取值键与 classifyJoinError / parseJoinResponse 对齐，补 "code"
+  const errorCode = Number(pick(body, ["error_code", "errcode", "code"], 0));
   const failed = Number(pick(body, ["status"], 1)) === 0;
   // 验证码触发条件（2026-09-12 第六轮复核修订）：20028 显式要求；其他失败仅当非已知
   // 业务终态错误码时触发（143001/143004/143010/20006 属终态，弹验证码 + 重试注定失败）
@@ -346,12 +368,22 @@ function classifyJoinError(body) {
   return { kind, errorCode, errorMsg };
 }
 
+// 判定酷狗 join / create 响应是否成功。
+// 2026-09-15 修复（F19）：原实现 `status` 缺省为 1、`error_code` 缺省为 0，而 pick() 对非对象
+// body 直接返回兜底值 → `null` / `{}` / `""` / `{code:143001}` 全被判为"入队成功"（实测 4/4 命中），
+// 会把真实的入队失败静默吞掉。
+// 现要求**显式** `status === 1`；错误码仅在字段确实存在时才要求为 0（既 fail-closed，
+// 又容忍某些端点省略 error_code 的成功响应）。
 function parseJoinResponse(r) {
-  const bodyStatus = Number(pick(r.body, ["status"], 1));
-  const errorCode = Number(pick(r.body, ["error_code", "errcode"], 0));
-  const errorMsg = String(pick(r.body, ["error_msg", "msg", "message"], ""));
-  const httpOk = r.ok && Number(r.status) < 400;
-  const bizOk = bodyStatus === 1 && errorCode === 0;
+  const body = r?.body;
+  const isObj = Boolean(body) && typeof body === "object";
+  const bodyStatus = Number(pick(body, ["status"], NaN)); // 缺省不再是"成功"
+  const hasErrCode = isObj &&
+    (body.error_code !== undefined || body.errcode !== undefined || body.code !== undefined);
+  const errorCode = Number(pick(body, ["error_code", "errcode", "code"], 0));
+  const errorMsg = String(pick(body, ["error_msg", "msg", "message"], ""));
+  const httpOk = Boolean(r?.ok) && Number(r?.status) < 400;
+  const bizOk = bodyStatus === 1 && (!hasErrCode || errorCode === 0);
   return { httpOk, bizOk, errorCode, errorMsg };
 }
 
@@ -474,6 +506,34 @@ async function poolResult(c, periodId, uid, leaseId, result, errorKind) {
   });
 }
 
+// 回报租约结果，并语义化处理码池侧失败。
+// 2026-09-15 修复：此前三处调用均丢弃返回值，导致 401 不落 poolAuthDisabled（要多绕一轮才停用）、
+// 403 版本门禁的"请更新插件"提示被吞、5xx 完全无人感知（并放大 F1：回报丢失 → 幂等返回同一坏队）。
+// 返回 "abort" 表示本轮应终止；"ok" 表示可继续。
+async function reportLeaseResult(c, periodId, uid, leaseId, result, errorKind) {
+  const r = await poolResult(c, periodId, uid, leaseId, result, errorKind);
+  if (r.ok) return "ok";
+  if (r.status === 401) {
+    await disablePool(c, periodId, uid);
+    if (uiState) uiState.poolDisabled = true;
+    setLastError("身份校验失败，本期码池功能停用（下期自动恢复）", "pool_unauthorized",
+      { periodId, uid, stage: "result" });
+    return "abort";
+  }
+  if (r.needUpdate) return "abort"; // 版本门禁：poolRequestOnce 已提示过
+  if (r.status === 429) {
+    poolRateLimited();
+    setLastError("码池请求过于频繁，稍后自动重试", "pool_rate_limited",
+      { periodId, uid, stage: "result" });
+    return "abort";
+  }
+  // 5xx / 网络：租约由服务端 120s TTL 回收，不阻断当轮重试。
+  // 不设 lastMessage——入队成功路径下若提示"码池不可用"会误导用户（实际已入队成功）。
+  poolDown();
+  console.warn("[auto-team-vip] 结果回报失败:", result, r.status, r.error);
+  return "ok";
+}
+
 // 上报快照；返回 "ok" | "disabled" | "down"
 async function doSnapshot(c, periodId, uid, teamInfo) {
   if (await isPoolDisabled(c, periodId, uid)) {
@@ -510,11 +570,7 @@ async function doSnapshot(c, periodId, uid, teamInfo) {
     poolUp();
     // 服务端签发/轮换的 token 及时入库（新期次自动重签）
     if (r.data?.token) await setPoolToken(c, uid, r.data.token);
-    if (r.data?.pool && uiState) {
-      uiState.poolOpen = Number(r.data.pool.open_teams ?? 0);
-      uiState.poolWaiting = Number(r.data.pool.waiting ?? 0);
-      uiState.poolDisabled = false;
-    }
+    if (uiState) uiState.poolDisabled = false;
     return "ok";
   }
   if (r.status === 401) {
@@ -574,6 +630,17 @@ async function runFullFlow(c, reason, opts = {}) {
         uiState.joinedMemberCount = 0;
         uiState.joined = false;
       }
+      // 2026-09-15（F7）：poolAuthDisabled 是「期次:账号」的 401 停用表，跨期只会累积、从不清理。
+      // 挂在已有的期次切换分支上顺手裁剪，只保留当前期次的记录。
+      try {
+        const map = (await c.storage.get("poolAuthDisabled")) || {};
+        const pruned = {};
+        for (const k of Object.keys(map)) if (k.startsWith(periodId + ":")) pruned[k] = map[k];
+        await c.storage.set("poolAuthDisabled", pruned);
+        disabledPeriods = new Set(Object.keys(pruned));
+      } catch {
+        // 裁剪失败不影响本轮
+      }
     }
     await c.storage.set("lastPeriodId", periodId);
     if (uiState) {
@@ -590,9 +657,28 @@ async function runFullFlow(c, reason, opts = {}) {
       return;
     }
 
-    // ② MYINFO：无自己创建的队伍 → 创建 → 重查
+    // 自动组队开关（F14/F15）：关闭时**与码池服务器零交流**，走只读酷狗的手动模式
+    const autoOn = autoTeamOn();
+
+    // ② MYINFO：查询我的队伍（两个维度）。手动模式下到此为止。
     let myInfo = await getMyTeamInfo(c, periodId);
-    if (myInfo.ok && !myInfo.created) {
+    if (!myInfo.ok) {
+      setLastError("获取队伍信息失败", "myinfo_failed");
+      return;
+    }
+
+    if (!autoOn) {
+      // 手动模式（2026-09-15，F14）：只读酷狗，**不自动建队、不上报快照、不申请组队码**。
+      // 面板仍展示"我创建的队伍 / 我加入的队伍"，手动加入走 UI 里用户自行输入的组队码。
+      // 记录刷新时间，避免心跳把面板刷新压成每 60s 一次（按 SNAPSHOT_INTERVAL_MS 节流）。
+      lastSnapshotAt = Date.now();
+      applyTeamInfoToState(myInfo);
+      clearIfNoNewError(); // 本轮查询成功＝状态可见，清掉上一模式遗留的提示
+      return;
+    }
+
+    // 自动模式：无自己创建的队伍 → 创建 → 重查
+    if (!myInfo.created) {
       const createdRes = await createTeam(c, periodId);
       const createdParsed = createdRes?.ok ? parseJoinResponse(createdRes) : null;
       if (!createdParsed?.httpOk || !createdParsed?.bizOk) {
@@ -602,10 +688,10 @@ async function runFullFlow(c, reason, opts = {}) {
         dlog("[建队失败]", detail);
       }
       myInfo = await getMyTeamInfo(c, periodId);
-    }
-    if (!myInfo.ok) {
-      setLastError("获取队伍信息失败", "myinfo_failed");
-      return;
+      if (!myInfo.ok) {
+        setLastError("获取队伍信息失败", "myinfo_failed");
+        return;
+      }
     }
     applyTeamInfoToState(myInfo);
 
@@ -674,13 +760,14 @@ async function runFullFlow(c, reason, opts = {}) {
       if (!joinKugou.ok) {
         // 酷狗请求本身失败（网络/未登录）：与队伍状态无关，不参与服务端纠偏
         attempts.push({ 尝试: attempt, 队伍码: code, 类别: "network", 说明: joinKugou.error || "请求失败" });
-        await poolResult(c, periodId, uid, leaseId, "failed", "network");
+        // F2：回报失败必须被感知（401/403/429 直接终止本轮；5xx 走退避但继续重试）
+        if (await reportLeaseResult(c, periodId, uid, leaseId, "failed", "network") === "abort") return;
         if (attempt < RETRY_MAX) await sleep(RETRY_DELAY_MS);
         continue;
       }
       const parsed = parseJoinResponse(joinKugou);
       if (parsed.httpOk && parsed.bizOk) {
-        await poolResult(c, periodId, uid, leaseId, "success", "");
+        await reportLeaseResult(c, periodId, uid, leaseId, "success", "");
         // ⑧ VERIFY + SNAPSHOT：把成队后的真实人数报给码池
         const verify = await getMyTeamInfo(c, periodId);
         if (verify.ok) applyTeamInfoToState(verify);
@@ -693,7 +780,8 @@ async function runFullFlow(c, reason, opts = {}) {
         尝试: attempt, 队伍码: code, 类别: kind, HTTP状态: joinKugou.status,
         酷狗错误码: errorCode || undefined, 酷狗信息: errorMsg || undefined,
       });
-      await poolResult(c, periodId, uid, leaseId, "failed", kind);
+      // F2：同上。此处回报成功（租约已正常释放），"abort" 只可能来自 401/403/429
+      if (await reportLeaseResult(c, periodId, uid, leaseId, "failed", kind) === "abort") return;
       if (kind === "already_joined") {
         // 已在队中（如上轮租约迟到成功）：立即快照纠偏，不重试
         const verify = await getMyTeamInfo(c, periodId);
@@ -735,6 +823,36 @@ function requestRun(c, reason, opts = {}) {
   return runChain;
 }
 
+// 统一的运行时释放（_ctx.dispose 与 deactivate 都调用，幂等）。
+// 2026-09-15：此前两处清理各写一遍且都不完整——watch 句柄与启动 setTimeout 从未释放，
+// heartbeatTimer 未先 clear 就覆盖。此处收敛为唯一出口。
+function releaseRuntime() {
+  if (moreMenuDispose) { moreMenuDispose(); moreMenuDispose = null; }
+  if (teleportDispose) { teleportDispose(); teleportDispose = null; }
+  if (cssDispose) { cssDispose(); cssDispose = null; }
+  if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+  if (stopTokenWatch) { stopTokenWatch(); stopTokenWatch = null; }
+  for (const t of startupTimers) clearTimeout(t);
+  startupTimers = [];
+  if (dialogOpen) dialogOpen.value = false;
+  uiState = null;
+  dialogOpen = null;
+  autoTeamRef = null;
+  settingsReady = null;
+  runChain = null;
+  // 计时器基线一并归零，避免热重载后沿用上一轮的 10s 合并窗口 / 快照间隔
+  lastRunAt = 0;
+  lastSnapshotAt = 0;
+  lastFullAt = 0;
+  lastInactiveProbeAt = 0;
+  versionMismatchReported = false;
+  deviceBoundToastShown = false;
+  disabledPeriods = new Set();
+  poolBackoff.step = 0;
+  poolBackoff.nextAttemptAt = 0;
+  pool429Until = 0;
+}
+
 // ---------- Dialog ----------
 
 const DIALOG_CSS = `
@@ -745,10 +863,13 @@ const DIALOG_CSS = `
   animation: atv-fade-in 0.15s ease;
 }
 .atv-dialog {
-  background: var(--color-bg-elevated, #1e1e2e);
-  border: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
+  --atv-warn: #b45309;
+  --atv-warn-bg: rgba(180,83,9,0.12);
+  background: var(--color-bg-elevated, #ffffff);
+  color: var(--color-text-main, #1f2329);
+  border: 1px solid var(--border-subtle, rgba(127,127,127,0.18));
   border-radius: 14px;
-  box-shadow: 0 8px 32px rgba(0,0,0,0.45);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.18);
   width: 400px; max-width: calc(100vw - 48px);
   max-height: calc(100vh - 80px);
   overflow: auto;
@@ -768,11 +889,11 @@ const DIALOG_CSS = `
 .atv-refresh-btn {
   cursor: pointer; font-size: 13px; margin-left: 8px;
   padding: 2px 8px; border-radius: 4px;
-  background: rgba(255,255,255,0.1);
+  background: var(--control-muted-bg, rgba(127,127,127,0.16));
   user-select: none; opacity: 0.6;
   transition: opacity 0.15s, background 0.15s;
 }
-.atv-refresh-btn:hover { opacity: 1; background: rgba(255,255,255,0.18); }
+.atv-refresh-btn:hover { opacity: 1; background: var(--control-hover-bg, rgba(127,127,127,0.24)); }
 .atv-refresh-btn:active { opacity: 0.8; }
 .atv-dialog-close {
   position: absolute; top: 16px; right: 16px;
@@ -789,6 +910,9 @@ const DIALOG_CSS = `
 }
 @keyframes atv-fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes atv-scale-in { from { opacity: 0; transform: scale(0.92); } to { opacity: 1; transform: scale(1); } }
+@media (prefers-color-scheme: dark) {
+  .atv-dialog { --atv-warn: #f0b93c; --atv-warn-bg: rgba(255,185,60,0.15); }
+}
 `;
 
 function openDialog() {
@@ -824,21 +948,27 @@ export async function activate(_ctx) {
     joinedCode: "",
     joinedMemberCount: 0,
     joinedVipDesc: "",
-    poolOpen: -1,
-    poolWaiting: -1,
     poolDisabled: false,
   });
 
   dialogOpen = _ctx.vue.ref(false);
   const refreshing = _ctx.vue.ref(false);
+  // 2026-09-15（F15）：默认**关闭**，需用户手动开启。
   const autoTeam = _ctx.vue.ref(false);
+  autoTeamRef = autoTeam; // 注入给 runFullFlow 作为门控源（F14）
   let lastRefreshTime = 0;
 
-  _ctx.storage.get("settings").then((saved) => {
-    if (saved && typeof saved === "object") {
-      autoTeam.value = pick(saved, ["autoEnabled"], false) !== false;
-    }
-  });
+  // 2026-09-15（F15）：仅**显式** autoEnabled === true 才开启。
+  // 原写法 `pick(..., false) !== false` 对 0 / "false" 等值会误判为"开启"，语义也读不出默认值。
+  // settingsReady 供启动/登录触发 await，避免用默认值误判开关状态。
+  settingsReady = _ctx.storage
+    .get("settings")
+    .then((saved) => {
+      if (saved && typeof saved === "object") {
+        autoTeam.value = pick(saved, ["autoEnabled"], false) === true;
+      }
+    })
+    .catch(() => {});
   _ctx.storage.get("poolAuthDisabled").then((map) => {
     if (map && typeof map === "object") disabledPeriods = new Set(Object.keys(map));
   });
@@ -877,9 +1007,10 @@ export async function activate(_ctx) {
           _ctx.toast.info("已开启自动组队，正在执行~~~");
           requestRun(_ctx, "toggle_on", { force: true });
         } else {
-          _ctx.toast.info("已关闭自动组队");
-          // 关闭后快照照发一次，保持码池状态同步（不再参与分配）
-          requestRun(_ctx, "toggle_off", { snapshotOnly: true, force: true });
+          // 2026-09-15（F14）：关闭后**与码池服务器零交流**——不再补发快照（原行为），
+          // 只重新查询一次酷狗侧状态刷新面板。
+          _ctx.toast.info("已关闭自动组队，不再与码池服务器通信");
+          requestRun(_ctx, "toggle_off", { force: true });
         }
       };
 
@@ -898,13 +1029,14 @@ export async function activate(_ctx) {
         }
         const code = String(manualCode.value || "").trim();
         if (!code) return;
+        // 手动加入：组队码由用户输入，**不经码池**（关闭自动组队时这是唯一可用的组队手段）
         const r = await joinTeam(_ctx, code);
         const { httpOk, bizOk, errorMsg } = parseJoinResponse(r);
         if (httpOk && bizOk) {
           _ctx.toast.success("已提交加入");
           manualCode.value = "";
           clearLastError(); // 手动入队成功＝问题已解决
-          // 手动加入成功 → 触发一次快照，该码自动入池
+          // 手动加入成功后刷新一次：开启自动组队时该码顺带入池；关闭时只刷新酷狗侧展示
           requestRun(_ctx, "manual_join", { snapshotOnly: true, force: true });
         } else {
           const msg = errorMsg || "加入失败，请检查组队码";
@@ -913,8 +1045,10 @@ export async function activate(_ctx) {
         }
       };
 
-      // 渲染期调用：仅在码池鉴权异常时显示提示行；开放队伍/等待人数不再对外展示
+      // 渲染期调用：仅在码池鉴权异常时显示提示行；开放队伍/等待人数不再对外展示。
+      // 关闭自动组队时不接触码池，其鉴权状态与本模式无关，不展示（避免遗留的 poolDisabled 误导）。
       const poolLineText = () => {
+        if (!autoTeam.value) return "";
         if (uiState?.poolDisabled) return "状态异常，请联系插件作者处理，或等待下期组队";
         return "";
       };
@@ -943,11 +1077,11 @@ export async function activate(_ctx) {
               ? h("div", { style: "font-size: 12px; opacity: 0.6; margin-bottom: 10px;" }, poolLineText())
               : null,
             uiState?.lastMessage
-              ? h("div", { style: "font-size: 12px; color: #f0b93c; margin-bottom: 10px; display: flex; gap: 6px; align-items: center;" }, [
+              ? h("div", { style: "font-size: 12px; color: var(--color-warning, var(--atv-warn)); margin-bottom: 10px; display: flex; gap: 6px; align-items: center;" }, [
                   h("span", { style: "flex: 1; word-break: break-all;" }, uiState.lastMessage),
                   uiState?.lastError
                     ? h("span", {
-                        style: "font-size: 11px; padding: 2px 6px; border-radius: 4px; background: rgba(255,185,60,0.15); color: #f0b93c; cursor: pointer; flex-shrink: 0; white-space: nowrap;",
+                        style: "font-size: 11px; padding: 2px 6px; border-radius: 4px; background: var(--atv-warn-bg); color: var(--color-warning, var(--atv-warn)); cursor: pointer; flex-shrink: 0; white-space: nowrap;",
                         onClick: () => copyErrorDetail(_ctx),
                       }, "复制")
                     : null,
@@ -960,6 +1094,9 @@ export async function activate(_ctx) {
               modelValue: autoTeam.value,
               "onUpdate:modelValue": toggleAuto,
             }),
+            autoTeam.value
+              ? null
+              : h("span", { style: "font-size: 12px; opacity: 0.5;" }, "（已关闭，仅查询状态，不联网码池）"),
           ]),
           h("div", { style: "display: flex; gap: 8px; align-items: center;" }, [
             h("span", { style: "font-size: 13px; opacity: 0.7; flex-shrink: 0;" }, "我加入的队伍："),
@@ -1018,24 +1155,40 @@ export async function activate(_ctx) {
       tooltip: "自动组队",
       defaultPlacement: "toolbar",
       order: 100,
-      onClick: () => openDialog(),
+      onClick: () => {
+        openDialog();
+        // 2026-09-15（F17）：面板数据可能已滞后（心跳 60s 巡检 + 轻量刷新 5min 间隔），
+        // 打开时补一次。不带 force：受 10s 合并窗口约束，反复开合不会放大请求。
+        // 关闭自动组队时，这一轮只查酷狗、不接触码池。
+        requestRun(_ctx, "panel_open", { snapshotOnly: true });
+      },
     });
   }
 
-  _ctx.vue.watch(
+  // 登录触发延迟 2s（方案 §7.2）：等 pinia 的设备信息就绪，保证鉴权头完整。
+  // 句柄入 startupTimers 以便停用/热重载时释放（F16）。
+  stopTokenWatch = _ctx.vue.watch(
     () => _ctx.pinia?.state?.value?.user?.info?.token,
     (token) => {
-      // 登录触发延迟 2s（方案 §7.2）：等 pinia 的设备信息就绪，保证鉴权头完整
-      if (token) setTimeout(() => requestRun(_ctx, "login"), LOGIN_RUN_DELAY_MS);
+      if (!token) return;
+      startupTimers.push(setTimeout(() => {
+        // 等设置读取完成，避免用默认值误判"自动组队"开关（F14/F15）
+        settingsReady.then(() => requestRun(_ctx, "login"));
+      }, LOGIN_RUN_DELAY_MS));
     },
   );
 
-  // 登录后延迟启动完整流程（等 pinia 状态就绪）
-  setTimeout(() => requestRun(_ctx, "startup"), AUTO_RUN_DELAY_MS);
+  // 启动触发（等 pinia 状态就绪 + 设置读取完成）。
+  // 2026-09-15（F14）：受"自动组队"开关门控——关闭时该轮只查询酷狗、不与码池通信。
+  startupTimers.push(setTimeout(() => {
+    settingsReady.then(() => requestRun(_ctx, "startup"));
+  }, AUTO_RUN_DELAY_MS));
 
   // 心跳：面板打开或自动开关开启时保活；本期未完成时定期触发完整流程等新码。
   // 以 periodState 取代 periodActive 硬门控：error/unknown 照常按常规间隔重试（自愈）、
   // active 走保活/等待循环、inactive 仅每 30min 低频探测（下一期自动开始）。
+  // 关闭自动组队时（autoOn=false）只会走下面的轻量刷新分支，即仅查询酷狗。
+  if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } // 重复激活不叠加
   heartbeatTimer = setInterval(() => {
     if (!uiState || !dialogOpen) return;
     const panelOpen = Boolean(dialogOpen.value);
@@ -1060,24 +1213,9 @@ export async function activate(_ctx) {
     }
   }, HEARTBEAT_TICK_MS);
 
-  _ctx.dispose(() => {
-    if (moreMenuDispose) { moreMenuDispose(); moreMenuDispose = null; }
-    if (teleportDispose) { teleportDispose(); teleportDispose = null; }
-    if (cssDispose) { cssDispose(); cssDispose = null; }
-    if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
-    uiState = null;
-    dialogOpen = null;
-    runChain = null;
-  });
+  _ctx.dispose(() => releaseRuntime());
 }
 
 export async function deactivate() {
-  if (moreMenuDispose) { moreMenuDispose(); moreMenuDispose = null; }
-  if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
-  closeDialog();
-  cssDispose?.(); cssDispose = null;
-  teleportDispose?.(); teleportDispose = null;
-  uiState = null;
-  dialogOpen = null;
-  runChain = null;
+  releaseRuntime();
 }
