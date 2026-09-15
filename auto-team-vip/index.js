@@ -1,4 +1,4 @@
-// auto-team-vip v1.2.0 —— v2 快照/租约协议
+// auto-team-vip v1.2.1 —— v2 快照/租约协议
 // 架构设计：docs/auto-team-vip-redesign.md（§4 §7）
 //
 // 职责边界：
@@ -43,6 +43,9 @@ let lastFullAt = 0;
 let lastInactiveProbeAt = 0;
 let heartbeatTimer = null;
 let versionMismatchReported = false;
+// 143005「设备已绑队但本期查不到队伍」的 toast 只弹一次（每次插件激活重置）；
+// 面板提示不受此标志影响，仍每轮照常设置并常驻。
+let deviceBoundToastShown = false;
 
 let dialogOpen = null;
 let cssDispose = null;
@@ -87,10 +90,26 @@ function pick(obj, keys, fallback) {
   return fallback;
 }
 
+// 错误序号：每次 setLastError 自增，供 runFullFlow 判断"本轮是否产生过新错误"，
+// 从而只在"本轮干净跑完"时才清除历史提示（避免把本轮刚产生的 create_team_failed 等误清）。
+let errorSeq = 0;
+
 function setLastError(msg, code, detail) {
   if (!uiState) return;
+  errorSeq += 1;
   uiState.lastMessage = msg;
   uiState.lastError = code ? { code, message: msg, detail: detail || {} } : null;
+}
+
+// 清除历史错误提示（2026-09-15 修复粘性提示缺陷）。
+// 原缺陷：lastMessage/lastError 只写不清，一旦出错过，橙色提示行会一直挂到插件停用/重启，
+// 即使后续已成功入队也会误导用户以为仍在故障。
+// 调用原则：只在**本轮流程的终态且状态已确认健康**时清除，不在流程中途清除
+// （中途清除会在重试期间反复消失/重现，形成闪烁）。
+function clearLastError() {
+  if (!uiState) return;
+  uiState.lastMessage = "";
+  uiState.lastError = null;
 }
 
 function applyTeamInfoToState(info) {
@@ -130,7 +149,14 @@ async function copyErrorDetail(c) {
   ];
   if (err.detail) {
     for (const [k, v] of Object.entries(err.detail)) {
-      if (v !== undefined && v !== null && v !== "") {
+      if (v === undefined || v === null || v === "") continue;
+      if (Array.isArray(v)) {
+        // 数组（如 join_exhausted 的 attempts）逐行展开，便于用户直接复制反馈
+        lines.push(k + ":");
+        v.forEach((item, i) =>
+          lines.push("  #" + (i + 1) + " " + (typeof item === "object" ? JSON.stringify(item) : String(item)))
+        );
+      } else {
         lines.push(k + ": " + (typeof v === "object" ? JSON.stringify(v) : v));
       }
     }
@@ -181,7 +207,9 @@ function buildAuthHeader(auth) {
 // 酷狗 join 业务终态错误码（2026-09-12 实测）：这些失败与验证码无关，
 // 即使响应带 eventId 也不触发 kugouVerification（弹验证码 + 重试注定失败的 join 纯属浪费）。
 // 20028 仍显式触发；未知新失败码保持原行为（failed 即触发），白名单式豁免不影响正途。
-const BIZ_JOIN_CODES = new Set([143001, 143004, 143010, 20006]);
+// 2026-09-15 补 143005（"每台设备只能加入一个队伍~~"，实测 HTTP 502 + 顶层 error_code）：
+// 设备级终态，换任何队伍码都不可能成功，弹验证码同样纯属浪费。
+const BIZ_JOIN_CODES = new Set([143001, 143004, 143010, 143005, 20006]);
 
 async function teamRequest(c, method, url, params, data) {
   const auth = readAuth(c);
@@ -288,6 +316,10 @@ function normalizeTeamInfo(body) {
 // 酷狗 join 错误分类。错误响应结构（2026-09-12 实测，HTTP 502，错误字段在顶层、data 为空串）：
 //   {"error_msg":"队伍不存在","data":"","status":0,"error_code":143001}
 // 实测数值码：143004=满员、143010=已是成员、143001=队伍不存在；成功：HTTP 200 + status:1 + error_code:0
+// 2026-09-15 实测补充：143005=「每台设备只能加入一个队伍~~」（同为 HTTP 502 + 顶层 error_code）。
+//   该码是**设备级**终态（约束在设备维度而非队伍维度），换任何队伍码重试都不可能成功，
+//   故归入 already_joined：走「停止重试 + 取真实队伍信息 + 快照纠偏」路径，与服务端语义一致
+//   （worker 仅对 full/invalid 纠偏，already_joined 只记事件，不会给队伍泼脏水）。
 // 分类原则：数值码证据最硬优先；文案关键词兜底（防酷狗改码/新错误）；默认 transient 不惩罚队伍（非对称代价）
 function classifyJoinError(body) {
   const errorCode = Number(pick(body, ["error_code", "errcode", "code"], 0));
@@ -297,8 +329,18 @@ function classifyJoinError(body) {
   let kind = "transient";
   if (errorCode === 143004 || errorCode === 20006 || msg.includes("满") || msg.includes("full"))
     kind = "full"; // 20006 为 v1 观测历史码，实测未复现，保留兼容
-  else if (errorCode === 143010 || msg.includes("已加入") || msg.includes("是队伍成员") || msg.includes("已参") || msg.includes("joined"))
-    kind = "already_joined"; // 实测文案"你已经是队伍成员~"；不用"已经"泛匹配（满员文案也含"已经"）
+  else if (
+    errorCode === 143010 ||
+    errorCode === 143005 ||
+    msg.includes("已加入") ||
+    msg.includes("是队伍成员") ||
+    msg.includes("已参") ||
+    msg.includes("只能加入") ||
+    msg.includes("joined")
+  )
+    // 143010 实测文案"你已经是队伍成员~"；143005 为设备级"每台设备只能加入一个队伍~~"
+    // 不用"已经"泛匹配（满员文案也含"已经"）；"只能加入"仅命中设备级约束文案，不误伤满员/无效码
+    kind = "already_joined";
   else if (errorCode === 143001 || msg.includes("不存在") || msg.includes("无效") || msg.includes("已解散") || msg.includes("组队码错误"))
     kind = "invalid"; // 码无效/队不存在：无快照可纠偏，服务端 24h 冷却（§11.2）
   return { kind, errorCode, errorMsg };
@@ -500,6 +542,11 @@ async function runFullFlow(c, reason, opts = {}) {
   if (!opts.force && Date.now() - lastRunAt < MIN_RUN_INTERVAL_MS) return;
   lastRunAt = Date.now();
   if (!snapshotOnly) lastFullAt = lastRunAt;
+  // 本轮错误序号基线：本轮未产生任何新错误（errorSeq 未变）＝状态健康，才清除历史提示
+  const seq0 = errorSeq;
+  const clearIfNoNewError = () => {
+    if (errorSeq === seq0) clearLastError();
+  };
   try {
     const auth = readAuth(c);
     if (!auth) {
@@ -565,13 +612,21 @@ async function runFullFlow(c, reason, opts = {}) {
     // ③ SNAPSHOT：两维度真实状态整体上报
     const snap = await doSnapshot(c, periodId, uid, myInfo);
     lastSnapshotAt = Date.now();
-    if (snapshotOnly || snap !== "ok") return;
+    if (snapshotOnly || snap !== "ok") {
+      // 快照成功＝鉴权/期次/队伍信息均正常；此路径无后续重试，清掉历史错误不会闪烁
+      if (snap === "ok") clearIfNoNewError();
+      return;
+    }
 
     // ④ DECIDE：入队即终态（酷狗不支持退队），本轮结束进入心跳模式
-    if (myInfo.joined) return;
+    if (myInfo.joined) {
+      clearIfNoNewError(); // 已确认在队中＝问题已解决
+      return;
+    }
 
     // ⑤→⑦ ASSIGN / JOIN_KUGOU / RESULT（当轮重试 ≤ RETRY_MAX）
     const excludedCodes = new Set(); // 本轮流程内失败过的队（network 除外），重试时请求服务端避开
+    const attempts = []; // 本轮各次尝试的失败摘要（含酷狗原始错误码/文案/HTTP 状态），全部失败后随 join_exhausted 进复制详情，供用户反馈
     for (let attempt = 1; attempt <= RETRY_MAX; attempt++) {
       const joinRes = await poolJoin(c, periodId, uid, [...excludedCodes]);
       if (!joinRes.ok) {
@@ -598,6 +653,7 @@ async function runFullFlow(c, reason, opts = {}) {
         const verify = await getMyTeamInfo(c, periodId);
         if (verify.ok) applyTeamInfoToState(verify);
         await doSnapshot(c, periodId, uid, verify.ok ? verify : myInfo);
+        clearIfNoNewError(); // 服务端判定已在队中＝问题已解决
         return;
       }
       if (d.reason === "pool_empty" || !d.code) {
@@ -617,6 +673,7 @@ async function runFullFlow(c, reason, opts = {}) {
       const joinKugou = await joinTeam(c, code);
       if (!joinKugou.ok) {
         // 酷狗请求本身失败（网络/未登录）：与队伍状态无关，不参与服务端纠偏
+        attempts.push({ 尝试: attempt, 队伍码: code, 类别: "network", 说明: joinKugou.error || "请求失败" });
         await poolResult(c, periodId, uid, leaseId, "failed", "network");
         if (attempt < RETRY_MAX) await sleep(RETRY_DELAY_MS);
         continue;
@@ -628,22 +685,42 @@ async function runFullFlow(c, reason, opts = {}) {
         const verify = await getMyTeamInfo(c, periodId);
         if (verify.ok) applyTeamInfoToState(verify);
         await doSnapshot(c, periodId, uid, verify.ok ? verify : myInfo);
+        clearIfNoNewError(); // 入队成功＝问题已解决
         return;
       }
       const { kind, errorCode, errorMsg } = classifyJoinError(joinKugou.body);
+      attempts.push({
+        尝试: attempt, 队伍码: code, 类别: kind, HTTP状态: joinKugou.status,
+        酷狗错误码: errorCode || undefined, 酷狗信息: errorMsg || undefined,
+      });
       await poolResult(c, periodId, uid, leaseId, "failed", kind);
       if (kind === "already_joined") {
         // 已在队中（如上轮租约迟到成功）：立即快照纠偏，不重试
         const verify = await getMyTeamInfo(c, periodId);
         if (verify.ok) applyTeamInfoToState(verify);
         await doSnapshot(c, periodId, uid, verify.ok ? verify : myInfo);
+        // 143005 是**设备级**约束（设备已绑队）。若本期查不到任何队伍，说明设备绑定的队伍
+        // 不在本账号/本期可见范围内 → 本地无法自愈（换任何队码都只会再报 143005），
+        // 必须明确告知用户，否则会退化成"一直不成功却毫无提示"的无声失败。
+        // 仅在**确认查不到队伍**（verify.ok 且无 joined）时提示；查询本身失败属瞬时故障，不误报。
+        if (errorCode === 143005 && verify.ok && !verify.joined) {
+          const msg = "无法加入其他队伍，请到概念版APP手动加入或查看原因";
+          setLastError(msg, "device_already_bound", { periodId, uid, code, errorCode });
+          // toast 每次激活只弹一次；面板提示常驻，无需每轮重复打扰
+          if (!deviceBoundToastShown) {
+            deviceBoundToastShown = true;
+            c.toast.warning(msg);
+          }
+          return;
+        }
+        clearIfNoNewError(); // 已在队中＝问题已解决
         return;
       }
       excludedCodes.add(code); // transient/full/invalid：重试换队（full/invalid 另有服务端纠偏/冷却）
       dlog("[重试]", code, kind, attempt);
       if (attempt < RETRY_MAX) await sleep(RETRY_DELAY_MS);
     }
-    setLastError("加入队伍未成功，稍后自动重试", "join_exhausted", { periodId, uid });
+    setLastError("加入队伍未成功，稍后自动重试", "join_exhausted", { periodId, uid, attempts });
   } catch (e) {
     console.warn("[auto-team-vip] runFullFlow error:", e?.message || e);
   }
@@ -728,6 +805,7 @@ function closeDialog() {
 
 export async function activate(_ctx) {
   PLUGIN_VERSION = _ctx.manifest.version || "0.0.0";
+  deviceBoundToastShown = false; // 每次激活重置：本次激活内该 toast 只弹一次
 
   uiState = _ctx.vue.reactive({
     lastMessage: "",
@@ -825,6 +903,7 @@ export async function activate(_ctx) {
         if (httpOk && bizOk) {
           _ctx.toast.success("已提交加入");
           manualCode.value = "";
+          clearLastError(); // 手动入队成功＝问题已解决
           // 手动加入成功 → 触发一次快照，该码自动入池
           requestRun(_ctx, "manual_join", { snapshotOnly: true, force: true });
         } else {
