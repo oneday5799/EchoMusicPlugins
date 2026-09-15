@@ -5,3 +5,7 @@ node_modules/
 
 # Wrangler
 team-pool-worker/.wrangler/
+
+# WorkBuddy 记忆/工作数据（本地留存，不入库）
+.workbuddy/
+.workbuddy-ai/
