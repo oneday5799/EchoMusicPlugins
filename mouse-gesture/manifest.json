@@ -1,0 +1,12 @@
+{
+  "id": "mouse-gesture",
+  "name": "鼠标手势控制",
+  "version": "1.0.0",
+  "description": "使用鼠标手势控制软件的播放、导航和滚动等操作。",
+  "author": "Oneday5799",
+  "icon": "icon.svg",
+  "main": "index.js",
+  "requires": {
+    "echoMusicVersion": ">=2.3.1"
+  }
+}
