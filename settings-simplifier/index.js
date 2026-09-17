@@ -91,17 +91,25 @@ let settingsDispose = null;
 let domObserver = null;
 let sectionObserver = null;
 let scanTimer = null;
+let bulkScanRunning = false;
+let lastCssText = '';
 
 // ── Utility Functions ──────────────────────
 const normalizeSettings = (rawSettings, sections) => {
   const source = (rawSettings && typeof rawSettings === "object") ? rawSettings : {};
   const currentItems = {};
-  sections.forEach(s => {
-    (s.items || []).forEach(item => {
-      const old = (source.items || {})[item.id];
-      currentItems[item.id] = old !== undefined ? old : true;
+  const addItems = (list) => {
+    (list || []).forEach(item => {
+      if (!(item.id in currentItems)) {
+        const old = (source.items || {})[item.id];
+        currentItems[item.id] = old !== undefined ? old : true;
+      }
     });
-  });
+  };
+  sections.forEach(s => addItems(s.items));
+  if (sections !== allSections) {
+    allSections.forEach(s => addItems(s.items));
+  }
   return {
     sections: { ...(source.sections || {}) },
     items: currentItems
@@ -138,9 +146,9 @@ const generateCSS = (settings, sections) => {
   return rules.join('\n');
 };
 
-const updateAnchorBar = (settings, sections) => {
-  document.querySelectorAll('.settings-anchor-item').forEach(btn => {
-    const text = btn.textContent?.trim();
+const updateNavItems = (settings, sections) => {
+  document.querySelectorAll('.settings-nav-item').forEach(btn => {
+    const text = btn.querySelector('span')?.textContent?.trim();
     const hidden = sections.some(s => settings.sections[s.id] === false && s.label === text);
     btn.style.display = hidden ? 'none' : '';
   });
@@ -178,46 +186,100 @@ const updateDividers = (settings) => {
   });
 };
 
-const scanSectionsFromDOM = () => {
-  const elements = document.querySelectorAll('[data-section]');
-  if (!elements.length) return [];
-
-  const discovered = [];
-  elements.forEach(el => {
-    const id = el.dataset.section;
-    if (!id) return;
-    const h2 = el.querySelector('h2');
-    const label = h2?.textContent?.trim() || id;
-
-    const items = [];
-    const settingsCard = el.querySelector('.settings-card');
-    if (settingsCard) {
-      const seenIds = {};
-      settingsCard.querySelectorAll('.settings-item').forEach((child, index) => {
-        const h3 = child.querySelector('h3');
-        const itemLabel = h3?.textContent?.trim() || `子项 ${index + 1}`;
-        const baseId = `${id}_${itemLabel}`;
-        const seenCount = (seenIds[baseId] = (seenIds[baseId] || 0) + 1);
-        const itemId = seenCount === 1 ? baseId : `${baseId}_${seenCount}`;
-        items.push({ id: itemId, label: itemLabel, sectionId: id });
-        child.setAttribute('data-settings-item', itemId);
-      });
-    }
-
-    discovered.push({ id, label, items });
-  });
-
-  return discovered;
+const fixActiveSection = () => {
+  const contentEl = document.querySelector('.settings-content');
+  if (!contentEl) return;
+  const visible = Array.from(contentEl.children).some(
+    child => child.style.display !== 'none' && child.offsetParent !== null
+  );
+  if (visible) return;
+  const first = document.querySelector('.settings-nav-item:not([style*="display: none"])');
+  if (first && first !== document.querySelector('.settings-nav-item.is-active')) {
+    first.click();
+  }
 };
 
-const mergeSections = (discovered) => {
-  const result = BUILTIN_SECTIONS.map(s => ({ ...s, items: [] }));
-  if (discovered) {
-    discovered.forEach(d => {
-      const existing = result.find(s => s.id === d.id);
+const bulkScanAllSections = (ctx) => {
+  if (bulkScanRunning) return Promise.resolve();
+  const buttons = Array.from(document.querySelectorAll('.settings-nav-item:not([style*="display: none"])'));
+  if (buttons.length <= 1) return Promise.resolve();
+  bulkScanRunning = true;
+  const saved = document.querySelector('.settings-nav-item.is-active');
+  return new Promise(resolve => {
+    let i = 0;
+    const step = () => {
+      if (i >= buttons.length) {
+        bulkScanRunning = false;
+        syncState(ctx, allSections);
+        if (saved && saved.style.display !== 'none') { saved.click(); }
+        else { buttons[0]?.click(); }
+        resolve();
+        return;
+      }
+      buttons[i].click();
+      setTimeout(() => {
+        const section = scanVisibleSectionFromDOM();
+        if (section) {
+          const idx = allSections.findIndex(s => s.id === section.id);
+          if (idx !== -1) {
+            allSections[idx] = { ...allSections[idx], ...section };
+          }
+        }
+        i++;
+        step();
+      }, 100);
+    };
+    step();
+  });
+};
+
+const scanVisibleSectionFromDOM = () => {
+  const el = document.querySelector('[data-section]');
+  if (!el) return null;
+
+  const id = el.dataset.section;
+  if (!id) return null;
+
+  const h2 = el.querySelector('h2');
+  const label = h2?.textContent?.trim() || id;
+
+  const items = [];
+  const settingsCard = el.querySelector('.settings-card');
+  if (settingsCard) {
+    const seenIds = {};
+    settingsCard.querySelectorAll('.settings-item').forEach((child, index) => {
+      const h3 = child.querySelector('h3');
+      const itemLabel = h3?.textContent?.trim() || `子项 ${index + 1}`;
+      const baseId = `${id}_${itemLabel}`;
+      const seenCount = (seenIds[baseId] = (seenIds[baseId] || 0) + 1);
+      const itemId = seenCount === 1 ? baseId : `${baseId}_${seenCount}`;
+      items.push({ id: itemId, label: itemLabel, sectionId: id });
+      child.setAttribute('data-settings-item', itemId);
+    });
+  }
+
+  return { id, label, items };
+};
+
+const mergeSections = (discoveredSections) => {
+  const resultMap = new Map();
+  const result = BUILTIN_SECTIONS.map(s => {
+    const copy = { ...s, items: [] };
+    resultMap.set(s.id, copy);
+    return copy;
+  });
+  if (discoveredSections) {
+    const prevMap = new Map(allSections.map(s => [s.id, s]));
+    discoveredSections.forEach(d => {
+      const existing = resultMap.get(d.id);
       if (existing) {
         existing.label = (d.label && d.label !== d.id) ? d.label : existing.label;
-        existing.items = (d.items && d.items.length > 0) ? d.items : existing.items;
+        if (d.items && d.items.length > 0) {
+          existing.items = d.items;
+        } else {
+          const prev = prevMap.get(d.id);
+          if (prev?.items?.length) existing.items = prev.items;
+        }
       } else {
         result.push(d);
       }
@@ -226,25 +288,39 @@ const mergeSections = (discovered) => {
   return result;
 };
 
+const syncState = (ctx, sections) => {
+  allSections = sections;
+  state.settings = normalizeSettings(state.settings, sections);
+  state.sections = [...sections];
+  ctx.storage.set(STORAGE_KEY_SECTIONS, sections.filter(s => s.items?.length > 0));
+  if (styleDispose) { styleDispose(); styleDispose = null; }
+  const css = generateCSS(state.settings, sections);
+  lastCssText = css;
+  if (css) { styleDispose = ctx.css.inject(css, { id: "settings-simplifier-style" }); }
+  updateNavItems(state.settings, sections);
+};
+
 // ── Delayed Scan ───────────────────────────
 const delayedScan = (ctx) => {
   if (scanTimer) clearTimeout(scanTimer);
   scanTimer = setTimeout(() => {
-    const discovered = scanSectionsFromDOM();
-    const merged = mergeSections(discovered);
+    const visibleSection = scanVisibleSectionFromDOM();
+    let discoveredSections = allSections.map(s => ({ ...s }));
+    if (visibleSection) {
+      const idx = discoveredSections.findIndex(s => s.id === visibleSection.id);
+      if (idx !== -1) {
+        discoveredSections[idx] = { ...discoveredSections[idx], ...visibleSection };
+      } else {
+        discoveredSections.push(visibleSection);
+      }
+    }
+    const merged = mergeSections(discoveredSections);
     const changed = merged.length !== allSections.length ||
       merged.some((s, i) => allSections[i]?.id !== s.id || s.items?.length !== allSections[i]?.items?.length);
     if (changed) {
-      allSections = merged;
-      ctx.storage.set(STORAGE_KEY_SECTIONS, discovered);
-      state.settings = normalizeSettings(state.settings, merged);
-      state.sections = merged;
-      if (styleDispose) { styleDispose(); styleDispose = null; }
-      const css = generateCSS(state.settings, allSections);
-      if (css) { styleDispose = ctx.css.inject(css, { id: "settings-simplifier-style" }); }
-      updateAnchorBar(state.settings, allSections);
+      syncState(ctx, merged);
+      updateDividers(state.settings);
     }
-    updateDividers(state.settings);
     scanTimer = null;
   }, 300);
 };
@@ -279,9 +355,11 @@ const createSettingsComponent = (ctx) =>
       const updateCSS = async () => {
         if (styleDispose) { styleDispose(); styleDispose = null; }
         const css = generateCSS(settings.value, sections.value);
+        lastCssText = css;
         if (css) { styleDispose = ctx.css.inject(css, { id: "settings-simplifier-style" }); }
-        updateAnchorBar(settings.value, sections.value);
+        updateNavItems(settings.value, sections.value);
         updateDividers(settings.value);
+        fixActiveSection();
       };
 
       const applySettingsMutation = async (mutator) => {
@@ -356,14 +434,13 @@ const createSettingsComponent = (ctx) =>
 
       const refreshSections = async () => {
         await new Promise(resolve => setTimeout(resolve, 500));
-        const discovered = scanSectionsFromDOM();
-        if (discovered.length > 0) {
-          const merged = mergeSections(discovered);
-          sections.value = merged;
-          allSections = merged;
-          state.sections = merged;
-          await ctx.storage.set(STORAGE_KEY_SECTIONS, discovered);
-          settings.value = normalizeSettings(state?.settings, merged);
+        const visibleSection = scanVisibleSectionFromDOM();
+        if (visibleSection) {
+          const idx = allSections.findIndex(s => s.id === visibleSection.id);
+          if (idx !== -1) {
+            allSections[idx] = { ...allSections[idx], ...visibleSection };
+          }
+          syncState(ctx, allSections);
         }
       };
 
@@ -442,15 +519,23 @@ const createSettingsComponent = (ctx) =>
         input.click();
       };
 
+      const openSettingsAndScan = async () => {
+        ctx.router.push({ name: 'settings' });
+        await new Promise(resolve => setTimeout(resolve, 500));
+        await bulkScanAllSections(ctx);
+        ctx.router.push({ name: 'home' });
+      };
+
       const renderHeader = () =>
         h("div", { style: STYLES.header }, [
           h("div", { style: STYLES.buttonGroup }, [
+            h(Button, { size: "xs", onClick: openSettingsAndScan, disabled: isBusy.value }, { default: () => "扫描" }),
             h(Button, { size: "xs", onClick: async () => { await refreshSections(); await updateCSS(); }, disabled: isBusy.value }, { default: () => "刷新" }),
             h(Button, { size: "xs", onClick: () => setAllSections(true), disabled: isBusy.value }, { default: () => "全部显示" }),
             h(Button, { size: "xs", onClick: () => setAllSections(false), disabled: isBusy.value }, { default: () => "全部隐藏" }),
             h(Button, { size: "xs", onClick: exportSettings, disabled: isBusy.value }, { default: () => "导出设置" }),
             h(Button, { size: "xs", onClick: importSettings, disabled: isBusy.value }, { default: () => "导入设置" }),
-            h(Button, { size: "xs", onClick: applyRecommended, disabled: isBusy.value }, { default: () => "使用推荐设置" }),
+            h(Button, { size: "xs", onClick: applyRecommended, disabled: isBusy.value }, { default: () => "推荐设置" }),
             h(Button, { size: "xs", onClick: resetAll, disabled: isBusy.value }, { default: () => "恢复默认" })
           ])
         ]);
@@ -499,30 +584,52 @@ export async function activate(ctx) {
   const discovered = await ctx.storage.get(STORAGE_KEY_SECTIONS);
   allSections = mergeSections(discovered);
 
+  const storedSettings = await ctx.storage.get(STORAGE_KEY);
+
   state = ctx.vue.reactive({
-    settings: normalizeSettings(await ctx.storage.get(STORAGE_KEY), allSections),
+    settings: normalizeSettings(storedSettings, allSections),
     sections: [...allSections]
   });
 
   settingsDispose = ctx.ui.settings.define({
     title: "设置简化器",
-    description: "控制主应用设置页中各分组和子项的显示与隐藏，如果出现空白请先打开一次主应用的设置页",
+    description: "控制主应用设置页中各分组和子项的显示与隐藏，如果出现空白请点击「扫描」",
     component: createSettingsComponent(ctx)
   });
 
   if (styleDispose) { styleDispose(); styleDispose = null; }
   const css = generateCSS(state.settings, allSections);
+  lastCssText = css;
   if (css) { styleDispose = ctx.css.inject(css, { id: "settings-simplifier-style" }); }
-  updateAnchorBar(state.settings, allSections);
+  updateNavItems(state.settings, allSections);
   updateDividers(state.settings);
 
-  domObserver = ctx.dom.observe('.settings-anchor-bar', () => {
-    updateAnchorBar(state.settings, allSections);
+  let lastNavCount = 0;
+  domObserver = ctx.dom.observe('.settings-nav-item', () => {
+    const count = document.querySelectorAll('.settings-nav-item').length;
+    if (count === 0 && lastNavCount !== 0) {
+      lastNavCount = 0;
+      return;
+    }
+    if (count !== lastNavCount) {
+      lastNavCount = count;
+      updateNavItems(state.settings, allSections);
+      fixActiveSection();
+    }
   });
 
   sectionObserver = ctx.dom.observe('[data-section], .settings-item', () => {
+    const elementId = `echo-plugin-style-${ctx.id}-settings-simplifier-style`;
+    if (lastCssText && !document.getElementById(elementId)) {
+      if (styleDispose) { styleDispose(); styleDispose = null; }
+      styleDispose = ctx.css.inject(lastCssText, { id: "settings-simplifier-style" });
+    }
+    updateNavItems(state.settings, allSections);
+    fixActiveSection();
     delayedScan(ctx);
   });
+
+  fixActiveSection();
 
   if (document.querySelector('[data-section]')) {
     delayedScan(ctx);
@@ -532,7 +639,7 @@ export async function activate(ctx) {
 export function deactivate() {
   if (scanTimer) { clearTimeout(scanTimer); scanTimer = null; }
 
-  document.querySelectorAll('.settings-anchor-item, [data-settings-item], .settings-divider').forEach(el => {
+  document.querySelectorAll('.settings-nav-item, [data-settings-item], .settings-divider').forEach(el => {
     el.style.display = '';
     el.removeAttribute('data-settings-item');
   });
