@@ -21994,17 +21994,19 @@ function createSkinComponent(ctx) {
         if (!isPlaying.value || document.hidden) amllPlayer.value?.pause();
         requestFrame();
       });
-      let coverAnimating = false;
+      let coverAnim = null;
       watch(isPlaying, (playing) => {
         const player = amllPlayer.value;
         if (playing && !document.hidden) player?.resume();
         else player?.pause();
         requestFrame();
         const img = coverImgRef.value;
-        if (img && !coverAnimating) {
-          coverAnimating = true;
-          img.getAnimations().forEach((a2) => a2.cancel());
-          const anim = playing ? img.animate(
+        if (img) {
+          if (coverAnim) {
+            coverAnim.cancel();
+            coverAnim = null;
+          }
+          coverAnim = playing ? img.animate(
             [
               { transform: "scale(0.75)", offset: 0 },
               { transform: "scale(1.1)", offset: 0.6 },
@@ -22018,8 +22020,8 @@ function createSkinComponent(ctx) {
             ],
             { duration: 500, easing: "ease", fill: "forwards" }
           );
-          anim.finished.then(() => {
-            coverAnimating = false;
+          coverAnim.finished.then(() => {
+            coverAnim = null;
           });
         }
       });

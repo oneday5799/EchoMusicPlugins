@@ -237,7 +237,7 @@ export function createSkinComponent(ctx) {
       })
 
       // Cover animation tracking
-      let coverAnimating = false
+      let coverAnim = null
 
       watch(isPlaying, (playing) => {
         const player = amllPlayer.value
@@ -247,10 +247,9 @@ export function createSkinComponent(ctx) {
 
         // Cover scale animation (matching reference)
         const img = coverImgRef.value
-        if (img && !coverAnimating) {
-          coverAnimating = true
-          img.getAnimations().forEach((a) => a.cancel())
-          const anim = playing
+        if (img) {
+          if (coverAnim) { coverAnim.cancel(); coverAnim = null }
+          coverAnim = playing
             ? img.animate(
                 [
                   { transform: 'scale(0.75)', offset: 0 },
@@ -266,7 +265,7 @@ export function createSkinComponent(ctx) {
                 ],
                 { duration: 500, easing: 'ease', fill: 'forwards' },
               )
-          anim.finished.then(() => { coverAnimating = false })
+          coverAnim.finished.then(() => { coverAnim = null })
         }
       })
 
