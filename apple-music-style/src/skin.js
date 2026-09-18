@@ -669,7 +669,13 @@ export function createSkinComponent(ctx) {
             ]),
           ]),
           // Right panel - AMLL lyrics
-          h('div', { class: 'amms-right-panel' }, [
+          h('div', {
+            class: 'amms-right-panel',
+            style: {
+              '--amll-font-scale': settings.value.fontScale / 100,
+              '--amll-font-weight': settings.value.fontWeight,
+            },
+          }, [
             h('div', {
               class: 'amms-lyrics-container',
             }, [
