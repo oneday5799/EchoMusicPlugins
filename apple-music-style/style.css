@@ -1,75 +1,744 @@
-body.applemusic-overlay-open {
+/* node_modules/@applemusic-like-lyrics/core/dist/style.css */
+.amll-lyric-player {
+  width: 100%;
+  max-width: 100%;
+  height: 100%;
+  color: var(--amll-lp-color, white);
+  contain: strict;
+  mix-blend-mode: plus-lighter;
+  font-size: var(--amll-lp-font-size, max(max(5vh, 2.5vw), 12px));
   overflow: hidden;
+  @media screen and (width <= 768px) {
+    font-size: var(--amll-lp-font-size, max(8vw, 12px));
+  }
+  &.dom {
+    --amll-lp-line-width-aspect: .8;
+    --amll-lp-line-padding-x: 1em;
+    --amll-lp-bg-line-scale: .7;
+    user-select: none;
+    box-sizing: content-box;
+    z-index: 1;
+    line-height: 1.2;
+  }
 }
-
-.applemusic-bridge-page {
-  position: fixed;
-  inset: 0;
-  z-index: 4500;
-  width: 100vw;
-  height: 100vh;
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-  background: #000;
-  -webkit-app-region: no-drag;
+@media screen and (width <= 768px) {
+  .amll-lyric-player {
+    --amll-lp-line-width-aspect: 1;
+    --amll-lp-line-padding-x: 0;
+  }
 }
+.FmKaba_lyricLineWrapper {
+  box-sizing: border-box;
+  width: 100%;
+  padding: .4em var(--lyric-line-padding-x);
+  will-change:
+    transform,
+    opacity,
+    filter;
+  border-radius: .25em;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: .3em;
+  transition:
+    opacity .4s,
+    filter .4s,
+    background-color .25s;
+  display: flex;
+  position: absolute;
+  top: 0;
+  left: 0;
+  &:hover {
+    background-color: var(--amll-lp-hover-bg-color, #fff1);
+  }
+  &:active {
+    background-color: var(--amll-lp-hover-bg-color, #ffffff05);
+  }
+}
+.FmKaba_lyricLine {
+  box-sizing: border-box;
+  width: var(--amll-lp-width, 100%);
+  min-width: var(--amll-lp-width, 100%);
+  max-width: var(--amll-lp-width, 100%);
+  contain: layout style paint;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 40px;
+  backface-visibility: hidden;
+  transform-origin: 0;
+  will-change:
+    transform,
+    filter,
+    opacity;
+  height: fit-content;
+  margin: -.2em;
+  padding: .2em;
+  transition: box-shadow .25s;
+  position: relative;
+}
+.FmKaba_lyricDuetLine {
+  text-align: right;
+  transform-origin: 100%;
+}
+.FmKaba_lyricMainLine {
+  contain: layout style;
+  margin: -1em;
+  padding: 1em;
+  transition: opacity .3s .1s;
+  & span {
+    text-align: start;
+    vertical-align: bottom;
+    display: inline-block;
+  }
+  & .FmKaba_romanWord {
+    padding-inline-end: .3em;
+    font-size: .5em;
+    line-height: 1em;
+    display: flex;
+  }
+  & .FmKaba_rubyWord {
+    justify-content: center;
+    min-height: 1em;
+    font-size: .5em;
+    line-height: 1em;
+    display: flex;
+  }
+  & .FmKaba_wordWithRuby {
+    vertical-align: bottom;
+    flex-direction: column;
+    align-items: center;
+    display: inline-flex;
+  }
+  & .FmKaba_wordBody {
+    flex-direction: column;
+    align-items: center;
+    display: flex;
+  }
+  & > span,
+  & span.FmKaba_emphasizeWrapper {
+    white-space: pre-wrap;
+    vertical-align: bottom;
+    will-change: transform, text-shadow;
+    contain: layout style;
+    margin: -1em;
+    padding: 1em;
+    display: inline-block;
+    &.FmKaba_emphasize,
+    & span.FmKaba_emphasize {
+      backface-visibility: hidden;
+      margin: -1em;
+      padding: 1em;
+      & > span {
+        will-change: transform, text-shadow;
+        backface-visibility: hidden;
+        margin: -1em;
+        padding: 1em;
+      }
+    }
+  }
+}
+.FmKaba_lyricBgLine {
+  opacity: .4;
+  font-size: max(calc(1em * var(--amll-lp-bg-line-scale, .7)), 10px);
+  transition: background-color .25s, box-shadow .25s;
+  & .FmKaba_lyricMainLine {
+    padding: 1.2em 1em;
+  }
+  &.FmKaba_active {
+    opacity: .4;
+    transition: background-color .25s, box-shadow .25s;
+  }
+}
+.FmKaba_lyricSubLine {
+  opacity: .3;
+  font-size: max(.5em, 10px);
+  line-height: 1.5em;
+  transition: opacity .2s .25s;
+  @supports (mix-blend-mode: plus-lighter) {
+    opacity: .3;
+  }
+}
+.FmKaba_bottomLine {
+  cursor: default;
+  padding-top: 0;
+  padding-bottom: 0;
+  line-height: 1.8em;
+  &:empty {
+    height: 0;
+    margin: 0;
+    padding: 0;
+    display: none;
+  }
+}
+.FmKaba_bgWrapper {
+  top: 100%;
+  left: var(--lyric-line-padding-x);
+  z-index: -1;
+  align-items: inherit;
+  width: calc(100% - var(--lyric-line-padding-x) * 2);
+  visibility: visible;
+  pointer-events: auto;
+  opacity: 0;
+  transform-origin: 0 0;
+  flex-direction: column;
+  transition: opacity .3s;
+  display: flex;
+  position: absolute;
+}
+.FmKaba_bgWrapperTop {
+  transform-origin: 0 100%;
+  width: 100%;
+  margin-top: -999px;
+  position: relative;
+  top: auto;
+  bottom: auto;
+  left: 0;
+}
+.FmKaba_bgWrapperActive {
+  opacity: 1;
+  width: 100%;
+  position: relative;
+  top: auto;
+  bottom: auto;
+  left: 0;
+}
+.FmKaba_bgWrapperHidden {
+  visibility: hidden;
+  pointer-events: none;
+}
+.FmKaba_interludeDots {
+  opacity: 0;
+  transform-origin: center;
+  gap: .25em;
+  width: fit-content;
+  height: clamp(.5em, 1vh, 3em);
+  padding: 2.5% .75em;
+  transition: opacity .25s;
+  display: flex;
+  position: absolute;
+  left: 0;
+  &.FmKaba_enabled {
+    opacity: 1;
+  }
+  & > * {
+    background-color: var(--amll-lp-color, white);
+    aspect-ratio: 1;
+    border-radius: 50%;
+    width: clamp(.5em, 1vh, 3em);
+    height: clamp(.5em, 1vh, 3em);
+    margin-right: 4px;
+    display: inline-block;
+  }
+  &.FmKaba_duet {
+    transform-origin: center;
+    right: 0;
+  }
+}
+.FmKaba_disableSpring > *,
+.FmKaba_disableSpring .FmKaba_lyricLine {
+  transition:
+    filter .25s,
+    transform .5s,
+    background-color .25s,
+    box-shadow .25s;
+}
+.FmKaba_tmpDisableTransition {
+  transition: none !important;
+}
+.amll-lyric-player {
+  --lyric-line-padding-x: 1em;
+  @media screen and (width <= 500px) {
+    --lyric-line-padding-x: 20px;
+  }
+  &:hover .FmKaba_lyricLine,
+  &:hover .FmKaba_lyricLineWrapper {
+    filter: unset !important;
+  }
+  &:not(.FmKaba_playing) .FmKaba_bgWrapper {
+    opacity: 1;
+    width: 100%;
+    position: relative;
+    top: auto;
+    bottom: auto;
+    left: 0;
+  }
+  &.FmKaba_hasDuetLine {
+    & .FmKaba_lyricLine:not(.FmKaba_lyricDuetLine) {
+      padding-right: 15%;
+    }
+    & .FmKaba_lyricDuetLine {
+      padding-left: 15%;
+    }
+    & .FmKaba_lyricLineWrapper:has(.FmKaba_lyricDuetLine) {
+      align-items: flex-end;
+      & .FmKaba_bgWrapper {
+        transform-origin: 100% 0;
+      }
+      & .FmKaba_bgWrapperTop {
+        transform-origin: 100% 100%;
+      }
+    }
+  }
+}
+/* Apple Music 风格播放页 - lyricsPage 皮肤样式 */
 
-.applemusic-bridge-frame {
-  display: block;
+/* ===== 根容器 ===== */
+.amms-root {
+  position: relative;
   width: 100%;
   height: 100%;
-  border: 0;
-  background: transparent;
+  overflow: hidden;
+  display: flex;
+  flex-direction: row;
+  font-family: 'Inter', "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
 }
 
-.applemusic-bridge-drag-strip {
-  position: fixed;
-  top: 0;
-  left: 64px;
-  right: 240px;
+/* ===== 模糊封面背景 ===== */
+.amms-blur-bg {
+  position: absolute;
+  inset: -60px;
+  z-index: 0;
+  background-size: cover;
+  background-position: center;
+  filter: blur(80px) saturate(1.2) brightness(0.65);
+  transform: scale(1.2);
+  transition: background-image 0.6s ease;
+}
+.amms-blur-bg::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.25);
+}
+
+/* ===== 左侧面板 ===== */
+.amms-left-panel {
+  position: relative;
   z-index: 1;
-  height: 48px;
-  background: transparent;
-  -webkit-app-region: drag;
-}
-
-.applemusic-bridge-loading {
+  width: 42%;
+  min-width: 320px;
   display: flex;
   flex-direction: column;
-  align-items: center;
+  padding: 24px 96px 28px;
+}
+.amms-left-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
   justify-content: center;
-  gap: 14px;
+}
+
+/* ===== 封面 ===== */
+.amms-cover-wrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  margin: 0 auto 96px;
+  flex-shrink: 0;
+}
+.amms-cover-img {
   width: 100%;
   height: 100%;
-  color: rgba(255, 255, 255, 0.66);
-  font-size: 13px;
-  background: #000;
+  object-fit: cover;
+  border-radius: 14px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45), 0 2px 8px rgba(0, 0, 0, 0.25);
+  transition: opacity 0.4s ease;
+  -webkit-user-drag: none;
+  user-select: none;
+}
+.amms-cover-placeholder {
+  width: 100%;
+  height: 100%;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 64px;
+  color: rgba(255, 255, 255, 0.25);
 }
 
-.applemusic-bridge-loading-text {
-  max-width: min(520px, calc(100vw - 48px));
-  text-align: center;
-  line-height: 1.6;
+/* ===== 歌曲信息 ===== */
+.amms-track-info {
+  width: 100%;
+  margin-bottom: 16px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.amms-track-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+.amms-track-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: #fff;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+}
+.amms-track-artist {
+  font-size: 22px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.8);
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
 }
 
-.applemusic-bridge-close {
+/* ===== 操作按钮 ===== */
+.amms-track-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.amms-action-btn {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.15);
+  color: rgba(255, 255, 255, 0.8);
+  transition: color 0.18s, background 0.18s;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: none;
+  cursor: pointer;
+}
+.amms-action-btn:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.25);
+}
+.amms-action-btn.active {
+  color: #fff;
+}
+.amms-action-btn svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* ===== 进度条 ===== */
+.amms-progress-section {
+  width: 100%;
+  margin-bottom: 6px;
+  flex-shrink: 0;
+}
+.amms-progress-track {
+  --bar-h: 12px;
+  --fill-h: var(--bar-h);
+  width: 100%;
+  height: var(--bar-h);
+  position: relative;
+  cursor: pointer;
+  margin-bottom: 14px;
+}
+.amms-progress-track::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: var(--fill-h);
+  transform: translateY(-50%);
+  border-radius: var(--fill-h);
+  background: rgba(255, 255, 255, 0.2);
+  transition: height 0.5s ease, border-radius 0.5s ease;
+}
+.amms-progress-track:hover::before {
+  height: calc(var(--bar-h) * 1.5);
+  border-radius: calc(var(--bar-h) * 1.5);
+}
+.amms-progress-fill {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  height: var(--fill-h);
+  transform: translateY(-50%);
+  background: #fff;
+  border-radius: var(--fill-h);
+  transition: height 0.5s ease;
+  pointer-events: none;
+  min-width: var(--fill-h);
+}
+.amms-progress-track:hover .amms-progress-fill {
+  height: calc(var(--bar-h) * 1.5);
+}
+.amms-progress-thumb {
+  display: none;
+}
+.amms-progress-times {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.amms-progress-time {
+  font-size: 12px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.5);
+  min-width: 36px;
+  font-variant-numeric: tabular-nums;
+}
+.amms-progress-time.right {
+  text-align: right;
+}
+
+/* ===== 音质按钮 ===== */
+.amms-quality-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  height: 34px;
-  padding: 0 16px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
-  color: rgba(255, 255, 255, 0.82);
-  font: inherit;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.15);
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 11px;
+  font-weight: 600;
   cursor: pointer;
-  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+  transition: background 0.18s, opacity 0.18s;
+  border: none;
+  position: relative;
+  opacity: 0;
+}
+.amms-quality-btn.has-quality {
+  opacity: 1;
+}
+.amms-quality-btn:hover {
+  background: rgba(255, 255, 255, 0.25);
 }
 
-.applemusic-bridge-close:hover {
-  border-color: rgba(255, 255, 255, 0.28);
-  background: rgba(255, 255, 255, 0.14);
-  color: #ffffff;
+/* ===== 播放控制 ===== */
+.amms-playback-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  flex-shrink: 0;
+}
+.amms-center-btns {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+}
+.amms-ctrl-btn {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.75);
+  transition: background 0.18s;
+  border: none;
+  cursor: pointer;
+  background: none;
+}
+.amms-ctrl-btn:hover {
+  background: rgba(255, 255, 255, 0.15);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.amms-ctrl-btn svg {
+  width: 28px;
+  height: 28px;
+}
+.amms-ctrl-btn.play-btn {
+  width: 72px;
+  height: 72px;
+  color: #fff;
+}
+.amms-ctrl-btn.play-btn svg {
+  width: 36px;
+  height: 36px;
+}
+.amms-ctrl-btn.small {
+  width: 48px;
+  height: 48px;
+  margin: 0 -13px;
+  color: rgba(255, 255, 255, 0.5);
+}
+.amms-ctrl-btn.small svg {
+  width: 22px;
+  height: 22px;
+}
+.amms-ctrl-btn.prev-next {
+  width: 72px;
+  height: 72px;
+}
+.amms-ctrl-btn.prev-next svg {
+  width: 42px;
+  height: 42px;
+}
+.amms-ctrl-btn.active {
+  color: #fff;
+}
+
+@keyframes amms-btn-press {
+  0% { transform: scale(1) }
+  100% { transform: scale(0.8) }
+}
+@keyframes amms-btn-hold {
+  0% { transform: scale(0.8) }
+  100% { transform: scale(0.9) }
+}
+@keyframes amms-btn-release {
+  0% { transform: scale(0.9) }
+  66.67% { transform: scale(1.1) }
+  100% { transform: scale(1) }
+}
+.amms-ctrl-btn.pressing { animation: amms-btn-press 0.2s ease forwards }
+.amms-ctrl-btn.holding { animation: amms-btn-hold 0.3s ease forwards }
+.amms-ctrl-btn.releasing { animation: amms-btn-release 0.3s ease forwards }
+
+/* ===== 右侧歌词面板 ===== */
+.amms-right-panel {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 40px 24px 0;
+  overflow: hidden;
+}
+
+/* ===== AMLL 歌词容器 ===== */
+.amms-lyrics-container {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 12%, black 88%, transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0%, black 12%, black 88%, transparent 100%);
+}
+.amms-amll-area {
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+
+/* ===== AMLL 样式覆盖 ===== */
+.amms-lyrics-container .amll-lyric-player {
+  --amll-lp-color: var(--amll-played-color, rgba(255, 255, 255, 0.98));
+  --amll-lp-bg-color: transparent;
+  --amll-lp-hover-bg-color: rgba(255, 255, 255, 0.08);
+  --amll-lp-font-size: clamp(24px, calc(4.2vh * var(--amll-font-scale, 1)), 52px);
+  --amll-lp-line-width-aspect: 0.86;
+  --amll-lp-line-padding-x: 0.35em;
+  --amll-lp-bg-line-scale: 0.74;
+  color: var(--amll-unplayed-color, rgba(255, 255, 255, 0.92));
+  mix-blend-mode: normal;
+  text-shadow: var(--amll-text-shadow, 0 2px 8px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.2));
+}
+
+.amms-lyrics-container .amll-lyric-player [class*="_lyricMainLine"] {
+  color: var(--amll-unplayed-color, rgba(255, 255, 255, 0.92));
+  font-weight: var(--amll-font-weight, 850);
+}
+.amms-lyrics-container .amll-lyric-player [class*="_lyricSubLine"] {
+  color: var(--amll-unplayed-color, rgba(255, 255, 255, 0.9));
+  opacity: var(--amll-sub-opacity, 0.56) !important;
+}
+.amms-lyrics-container .amll-lyric-player [class*="_lyricBgLine"] {
+  color: var(--amll-unplayed-color, rgba(255, 255, 255, 0.86));
+  opacity: var(--amll-bg-opacity, 0.46) !important;
+}
+.amms-lyrics-container .amll-lyric-player [class*="_lyricLine"][class*="_active"] [class*="_lyricMainLine"],
+.amms-lyrics-container .amll-lyric-player [class*="_lyricMainLine"][class*="_active"] {
+  color: var(--amll-played-color, #fff);
+}
+.amms-lyrics-container .amll-lyric-player [class*="_lyricLine"][class*="_active"] [class*="_lyricSubLine"] {
+  color: var(--amll-played-color, rgba(255, 255, 255, 0.94));
+}
+
+/* ===== 响应式 ===== */
+@media (max-width: 800px) {
+  .amms-left-panel {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    padding: 24px 24px 20px;
+  }
+  .amms-right-panel {
+    display: none;
+  }
+  .amms-cover-wrap {
+    width: min(260px, 70%);
+    margin-bottom: 16px;
+  }
+  .amms-track-title {
+    font-size: 18px;
+  }
+}
+
+/* ===== 设置面板样式 ===== */
+.amms-settings {
+  display: grid;
+  gap: 14px;
+  color: var(--color-text-main);
+}
+.amms-settings-row {
+  display: grid;
+  gap: 7px;
+}
+.amms-settings-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+.amms-settings-title {
+  font-size: 13px;
+  font-weight: 760;
+}
+.amms-settings-hint {
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.amms-settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* ===== 音质弹窗 ===== */
+.amms-quality-popup {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(255, 255, 255, 0.35);
+  border-radius: 12px;
+  padding: 4px 0;
+  min-width: 120px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.08), inset 0 0 0 0.5px rgba(255, 255, 255, 0.45);
+  backdrop-filter: blur(50px) saturate(200%);
+  -webkit-backdrop-filter: blur(50px) saturate(200%);
+  z-index: 100;
+}
+.amms-quality-popup-item {
+  padding: 7px 14px;
+  font-size: 12px;
+  color: rgba(0, 0, 0, 0.55);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+.amms-quality-popup-item:hover {
+  background: rgba(0, 0, 0, 0.05);
+  color: rgba(0, 0, 0, 0.9);
+}
+.amms-quality-popup-item.active {
+  color: #000;
+  font-weight: 500;
 }
