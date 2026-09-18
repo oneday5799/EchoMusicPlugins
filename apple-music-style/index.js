@@ -21995,6 +21995,7 @@ function createSkinComponent(ctx) {
         requestFrame();
       });
       let coverAnim = null;
+      let disposed = false;
       watch(isPlaying, (playing) => {
         const player = amllPlayer.value;
         if (playing && !document.hidden) player?.resume();
@@ -22021,7 +22022,8 @@ function createSkinComponent(ctx) {
             { duration: 500, easing: "ease", fill: "forwards" }
           );
           coverAnim.finished.then(() => {
-            coverAnim = null;
+            if (!disposed) coverAnim = null;
+          }).catch(() => {
           });
         }
       });
@@ -22142,12 +22144,22 @@ function createSkinComponent(ctx) {
         }
       };
       onMounted(() => {
+        disposed = false;
         initAmll();
+        const img = coverImgRef.value;
+        if (img) {
+          img.style.transform = isPlaying.value ? "scale(1)" : "scale(0.75)";
+        }
         document.addEventListener("mousemove", handleMouseMove);
         document.addEventListener("mouseup", handleMouseUp);
         document.addEventListener("click", closeQualityPopup);
       });
       onUnmounted(() => {
+        disposed = true;
+        if (coverAnim) {
+          coverAnim.cancel();
+          coverAnim = null;
+        }
         disposeAmll();
         document.removeEventListener("mousemove", handleMouseMove);
         document.removeEventListener("mouseup", handleMouseUp);

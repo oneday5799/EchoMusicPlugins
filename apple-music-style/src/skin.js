@@ -238,6 +238,7 @@ export function createSkinComponent(ctx) {
 
       // Cover animation tracking
       let coverAnim = null
+      let disposed = false
 
       watch(isPlaying, (playing) => {
         const player = amllPlayer.value
@@ -265,7 +266,7 @@ export function createSkinComponent(ctx) {
                 ],
                 { duration: 500, easing: 'ease', fill: 'forwards' },
               )
-          coverAnim.finished.then(() => { coverAnim = null })
+          coverAnim.finished.then(() => { if (!disposed) coverAnim = null }).catch(() => {})
         }
       })
 
@@ -409,13 +410,21 @@ export function createSkinComponent(ctx) {
 
       // --- Lifecycle ---
       onMounted(() => {
+        disposed = false
         initAmll()
+        // Restore cover scale based on current play state
+        const img = coverImgRef.value
+        if (img) {
+          img.style.transform = isPlaying.value ? 'scale(1)' : 'scale(0.75)'
+        }
         document.addEventListener('mousemove', handleMouseMove)
         document.addEventListener('mouseup', handleMouseUp)
         document.addEventListener('click', closeQualityPopup)
       })
 
       onUnmounted(() => {
+        disposed = true
+        if (coverAnim) { coverAnim.cancel(); coverAnim = null }
         disposeAmll()
         document.removeEventListener('mousemove', handleMouseMove)
         document.removeEventListener('mouseup', handleMouseUp)
