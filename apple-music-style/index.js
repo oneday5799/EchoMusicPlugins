@@ -22410,74 +22410,104 @@ var DEFAULT_SETTINGS = {
   showRomanization: false
 };
 var SKIN_KEY = JSON.stringify(["apple-music-style", "apple-music"]);
-function createSettingsComponent(ctx) {
+var SETTINGS_CSS = `
+.amms-settings { display: grid; gap: 14px; color: var(--color-text-main); }
+.amms-settings-row { display: grid; gap: 7px; }
+.amms-settings-line { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.amms-settings-title { font-size: 13px; font-weight: 760; }
+.amms-settings-hint { color: var(--color-text-secondary); font-size: 12px; line-height: 1.45; }
+.amms-settings-actions { display: flex; justify-content: flex-end; gap: 8px; }
+`;
+function buildSettingsUI(h2, Button, Slider, Switch, getCurrent, onPatch) {
+  const slider = (label, key, min, max, hint, formatter = (v2) => String(v2)) => h2("div", { class: "amms-settings-row" }, [
+    h2("div", { class: "amms-settings-line" }, [
+      h2("span", { class: "amms-settings-title" }, label),
+      h2("span", { class: "amms-settings-hint" }, formatter(getCurrent()[key]))
+    ]),
+    h2(Slider, {
+      modelValue: getCurrent()[key],
+      min,
+      max,
+      step: 1,
+      "onUpdate:modelValue": (value) => onPatch({ [key]: Number(value) })
+    }),
+    hint ? h2("div", { class: "amms-settings-hint" }, hint) : null
+  ]);
+  const toggle = (label, key, hint) => h2("div", { class: "amms-settings-row" }, [
+    h2("label", { class: "amms-settings-line" }, [
+      h2("span", { class: "amms-settings-title" }, label),
+      h2(Switch, {
+        modelValue: Boolean(getCurrent()[key]),
+        "onUpdate:modelValue": (value) => onPatch({ [key]: Boolean(value) })
+      })
+    ]),
+    hint ? h2("div", { class: "amms-settings-hint" }, hint) : null
+  ]);
+  return h2("div", { class: "amms-settings" }, [
+    toggle("\u589E\u5F3A\u5BF9\u6BD4\u5EA6", "enhanceContrast", "\u4FDD\u7559 AMLL \u5C42\u6B21\u611F\uFF0C\u540C\u65F6\u63D0\u9AD8\u5C01\u9762\u80CC\u666F\u4E0A\u7684\u6587\u5B57\u53EF\u8BFB\u6027\u3002"),
+    toggle("\u6B4C\u8BCD\u7F29\u653E", "enableScale", "\u5F00\u542F\u5F53\u524D\u884C\u805A\u7126\u7F29\u653E\u6548\u679C\u3002"),
+    toggle("\u5F39\u7C27\u52A8\u753B", "enableSpring", "\u5F00\u542F\u6B4C\u8BCD\u6EDA\u52A8\u65F6\u7684\u5F39\u7C27\u56DE\u5F39\u52A8\u753B\u3002"),
+    toggle("\u6B4C\u8BCD\u6A21\u7CCA", "enableBlur", "\u5F00\u542F\u8FDC\u79BB\u7126\u70B9\u884C\u7684\u6A21\u7CCA\u6548\u679C\u3002"),
+    toggle("\u663E\u793A\u7FFB\u8BD1", "showTranslation", "\u663E\u793A\u6B4C\u8BCD\u7684\u4E2D\u6587\u7FFB\u8BD1\u3002"),
+    toggle("\u663E\u793A\u6CE8\u97F3", "showRomanization", "\u663E\u793A\u6B4C\u8BCD\u7684\u6CE8\u97F3\u3002"),
+    slider("\u5B57\u4F53\u7F29\u653E", "fontScale", 50, 200, "\u8C03\u6574\u6B4C\u8BCD\u5B57\u4F53\u5927\u5C0F\u3002", (v2) => `${v2}%`),
+    slider("\u5B57\u4F53\u7C97\u7EC6", "fontWeight", 300, 900, "\u8C03\u6574\u6B4C\u8BCD\u5B57\u91CD\u3002", (v2) => String(v2)),
+    slider("\u5BF9\u9F50\u4F4D\u7F6E", "alignPosition", 0, 100, "\u5F53\u524D\u6B4C\u8BCD\u884C\u5728\u9875\u9762\u9AD8\u5EA6\u4E2D\u7684\u4F4D\u7F6E\u3002", (v2) => `${v2}%`),
+    slider("\u9010\u5B57\u6E10\u53D8", "fadeWidth", 0, 100, "\u63A7\u5236\u9010\u5B57\u9AD8\u4EAE\u8FB9\u7F18\u7684\u67D4\u548C\u5BBD\u5EA6\u3002", (v2) => `${v2}%`),
+    h2("div", { class: "amms-settings-actions" }, [
+      h2(
+        Button,
+        { variant: "outline", size: "xs", onClick: () => onPatch(DEFAULT_SETTINGS) },
+        { default: () => "\u6062\u590D\u9ED8\u8BA4" }
+      )
+    ])
+  ]);
+}
+function createGlobalSettingsComponent(ctx) {
+  const { defineComponent, h: h2, defineAsyncComponent, computed } = ctx.vue;
+  const Button = defineAsyncComponent(ctx.ui.components.Button);
+  const Slider = defineAsyncComponent(ctx.ui.components.Slider);
+  const Switch = defineAsyncComponent(ctx.ui.components.Switch);
+  return defineComponent({
+    name: "AppleMusicStyleGlobalSettings",
+    setup() {
+      const store = ctx.stores.settings;
+      const getCurrent = () => ({
+        ...DEFAULT_SETTINGS,
+        ...store.lyricsPageSkinConfigs[SKIN_KEY] ?? {}
+      });
+      const onPatch = (data) => store.patchLyricSkinConfig(SKIN_KEY, { ...getCurrent(), ...data });
+      return () => buildSettingsUI(h2, Button, Slider, Switch, getCurrent, onPatch);
+    }
+  });
+}
+function createSkinDrawerSettingsComponent(ctx) {
   const { defineComponent, h: h2, defineAsyncComponent } = ctx.vue;
   const Button = defineAsyncComponent(ctx.ui.components.Button);
   const Slider = defineAsyncComponent(ctx.ui.components.Slider);
   const Switch = defineAsyncComponent(ctx.ui.components.Switch);
   return defineComponent({
-    name: "AppleMusicStyleSettings",
+    name: "AppleMusicStyleSkinSettings",
     setup() {
       const skin = ctx.ui.lyricsPage.useSkin();
-      const current = (key) => skin.settings.value?.[key] ?? DEFAULT_SETTINGS[key];
-      const slider = (label, key, min, max, hint, formatter = (v2) => String(v2)) => h2("div", { class: "amms-settings-row" }, [
-        h2("div", { class: "amms-settings-line" }, [
-          h2("span", { class: "amms-settings-title" }, label),
-          h2("span", { class: "amms-settings-hint" }, formatter(current(key)))
-        ]),
-        h2(Slider, {
-          modelValue: current(key),
-          min,
-          max,
-          step: 1,
-          "onUpdate:modelValue": (value) => {
-            skin.patch({ [key]: Number(value) });
-          }
-        }),
-        hint ? h2("div", { class: "amms-settings-hint" }, hint) : null
-      ]);
-      const toggle = (label, key, hint) => h2("div", { class: "amms-settings-row" }, [
-        h2("label", { class: "amms-settings-line" }, [
-          h2("span", { class: "amms-settings-title" }, label),
-          h2(Switch, {
-            modelValue: Boolean(current(key)),
-            "onUpdate:modelValue": (value) => {
-              skin.patch({ [key]: Boolean(value) });
-            }
-          })
-        ]),
-        hint ? h2("div", { class: "amms-settings-hint" }, hint) : null
-      ]);
-      return () => h2("div", { class: "amms-settings" }, [
-        toggle("\u589E\u5F3A\u5BF9\u6BD4\u5EA6", "enhanceContrast", "\u4FDD\u7559 AMLL \u5C42\u6B21\u611F\uFF0C\u540C\u65F6\u63D0\u9AD8\u5C01\u9762\u80CC\u666F\u4E0A\u7684\u6587\u5B57\u53EF\u8BFB\u6027\u3002"),
-        toggle("\u6B4C\u8BCD\u7F29\u653E", "enableScale", "\u5F00\u542F\u5F53\u524D\u884C\u805A\u7126\u7F29\u653E\u6548\u679C\u3002"),
-        toggle("\u5F39\u7C27\u52A8\u753B", "enableSpring", "\u5F00\u542F\u6B4C\u8BCD\u6EDA\u52A8\u65F6\u7684\u5F39\u7C27\u56DE\u5F39\u52A8\u753B\u3002"),
-        toggle("\u6B4C\u8BCD\u6A21\u7CCA", "enableBlur", "\u5F00\u542F\u8FDC\u79BB\u7126\u70B9\u884C\u7684\u6A21\u7CCA\u6548\u679C\u3002"),
-        toggle("\u663E\u793A\u7FFB\u8BD1", "showTranslation", "\u663E\u793A\u6B4C\u8BCD\u7684\u4E2D\u6587\u7FFB\u8BD1\u3002"),
-        toggle("\u663E\u793A\u6CE8\u97F3", "showRomanization", "\u663E\u793A\u6B4C\u8BCD\u7684\u6CE8\u97F3\u3002"),
-        slider("\u5B57\u4F53\u7F29\u653E", "fontScale", 50, 200, "\u8C03\u6574\u6B4C\u8BCD\u5B57\u4F53\u5927\u5C0F\u3002", (v2) => `${v2}%`),
-        slider("\u5B57\u4F53\u7C97\u7EC6", "fontWeight", 300, 900, "\u8C03\u6574\u6B4C\u8BCD\u5B57\u91CD\u3002", (v2) => String(v2)),
-        slider("\u5BF9\u9F50\u4F4D\u7F6E", "alignPosition", 0, 100, "\u5F53\u524D\u6B4C\u8BCD\u884C\u5728\u9875\u9762\u9AD8\u5EA6\u4E2D\u7684\u4F4D\u7F6E\u3002", (v2) => `${v2}%`),
-        slider("\u9010\u5B57\u6E10\u53D8", "fadeWidth", 0, 100, "\u63A7\u5236\u9010\u5B57\u9AD8\u4EAE\u8FB9\u7F18\u7684\u67D4\u548C\u5BBD\u5EA6\u3002", (v2) => `${v2}%`),
-        h2("div", { class: "amms-settings-actions" }, [
-          h2(
-            Button,
-            {
-              variant: "outline",
-              size: "xs",
-              onClick: () => skin.patch(DEFAULT_SETTINGS)
-            },
-            { default: () => "\u6062\u590D\u9ED8\u8BA4" }
-          )
-        ])
-      ]);
+      const getCurrent = () => skin.settings.value || {};
+      const onPatch = (data) => skin.patch(data);
+      return () => buildSettingsUI(h2, Button, Slider, Switch, getCurrent, onPatch);
     }
   });
 }
 async function activate(ctx) {
+  let settingsStyleDispose = null;
+  let settingsDispose = null;
   let skinDispose = null;
   let stopLyricWatch = null;
   const skinComponent = createSkinComponent(ctx);
+  settingsStyleDispose = ctx.css.inject(SETTINGS_CSS, { id: "apple-music-style-settings" });
+  settingsDispose = ctx.ui.settings.define({
+    title: "Apple Music Style",
+    description: "\u8C03\u6574\u6B4C\u8BCD\u5B57\u4F53\u3001\u52A8\u753B\u6548\u679C\u548C\u5E03\u5C40\u8BBE\u7F6E\u3002",
+    component: createGlobalSettingsComponent(ctx)
+  });
   skinDispose = ctx.ui.lyricsPage.register({
     id: "apple-music",
     title: "Apple Music Style",
@@ -22487,7 +22517,7 @@ async function activate(ctx) {
     preview: preview_default,
     settings: {
       defaults: DEFAULT_SETTINGS,
-      component: createSettingsComponent(ctx),
+      component: createSkinDrawerSettingsComponent(ctx),
       validate: (values) => {
         if (values && typeof values !== "object") return false;
         return true;
@@ -22512,8 +22542,12 @@ async function activate(ctx) {
   ctx.dispose(() => {
     stopLyricWatch?.();
     skinDispose?.();
+    settingsDispose?.();
+    settingsStyleDispose?.();
     stopLyricWatch = null;
     skinDispose = null;
+    settingsDispose = null;
+    settingsStyleDispose = null;
   });
 }
 function deactivate() {
