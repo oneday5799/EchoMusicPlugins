@@ -3,6 +3,7 @@
 // 左侧封面+控制，右侧 AMLL 渲染歌词。
 
 import { createSkinComponent } from './skin.js'
+import preview from './preview.js'
 
 export const DEFAULT_SETTINGS = {
   enhanceContrast: false,
@@ -90,7 +91,7 @@ function createSettingsComponent(ctx) {
   })
 }
 
-export function activate(ctx) {
+export async function activate(ctx) {
   let skinDispose = null
   let stopLyricWatch = null
 
@@ -102,6 +103,7 @@ export function activate(ctx) {
     component: skinComponent,
     titlebar: 'host',
     tools: 'host',
+    preview,
     settings: {
       defaults: DEFAULT_SETTINGS,
       component: createSettingsComponent(ctx),
