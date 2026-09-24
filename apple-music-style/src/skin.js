@@ -80,6 +80,7 @@ export function createSkinComponent(ctx) {
       let lastSetTimeAt = 0
       let settleUntil = 0
       let lastAppliedTimeMs = Number.NaN
+      let disposed = false
 
       // Progress bar state
       const seeking = ref(false)
@@ -98,6 +99,16 @@ export function createSkinComponent(ctx) {
       const qualityOptions = computed(() => state.value.qualityOptions || [])
       const hasCloudSource = computed(() => state.value.hasCloudSource)
       const lyrics = computed(() => state.value.lyrics)
+
+      const readTimelineMs = () => {
+        if (disposed) return null
+        try {
+          const timelineMs = Number(props.page.lyrics.getTimelineMs())
+          return Number.isFinite(timelineMs) ? timelineMs : null
+        } catch {
+          return null
+        }
+      }
 
       const trackTitle = computed(() => {
         const raw = track.value.name || track.value.title || ''
@@ -144,7 +155,7 @@ export function createSkinComponent(ctx) {
       // --- AMLL lifecycle ---
       const rafLoop = (timestamp) => {
         rafId = null
-        if (document.hidden) {
+        if (disposed || document.hidden) {
           lastFrameTime = 0
           return
         }
@@ -157,9 +168,9 @@ export function createSkinComponent(ctx) {
         lastFrameTime = timestamp
         const player = amllPlayer.value
         if (player) {
-          const timelineMs = currentTime.value * 1000
+          const timelineMs = readTimelineMs()
           if (
-            Number.isFinite(timelineMs) &&
+            timelineMs !== null &&
             lastAppliedTimeMs !== timelineMs &&
             timestamp - lastSetTimeAt >= SET_TIME_INTERVAL
           ) {
@@ -177,7 +188,7 @@ export function createSkinComponent(ctx) {
       }
 
       const requestFrame = () => {
-        if (!amllPlayer.value || document.hidden) return
+        if (disposed || !amllPlayer.value || document.hidden) return
         settleUntil = performance.now() + 1000
         if (rafId !== null) return
         lastFrameTime = 0
@@ -185,6 +196,7 @@ export function createSkinComponent(ctx) {
       }
 
       const handleVisibilityChange = () => {
+        if (disposed) return
         if (document.hidden) {
           if (rafId !== null) cancelAnimationFrame(rafId)
           rafId = null
@@ -192,18 +204,23 @@ export function createSkinComponent(ctx) {
           amllPlayer.value?.pause()
         } else {
           if (isPlaying.value) amllPlayer.value?.resume()
+          lastAppliedTimeMs = Number.NaN
+          lastSetTimeAt = 0
           requestFrame()
         }
       }
 
       const initAmll = () => {
         const host = playerAreaRef.value
-        if (!host || amllPlayer.value) return
+        const timelineMs = readTimelineMs()
+        if (!host || amllPlayer.value || timelineMs === null) return
         const player = new CoreLyricPlayer()
         host.appendChild(player.getElement())
         player.setOverscanPx(OVERSCAN_PX)
-        player.setLyricLines(amllLines.value, currentTime.value * 1000)
-        if (isPlaying.value) player.resume()
+        player.setLyricLines(amllLines.value, timelineMs)
+        lastAppliedTimeMs = Number.NaN
+        lastSetTimeAt = 0
+        if (isPlaying.value && !document.hidden) player.resume()
         else player.pause()
         amllPlayer.value = player
         document.addEventListener('visibilitychange', handleVisibilityChange)
@@ -230,15 +247,19 @@ export function createSkinComponent(ctx) {
       watch(amllLines, (lines) => {
         const key = getLinesKey(lines)
         if (key === lastSetLinesKey) return
+        const player = amllPlayer.value
+        const timelineMs = readTimelineMs()
+        if (!player || timelineMs === null) return
+        player.setLyricLines(lines, timelineMs)
         lastSetLinesKey = key
-        amllPlayer.value?.setLyricLines(lines, currentTime.value * 1000)
-        if (!isPlaying.value || document.hidden) amllPlayer.value?.pause()
+        lastAppliedTimeMs = Number.NaN
+        lastSetTimeAt = 0
+        if (!isPlaying.value || document.hidden) player.pause()
         requestFrame()
       })
 
       // Cover animation tracking
       let coverAnim = null
-      let disposed = false
 
       watch(isPlaying, (playing) => {
         const player = amllPlayer.value

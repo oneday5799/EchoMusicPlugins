@@ -21864,6 +21864,7 @@ function createSkinComponent(ctx) {
       let lastSetTimeAt = 0;
       let settleUntil = 0;
       let lastAppliedTimeMs = Number.NaN;
+      let disposed = false;
       const seeking = ref(false);
       const hoverStartTime = ref(0);
       const state = computed(() => props.page.state.value);
@@ -21878,6 +21879,15 @@ function createSkinComponent(ctx) {
       const qualityOptions = computed(() => state.value.qualityOptions || []);
       const hasCloudSource = computed(() => state.value.hasCloudSource);
       const lyrics = computed(() => state.value.lyrics);
+      const readTimelineMs = () => {
+        if (disposed) return null;
+        try {
+          const timelineMs = Number(props.page.lyrics.getTimelineMs());
+          return Number.isFinite(timelineMs) ? timelineMs : null;
+        } catch {
+          return null;
+        }
+      };
       const trackTitle = computed(() => {
         const raw = track.value.name || track.value.title || "";
         if (!raw) return "\u672A\u77E5\u6B4C\u66F2";
@@ -21913,7 +21923,7 @@ function createSkinComponent(ctx) {
       };
       const rafLoop = (timestamp) => {
         rafId = null;
-        if (document.hidden) {
+        if (disposed || document.hidden) {
           lastFrameTime = 0;
           return;
         }
@@ -21926,8 +21936,8 @@ function createSkinComponent(ctx) {
         lastFrameTime = timestamp;
         const player = amllPlayer.value;
         if (player) {
-          const timelineMs = currentTime.value * 1e3;
-          if (Number.isFinite(timelineMs) && lastAppliedTimeMs !== timelineMs && timestamp - lastSetTimeAt >= SET_TIME_INTERVAL) {
+          const timelineMs = readTimelineMs();
+          if (timelineMs !== null && lastAppliedTimeMs !== timelineMs && timestamp - lastSetTimeAt >= SET_TIME_INTERVAL) {
             player.setCurrentTime(timelineMs);
             lastAppliedTimeMs = timelineMs;
             lastSetTimeAt = timestamp;
@@ -21941,13 +21951,14 @@ function createSkinComponent(ctx) {
         }
       };
       const requestFrame = () => {
-        if (!amllPlayer.value || document.hidden) return;
+        if (disposed || !amllPlayer.value || document.hidden) return;
         settleUntil = performance.now() + 1e3;
         if (rafId !== null) return;
         lastFrameTime = 0;
         rafId = requestAnimationFrame(rafLoop);
       };
       const handleVisibilityChange = () => {
+        if (disposed) return;
         if (document.hidden) {
           if (rafId !== null) cancelAnimationFrame(rafId);
           rafId = null;
@@ -21955,17 +21966,22 @@ function createSkinComponent(ctx) {
           amllPlayer.value?.pause();
         } else {
           if (isPlaying.value) amllPlayer.value?.resume();
+          lastAppliedTimeMs = Number.NaN;
+          lastSetTimeAt = 0;
           requestFrame();
         }
       };
       const initAmll = () => {
         const host = playerAreaRef.value;
-        if (!host || amllPlayer.value) return;
+        const timelineMs = readTimelineMs();
+        if (!host || amllPlayer.value || timelineMs === null) return;
         const player = new DomLyricPlayer();
         host.appendChild(player.getElement());
         player.setOverscanPx(OVERSCAN_PX);
-        player.setLyricLines(amllLines.value, currentTime.value * 1e3);
-        if (isPlaying.value) player.resume();
+        player.setLyricLines(amllLines.value, timelineMs);
+        lastAppliedTimeMs = Number.NaN;
+        lastSetTimeAt = 0;
+        if (isPlaying.value && !document.hidden) player.resume();
         else player.pause();
         amllPlayer.value = player;
         document.addEventListener("visibilitychange", handleVisibilityChange);
@@ -21989,13 +22005,17 @@ function createSkinComponent(ctx) {
       watch(amllLines, (lines) => {
         const key = getLinesKey(lines);
         if (key === lastSetLinesKey) return;
+        const player = amllPlayer.value;
+        const timelineMs = readTimelineMs();
+        if (!player || timelineMs === null) return;
+        player.setLyricLines(lines, timelineMs);
         lastSetLinesKey = key;
-        amllPlayer.value?.setLyricLines(lines, currentTime.value * 1e3);
-        if (!isPlaying.value || document.hidden) amllPlayer.value?.pause();
+        lastAppliedTimeMs = Number.NaN;
+        lastSetTimeAt = 0;
+        if (!isPlaying.value || document.hidden) player.pause();
         requestFrame();
       });
       let coverAnim = null;
-      let disposed = false;
       watch(isPlaying, (playing) => {
         const player = amllPlayer.value;
         if (playing && !document.hidden) player?.resume();
