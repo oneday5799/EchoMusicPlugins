@@ -199,7 +199,10 @@ test("plugin package declares and documents spectrum features", async () => {
   );
 
   assert.equal(manifest.capabilities.audioSpectrum, true);
+  assert.equal(manifest.version, "1.2.2");
+  assert.equal(manifest.requires.echoMusicVersion, ">=2.3.2-beta.7");
   assert.match(manifest.description, /雾状/);
+  assert.match(readme, />=2\.3\.2-beta\.7/);
   assert.match(readme, /雾化柔度/);
   assert.match(readme, /中心频谱/);
   assert.match(source, /中心频谱/);

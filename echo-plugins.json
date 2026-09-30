@@ -402,7 +402,7 @@
         "webui"
       ]
     },
-	{
+    {
       "id": "taskbar-lyric-with-spectrum-visualizer",
       "name": "任务栏歌词+频谱",
       "description": "在任务栏上方显示当前歌词和专辑封面的透明浮窗,自动检测任务栏位置并贴靠,实现了频谱功能,使用前请先安装频谱可视化",
@@ -414,14 +414,14 @@
         "floating-window",
         "lyrics",
         "lyric-effects",
-		"audio",
+        "audio",
         "spectrum",
         "player-bar",
         "mini-player",
         "lyrics"
       ]
     },
-	{
+    {
       "id": "auto-team-vip",
       "name": "自动组队领VIP",
       "description": "自动参加概念版官方活动「组队瓜分酷狗概念版畅听VIP」并自动组队，活动详情请自行查看官方说明。",
@@ -433,7 +433,7 @@
         "auto",
         "claim",
         "team",
-		"vip"
+        "vip"
       ]
     },
     {
@@ -479,6 +479,18 @@
         "accelerator",
         "update",
         "plugin-marketplace"
+      ]
+    },
+    {
+      "id": "music-card-share",
+      "name": "歌曲卡片分享",
+      "description": "优雅的歌曲卡片分享",
+      "author": "xiaotian2333",
+      "path": "",
+      "repo": "https://github.com/EchoMusic-org/music-card-share",
+      "homepage": "https://github.com/EchoMusic-org/music-card-share",
+      "tags": [
+        "share"
       ]
     }
   ]

@@ -27,7 +27,7 @@
 
 ## 要求
 
-- EchoMusic `>=2.3.1-beta.21`
+- EchoMusic `>=2.3.2-beta.7`
 - 主程序需要支持 `ctx.audio.spectrum`
 
 ## 安装
