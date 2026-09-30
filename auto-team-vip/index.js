@@ -592,6 +592,13 @@ const POOL_HEADERS = () => ({
   "X-Plugin-Version": PLUGIN_VERSION,
 });
 
+// Cloudflare 质询的用户侧提示。2026-09-30 线上故障的最终根因是
+// 「站点地域限制规则 × 用户代理」：出口 IP 落在境外即被质询，
+// 而旧文案让用户去"放行 /v2/*"——普通用户无从下手，只能再来回排查一轮。
+// 改为先给用户自己就能执行的动作（关代理），再指向作者。
+const MSG_CF_CHALLENGE =
+  "码池请求被 Cloudflare 拦截。若你正在使用代理/VPN，出口 IP 可能落在境外导致被拒，请关闭代理后重试；否则请联系插件作者。";
+
 async function poolRequestOnce(c, path, payload) {
   try {
     const res = await c.net.request({
@@ -780,7 +787,7 @@ async function doSnapshot(c, periodId, uid, teamInfo) {
   if (uiState) uiState.poolDown = true;
   // 此前此处只退避不报错——面板全绿却不再组队，用户无从判断（2026-09-30 线上反馈）。
   if (r.cfChallenge) {
-    setLastError("码池被 Cloudflare 安全质询拦截，暂时无法组队（需站点侧放行 /v2/* 接口）", "pool_cf_challenge",
+    setLastError(MSG_CF_CHALLENGE, "pool_cf_challenge",
       { periodId, uid, backoffStep: poolBackoff.step, ...buildPoolDiag("/v2/snapshot", r) });
     return "down";
   }
@@ -931,7 +938,7 @@ async function runFullFlow(c, reason, opts = {}) {
           poolDown();
           if (uiState) uiState.poolDown = true;
           if (joinRes.cfChallenge) {
-            setLastError("码池被 Cloudflare 安全质询拦截，暂时无法组队（需站点侧放行 /v2/* 接口）", "pool_cf_challenge",
+            setLastError(MSG_CF_CHALLENGE, "pool_cf_challenge",
               { periodId, uid, stage: "join", ...buildPoolDiag("/v2/join", joinRes) });
           } else {
             setLastError("码池暂时不可用，稍后自动重试", "pool_down",
