@@ -12,7 +12,6 @@
 //     （组队码由用户自行输入，不来自码池）。此模式下不会自动建队、不上报快照、不申请组队码。
 
 const TARGET_MEMBERS = 3; // 1 队长 + 2 队员（与 team-pool-worker/worker.js 的 TEAM_CAPACITY 保持一致）
-const POOL_URL = "https://echo-team-pool.oneday.vip";
 const POOL_RETRY_DELAY_MS = 500;      // 瞬时故障（网络/5xx）的一次补射间隔
 const RETRY_MAX = 3;                  // 当轮 join 重试上限（含首次）
 const RETRY_DELAY_MS = 2000;          // 重试间隔
@@ -79,9 +78,10 @@ let pool429Until = 0; // 429 短退避截止（与网络故障的指数退避分
 let disabledPeriods = new Set();
 
 function poolDown() {
-  poolBackoff.nextAttemptAt =
-    Date.now() + POOL_BACKOFF_STEPS_MS[Math.min(poolBackoff.step, POOL_BACKOFF_STEPS_MS.length - 1)];
-  poolBackoff.step += 1;
+  // 退避阶梯 5→15→30 分钟后封顶，step 同步封顶避免长时间失败后计数无意义地膨胀。
+  const idx = Math.min(poolBackoff.step, POOL_BACKOFF_STEPS_MS.length - 1);
+  poolBackoff.nextAttemptAt = Date.now() + POOL_BACKOFF_STEPS_MS[idx];
+  poolBackoff.step = Math.min(poolBackoff.step + 1, POOL_BACKOFF_STEPS_MS.length - 1);
   dlog("[码池退避]", Math.round((poolBackoff.nextAttemptAt - Date.now()) / 1000) + "s");
 }
 
@@ -98,6 +98,37 @@ function poolUp() {
 
 function poolAvailable() {
   return Date.now() >= poolBackoff.nextAttemptAt && Date.now() >= pool429Until;
+}
+
+// 退避/限速剩余毫秒（取两者较晚者），用于面板与复制详情说明"还要等多久"。
+function poolBackoffRemainingMs() {
+  return Math.max(poolBackoff.nextAttemptAt, pool429Until) - Date.now();
+}
+
+// 码池失败的现场诊断：与 buildPeriodDiag 同构，进「复制错误详情」。
+// 关键场景是 Cloudflare 安全挑战——body 是 HTML 而非 JSON，
+// 没有它用户只会看到"稍后重试"，永远不知道是 403 挑战还是 5xx。
+function buildPoolDiag(path, r) {
+  const data = r?.data;
+  let text = "";
+  if (data !== undefined && data !== null) {
+    try {
+      const s = typeof data === "string" ? data : JSON.stringify(data);
+      text = s === undefined ? String(data) : s;
+    } catch {
+      text = String(data);
+    }
+  }
+  return {
+    endpoint: POOL_URL + path,
+    httpStatus: Number(r?.status) || 0,
+    poolError: String(r?.error || ""),
+    // Ray ID 置于 body 之前：body 会被截断，而 Ray ID 在质询页页脚，截断后必丢。
+    // 复制出去即可在 Security → Events 精确查到是哪个产品下的手。
+    cfRay: String(r?.cfRay || ""),
+    cfMitigated: String(r?.cfMitigated || ""),
+    body: text.length > 1200 ? text.slice(0, 1200) + "…(已截断)" : text,
+  };
 }
 
 // ---------- 通用 ----------
@@ -253,7 +284,7 @@ async function teamRequest(c, method, url, params, data) {
     return { ok: false, error: String(e?.message || e) };
   }
 
-  dlog("[酷狗响应]", method, url, "status:", res?.status);
+  dlog("[酷狗响应]", method, url, "status:", res?.status, "body:", JSON.stringify(res?.body)?.slice(0, 2000));
 
   const body = res?.body;
   const eventId = pick(body, ["ssaCode", "eventId"], "") || pick(res?.headers, ["ssa-code", "SSA-CODE"], "");
@@ -270,7 +301,7 @@ async function teamRequest(c, method, url, params, data) {
       if (verified?.ok) {
         dlog("[酷狗重试]", method, url);
         res = await c.electron.api.request(cfg);
-        dlog("[酷狗重试响应]", method, url, "status:", res?.status);
+        dlog("[酷狗重试响应]", method, url, "status:", res?.status, "body:", JSON.stringify(res?.body)?.slice(0, 2000));
       }
     } catch (e) {
       console.warn("[auto-team-vip] verification failed:", e);
@@ -387,11 +418,54 @@ function parseJoinResponse(r) {
   return { httpOk, bizOk, errorCode, errorMsg };
 }
 
+// 期次 GUARD 的失败诊断：区分「传输层失败」「HTTP 非 2xx」「业务 status!=1」
+// 「HTTP 200 但确实没有期次」四类，避免所有情况都被报成 no_period 掩盖真实原因。
+// diag 会原样进入「复制错误详情」，让用户不打开控制台也能把现场反馈出来。
+function buildPeriodDiag(r) {
+  const body = r?.body;
+  const bodyText = (() => {
+    if (body === undefined || body === null) return "";
+    try {
+      const s = typeof body === "string" ? body : JSON.stringify(body);
+      return s === undefined ? String(body) : s;
+    } catch {
+      return String(body);
+    }
+  })();
+  return {
+    httpStatus: Number(r?.status) || 0,
+    bizStatus: String(pick(body, ["status"], "")),
+    errorCode: Number(pick(body, ["error_code", "errcode", "code"], 0)) || 0,
+    errorMsg: String(pick(body, ["error_msg", "msg", "message"], "")),
+    ssaCode: String(pick(body, ["ssaCode", "eventId"], "") || pick(r?.headers, ["ssa-code", "SSA-CODE"], "")),
+    body: bodyText.length > 1200 ? bodyText.slice(0, 1200) + "…(已截断)" : bodyText,
+  };
+}
+
+function classifyPeriodFailure(r) {
+  const d = buildPeriodDiag(r);
+  if (!r?.ok) return { code: "period_transport", msg: "期次请求发送失败", diag: { ...d, transportError: r?.error || "" } };
+  if (d.httpStatus && (d.httpStatus < 200 || d.httpStatus >= 300))
+    return { code: "period_http_error", msg: "期次接口返回 HTTP " + d.httpStatus, diag: d };
+  if (d.bizStatus !== "" && d.bizStatus !== "1")
+    return { code: "period_biz_error", msg: "期次接口返回异常（status=" + d.bizStatus + "）", diag: d };
+  return { code: "no_period", msg: "未找到活动期次", diag: d };
+}
+
 async function getPeriodInfo(c) {
   const r = await teamRequest(c, "GET", "/team/period/info");
-  if (!r.ok) return { ok: false, error: r.error || "请求失败" };
+  if (!r.ok) {
+    const f = classifyPeriodFailure(r);
+    dlog("[期次失败]", f.code, f.diag);
+    return { ok: false, error: f.msg, errorCode: f.code, diag: f.diag };
+  }
   const p = normalizePeriod(r.body);
-  if (!p.periodId) return { ok: false, error: "未找到活动期次" };
+  if (!p.periodId) {
+    const f = classifyPeriodFailure(r);
+    dlog("[期次失败]", f.code, f.diag);
+    return { ok: false, error: f.msg, errorCode: f.code, diag: f.diag };
+  }
+  dlog("[期次成功]", p.periodId, p.periodName, "active:", p.active);
   return { ok: true, ...p };
 }
 
@@ -441,16 +515,89 @@ async function disablePool(c, periodId, uid) {
   }
 }
 
+// Cloudflare 质询页识别（2026-09-30 线上反馈：码池长期 403 静默退避）。
+// Electron 主进程走 axios，没有可执行 JS 的浏览器环境，质询永远过不了；
+// 与其在退避阶梯里空转，不如直接识别出来告知站点侧去配 WAF 跳过规则。
+// 依据：用户复制出的 body 是 "Attention Required! | Cloudflare" HTML。
+function isCfChallenge(res) {
+  const status = Number(res?.status) || 0;
+  if (status !== 403 && status !== 503) return false;
+  const d = res?.data;
+  let text = "";
+  try {
+    text = typeof d === "string" ? d : JSON.stringify(d ?? "");
+  } catch {
+    text = String(d ?? "");
+  }
+  if (!text) return false;
+  return /Attention Required|Just a moment|cf-browser-verification|cf_chl_|challenge-platform|Enable JavaScript and cookies/i.test(text);
+}
+
+// Cloudflare 边缘错误（1xxx，如 1006/1016/1020/1033/1042）识别。
+// 这类响应说明**该主机根本没有 Worker 脚本**（或不可达），属于"候选地址不可用"，
+// 必须继续试下一个候选；而不能当成"Worker 有应答"就直接返回。
+// 2026-09-30 实测踩坑：workers.dev 占位地址返回 1042，把正常的自定义域永久挡在后面。
+function isCfEdgeError(res) {
+  const d = res?.data;
+  // 我们自己的 Worker 错误体是 {ok:false, error:"字符串码"}，与 CF 的数字 1xxx 区分开
+  if (d && typeof d === "object" && d.ok === false && typeof d.error === "string") return false;
+  if (d && typeof d === "object") {
+    const code = Number(d.error_code);
+    if (d.cloudflare_error === true) return true;
+    if (Number.isFinite(code) && code >= 1000 && code < 2000) return true;
+  }
+  let text = "";
+  try {
+    text = typeof d === "string" ? d : JSON.stringify(d ?? "");
+  } catch {
+    text = String(d ?? "");
+  }
+  return /cloudflare-1xxx-errors|workers_dev_script_not_found|No Workers script was found/i.test(text);
+}
+
+// Cloudflare 质询诊断：优先取响应头 cf-ray / cf-mitigated；头缺失时回退解析 HTML 页脚。
+// 有了 Ray ID，用户可在 Security → Events 精确查到"哪个产品下的手"，
+// 不必再靠猜。2026-09-30 用户就是因 body 截断在 1200 字、Ray ID 恰在页脚而查不到。
+function cfChallengeTrace(res) {
+  const h = res?.headers;
+  let ray = String(pick(h, ["cf-ray", "CF-RAY", "Cf-Ray"], "") || "");
+  const mitigated = String(pick(h, ["cf-mitigated", "CF-Mitigated"], "") || "");
+  if (ray && mitigated) return { cfRay: ray, cfMitigated: mitigated };
+  const d = res?.data;
+  let text = "";
+  try {
+    text = typeof d === "string" ? d : JSON.stringify(d ?? "");
+  } catch {
+    text = String(d ?? "");
+  }
+  if (!ray) {
+    const m = /Ray ID:\s*([0-9a-f]{8,})|"?ray_id"?\s*:\s*"([0-9a-f]{8,})"/i.exec(text || "");
+    if (m) ray = m[1] || m[2] || "";
+  }
+  return { cfRay: ray, cfMitigated: mitigated };
+}
+
+// 码池请求头。Electron 主进程默认不带 User-Agent，在 Cloudflare 的
+// "浏览器完整性检查"（Browser Integrity Check）这类请求头启发式里非常显眼，
+// 而该检查恰恰针对的就是"用非浏览器客户端直接打站点"这一形态。
+// 补齐常规 API 客户端应携带的头，属于让自有客户端正常表达自己，
+// 不是绕过质询——质询（challenge）仍会拦，因为缺可执行 JS 环境。
+// 站点侧的正确做法仍是 Skip 规则里勾选「浏览器完整性检查」。
+const POOL_HEADERS = () => ({
+  "Content-Type": "application/json",
+  Accept: "application/json",
+  "Accept-Language": "zh-CN,zh;q=0.9",
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+  "X-Plugin-Version": PLUGIN_VERSION,
+});
+
 async function poolRequestOnce(c, path, payload) {
-  const base = POOL_URL.replace(/\/+$/, "");
   try {
     const res = await c.net.request({
-      url: base + path,
+      url: POOL_URL + path,
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Plugin-Version": PLUGIN_VERSION,
-      },
+      headers: POOL_HEADERS(),
       body: payload,
       responseType: "json",
     });
@@ -465,20 +612,52 @@ async function poolRequestOnce(c, path, payload) {
       }
       return { ok: false, status: 403, data: res.data, error: msg, needUpdate: true };
     }
+    if (isCfChallenge(res)) {
+      // 不重试：重试只会撞同一堵墙并推高退避阶梯
+      return {
+        ok: false,
+        status: res.status,
+        data: res.data,
+        error: "Cloudflare 安全质询拦截（非浏览器客户端无法通过）",
+        cfChallenge: true,
+        ...cfChallengeTrace(res),
+      };
+    }
+    // 边缘 1xx/404：该主机没有 Worker 脚本，属于"候选地址不可用"而非"Worker 应答"，
+    // 必须交由上层换下一个候选，不能就地返回。
+    if (isCfEdgeError(res)) {
+      return {
+        ok: false,
+        status: res.status,
+        data: res.data,
+        error: "Cloudflare 边缘错误（该主机无 Worker 脚本）",
+        cfEdgeError: true,
+        ...cfChallengeTrace(res),
+      };
+    }
     return { ok: res.status >= 200 && res.status < 300, status: res.status, data: res.data };
   } catch (e) {
     console.warn("[auto-team-vip] poolRequest error:", e);
     const msg = String(e?.message || e);
-    const hint = msg.includes("403") ? "（Cloudflare 安全挑战，请降低 Security Level 或使用 workers.dev 域名）" : "";
+    const hint = msg.includes("403") ? "（疑似 Cloudflare 安全质询/规则拦截，见 cfRay 与 cfMitigated 字段）" : "";
     return { ok: false, status: 0, data: null, error: msg + hint };
   }
 }
 
+// 码池基址。唯一入口，2026-09-30 确认。
+//
+// 曾为"多候选 + 自动降级"预留结构，但已确认不采用：唯一备选 `*.workers.dev`
+// 在中国大陆被 DNS 污染（8.8.8.8/9.9.9.9/223.5.5.5 返回完全相同的伪造地址），
+// 绕开 zone 级 WAF 的同时换来了更硬的网络层阻断，对国内用户毫无意义。
+// 单地址下候选列表只是空转，故简化为常量，相关降级/屏蔽机制一并移除。
+const POOL_URL = "https://echo-team-pool.oneday.vip";
+
 async function poolRequest(c, path, payload) {
-  const r = await poolRequestOnce(c, path, payload);
-  if (!r.ok && (r.status === 0 || r.status >= 500)) {
+  let r = await poolRequestOnce(c, path, payload);
+  // 仅对"传输层不可达"与 5xx 补射一次；质询/边缘错误重试无意义
+  if (!r.ok && !r.cfChallenge && !r.cfEdgeError && (r.status === 0 || r.status >= 500)) {
     await sleep(POOL_RETRY_DELAY_MS);
-    return poolRequestOnce(c, path, payload);
+    r = await poolRequestOnce(c, path, payload);
   }
   return r;
 }
@@ -540,7 +719,15 @@ async function doSnapshot(c, periodId, uid, teamInfo) {
     if (uiState) uiState.poolDisabled = true;
     return "disabled";
   }
-  if (!poolAvailable()) return "down";
+  // 退避窗口内同样要让用户看见：否则首次失败后，后续每轮心跳都是静默 no-op，
+  // 面板全绿却永远不组队（2026-09-30 线上反馈）。
+  if (!poolAvailable()) {
+    if (uiState) uiState.poolDown = true;
+    const waitSec = Math.max(1, Math.ceil(poolBackoffRemainingMs() / 1000));
+    setLastError(`码池暂时不可用，约 ${Math.ceil(waitSec / 60)} 分钟后自动重试`, "pool_backoff",
+      { periodId, uid, waitSeconds: waitSec, backoffStep: poolBackoff.step });
+    return "down";
+  }
 
   const tokens = await getPoolTokens(c);
   const payload = {
@@ -570,7 +757,10 @@ async function doSnapshot(c, periodId, uid, teamInfo) {
     poolUp();
     // 服务端签发/轮换的 token 及时入库（新期次自动重签）
     if (r.data?.token) await setPoolToken(c, uid, r.data.token);
-    if (uiState) uiState.poolDisabled = false;
+    if (uiState) {
+      uiState.poolDisabled = false;
+      uiState.poolDown = false;
+    }
     return "ok";
   }
   if (r.status === 401) {
@@ -581,11 +771,21 @@ async function doSnapshot(c, periodId, uid, teamInfo) {
   }
   if (r.status === 429) {
     poolRateLimited();
-    setLastError("码池请求过于频繁，稍后自动重试", "pool_rate_limited", { periodId, uid });
+    setLastError("码池请求过于频繁，稍后自动重试", "pool_rate_limited",
+      { periodId, uid, ...buildPoolDiag("/v2/snapshot", r) });
     return "down";
   }
   if (r.needUpdate) return "disabled";
   poolDown();
+  if (uiState) uiState.poolDown = true;
+  // 此前此处只退避不报错——面板全绿却不再组队，用户无从判断（2026-09-30 线上反馈）。
+  if (r.cfChallenge) {
+    setLastError("码池被 Cloudflare 安全质询拦截，暂时无法组队（需站点侧放行 /v2/* 接口）", "pool_cf_challenge",
+      { periodId, uid, backoffStep: poolBackoff.step, ...buildPoolDiag("/v2/snapshot", r) });
+    return "down";
+  }
+  setLastError("码池暂时不可用，稍后自动重试", "pool_down",
+    { periodId, uid, backoffStep: poolBackoff.step, ...buildPoolDiag("/v2/snapshot", r) });
   return "down";
 }
 
@@ -615,7 +815,11 @@ async function runFullFlow(c, reason, opts = {}) {
     const period = await getPeriodInfo(c);
     if (!period.ok) {
       if (uiState) uiState.periodState = "error"; // GUARD 失败：心跳按常规间隔自愈重试
-      setLastError(period.error || "获取活动信息失败", "no_period", { endpoint: "/team/period/info" });
+      setLastError(period.error || "获取活动信息失败", period.errorCode || "no_period", {
+        endpoint: "/team/period/info",
+        pluginVersion: PLUGIN_VERSION,
+        ...(period.diag || {}),
+      });
       return;
     }
     const periodId = String(period.periodId);
@@ -725,7 +929,14 @@ async function runFullFlow(c, reason, opts = {}) {
           setLastError("码池请求过于频繁，稍后自动重试", "pool_rate_limited", { periodId, uid });
         } else if (!joinRes.needUpdate) {
           poolDown();
-          setLastError("码池暂时不可用，稍后自动重试", "pool_down", { periodId, uid, error: joinRes.error });
+          if (uiState) uiState.poolDown = true;
+          if (joinRes.cfChallenge) {
+            setLastError("码池被 Cloudflare 安全质询拦截，暂时无法组队（需站点侧放行 /v2/* 接口）", "pool_cf_challenge",
+              { periodId, uid, stage: "join", ...buildPoolDiag("/v2/join", joinRes) });
+          } else {
+            setLastError("码池暂时不可用，稍后自动重试", "pool_down",
+              { periodId, uid, stage: "join", ...buildPoolDiag("/v2/join", joinRes) });
+          }
         }
         return;
       }
@@ -949,6 +1160,7 @@ export async function activate(_ctx) {
     joinedMemberCount: 0,
     joinedVipDesc: "",
     poolDisabled: false,
+    poolDown: false,
   });
 
   dialogOpen = _ctx.vue.ref(false);
@@ -1045,11 +1257,12 @@ export async function activate(_ctx) {
         }
       };
 
-      // 渲染期调用：仅在码池鉴权异常时显示提示行；开放队伍/等待人数不再对外展示。
-      // 关闭自动组队时不接触码池，其鉴权状态与本模式无关，不展示（避免遗留的 poolDisabled 误导）。
+      // 渲染期调用：显示码池鉴权停用 / 退避中两种异常；开放队伍/等待人数不再对外展示。
+      // 关闭自动组队时不接触码池，其状态与本模式无关，不展示（避免遗留状态误导）。
       const poolLineText = () => {
         if (!autoTeam.value) return "";
         if (uiState?.poolDisabled) return "状态异常，请联系插件作者处理，或等待下期组队";
+        if (uiState?.poolDown) return "码池暂时不可用，自动重试中（暂时无法自动加入他人队伍）";
         return "";
       };
 
