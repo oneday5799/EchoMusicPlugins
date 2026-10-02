@@ -105,6 +105,19 @@ function poolBackoffRemainingMs() {
   return Math.max(poolBackoff.nextAttemptAt, pool429Until) - Date.now();
 }
 
+// 退避窗口内应当**保留**而非覆盖的根因错误码。
+// 与调用 poolDown() / poolRateLimited() 的分支一一对应（已交叉核对），
+// 只有这几个码会真正开启退避，因此只有它们可能是"退避的起因"。
+//
+// 刻意不包含：
+//   pool_unauthorized —— 401 走 disablePool() 按期次永久停用，不开退避，
+//                        后续在 isPoolDisabled 处即返回，永到不了本分支；
+//   pool_bad_response / pool_empty —— 直接 return，不开退避；
+//   pool_backoff —— 它本身就是回显，不是根因。
+// 误把不相干的错误（如 create_team_failed、酷狗 join 失败）挂成根因，
+// 会让用户照着错误的方向排查。
+const POOL_ROOT_CAUSE_CODES = new Set(["pool_cf_challenge", "pool_down", "pool_rate_limited"]);
+
 // 码池失败的现场诊断：与 buildPeriodDiag 同构，进「复制错误详情」。
 // 关键场景是 Cloudflare 安全挑战——body 是 HTML 而非 JSON，
 // 没有它用户只会看到"稍后重试"，永远不知道是 403 挑战还是 5xx。
@@ -146,11 +159,16 @@ function pick(obj, keys, fallback) {
 // 从而只在"本轮干净跑完"时才清除历史提示（避免把本轮刚产生的 create_team_failed 等误清）。
 let errorSeq = 0;
 
-function setLastError(msg, code, detail) {
+// atTime 允许调用方沿用旧时间戳：退避回显时需要保留"根因何时发生"，
+// 若每次回显都刷新 Date.now()，用户看到的时间会一直是最近一次心跳，
+// 而非真正出错的那一刻。
+function setLastError(msg, code, detail, atTime) {
   if (!uiState) return;
   errorSeq += 1;
   uiState.lastMessage = msg;
-  uiState.lastError = code ? { code, message: msg, detail: detail || {} } : null;
+  uiState.lastError = code
+    ? { code, message: msg, detail: detail || {}, at: atTime ?? Date.now() }
+    : null;
 }
 
 // 清除历史错误提示（2026-09-15 修复粘性提示缺陷）。
@@ -731,8 +749,22 @@ async function doSnapshot(c, periodId, uid, teamInfo) {
   if (!poolAvailable()) {
     if (uiState) uiState.poolDown = true;
     const waitSec = Math.max(1, Math.ceil(poolBackoffRemainingMs() / 1000));
-    setLastError(`码池暂时不可用，约 ${Math.ceil(waitSec / 60)} 分钟后自动重试`, "pool_backoff",
-      { periodId, uid, waitSeconds: waitSec, backoffStep: poolBackoff.step });
+    // 保留根因：此处本轮并未发请求，上一轮失败携带的现场诊断才是唯一线索。
+    // 只把退避信息追加进 detail，不改 message——"约 N 分钟后重试"每分钟递减，
+    // 写进 message 会让根因文案持续抖动（改为在面板单独一行显示）。
+    const prev = uiState?.lastError;
+    if (prev && POOL_ROOT_CAUSE_CODES.has(prev.code)) {
+      setLastError(prev.message, prev.code, {
+        ...(prev.detail || {}),
+        退避剩余秒: waitSec,
+        退避档位: poolBackoff.step,
+        根因发生于: new Date(prev.at || Date.now()).toLocaleString(),
+        note: "本轮处于退避窗口内未发请求，上述为退避起因的真实错误",
+      }, prev.at);
+    } else {
+      setLastError(`码池暂时不可用，约 ${Math.ceil(waitSec / 60)} 分钟后自动重试`, "pool_backoff",
+        { periodId, uid, waitSeconds: waitSec, backoffStep: poolBackoff.step });
+    }
     return "down";
   }
 
@@ -1266,10 +1298,16 @@ export async function activate(_ctx) {
 
       // 渲染期调用：显示码池鉴权停用 / 退避中两种异常；开放队伍/等待人数不再对外展示。
       // 关闭自动组队时不接触码池，其状态与本模式无关，不展示（避免遗留状态误导）。
+      // 退避期把"还要等多久"放在这一行而非错误文案里：文案保持根因原文不变，
+      // 避免每分钟递减导致提示持续抖动。此处是渲染期求值，会随时间自行更新。
       const poolLineText = () => {
         if (!autoTeam.value) return "";
         if (uiState?.poolDisabled) return "状态异常，请联系插件作者处理，或等待下期组队";
-        if (uiState?.poolDown) return "码池暂时不可用，自动重试中（暂时无法自动加入他人队伍）";
+        if (uiState?.poolDown) {
+          const waitSec = Math.max(0, Math.ceil(poolBackoffRemainingMs() / 1000));
+          const tip = waitSec > 0 ? `，约 ${Math.ceil(waitSec / 60)} 分钟后重试` : "，即将重试";
+          return "码池暂时不可用，自动重试中（暂时无法自动加入他人队伍）" + tip;
+        }
         return "";
       };
 
