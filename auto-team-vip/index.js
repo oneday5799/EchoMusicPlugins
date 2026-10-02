@@ -77,7 +77,21 @@ const poolBackoff = { step: 0, nextAttemptAt: 0 };
 let pool429Until = 0; // 429 短退避截止（与网络故障的指数退避分离）
 let disabledPeriods = new Set();
 
-function poolDown() {
+// 传输层失败（连接被重置/超时/无路由）的退避：固定短间隔，不走 5→15→30 阶梯。
+// 理由：这类失败源于**用户本地网络**，通常是瞬时的（丢包、链路抖动），
+// 不代表服务器端或配置出问题，用 30 分钟长退避不成比例——
+// 而心跳本身每 5~10 分钟才有一次重试机会（SNAPSHOT_INTERVAL_MS /
+// FULLFLOW_INTERVAL_MS），一旦锁到 30 分钟档，用户的组队就会凭空停半小时。
+// 2026-10-02 线上即为此：net::ERR_CONNECTION_RESET 一次即被锁进最深档。
+const POOL_TRANSPORT_BACKOFF_MS = 60_000;
+
+function poolDown(transport = false) {
+  if (transport) {
+    // 不动 step：传输层失败与服务端故障的阶梯互不污染。
+    poolBackoff.nextAttemptAt = Date.now() + POOL_TRANSPORT_BACKOFF_MS;
+    dlog("[码池网络退避]", POOL_TRANSPORT_BACKOFF_MS / 1000 + "s");
+    return;
+  }
   // 退避阶梯 5→15→30 分钟后封顶，step 同步封顶避免长时间失败后计数无意义地膨胀。
   const idx = Math.min(poolBackoff.step, POOL_BACKOFF_STEPS_MS.length - 1);
   poolBackoff.nextAttemptAt = Date.now() + POOL_BACKOFF_STEPS_MS[idx];
@@ -116,7 +130,12 @@ function poolBackoffRemainingMs() {
 //   pool_backoff —— 它本身就是回显，不是根因。
 // 误把不相干的错误（如 create_team_failed、酷狗 join 失败）挂成根因，
 // 会让用户照着错误的方向排查。
-const POOL_ROOT_CAUSE_CODES = new Set(["pool_cf_challenge", "pool_down", "pool_rate_limited"]);
+const POOL_ROOT_CAUSE_CODES = new Set([
+  "pool_cf_challenge",
+  "pool_down",
+  "pool_rate_limited",
+  "pool_net_error", // 传输层失败同样会开启退避（走固定短退避），故也是合法根因
+]);
 
 // 码池失败的现场诊断：与 buildPeriodDiag 同构，进「复制错误详情」。
 // 关键场景是 Cloudflare 安全挑战——body 是 HTML 而非 JSON，
@@ -617,6 +636,10 @@ const POOL_HEADERS = () => ({
 const MSG_CF_CHALLENGE =
   "码池请求被 Cloudflare 拦截。若你正在使用代理/VPN，出口 IP 可能落在境外导致被拒，请关闭代理后重试；否则请联系插件作者。";
 
+// 传输层失败（httpStatus 0）：与质询区分开，明确指向本地网络而非站点。
+const MSG_POOL_NETWORK =
+  "无法连接组队服务器（网络中断或连接被重置），将自动重试；请检查网络连接或代理设置。";
+
 async function poolRequestOnce(c, path, payload) {
   try {
     const res = await c.net.request({
@@ -815,6 +838,14 @@ async function doSnapshot(c, periodId, uid, teamInfo) {
     return "down";
   }
   if (r.needUpdate) return "disabled";
+  // 传输层失败先行分流：走固定短退避，不进 5→15→30 阶梯（见 poolDown）。
+  if (r.status === 0) {
+    poolDown(true);
+    if (uiState) uiState.poolDown = true;
+    setLastError(MSG_POOL_NETWORK, "pool_net_error",
+      { periodId, uid, transportRetryAfter: POOL_TRANSPORT_BACKOFF_MS / 1000, ...buildPoolDiag("/v2/snapshot", r) });
+    return "down";
+  }
   poolDown();
   if (uiState) uiState.poolDown = true;
   // 此前此处只退避不报错——面板全绿却不再组队，用户无从判断（2026-09-30 线上反馈）。
@@ -967,6 +998,14 @@ async function runFullFlow(c, reason, opts = {}) {
           poolRateLimited();
           setLastError("码池请求过于频繁，稍后自动重试", "pool_rate_limited", { periodId, uid });
         } else if (!joinRes.needUpdate) {
+          // 传输层失败先行分流：固定短退避，不进阶梯（见 poolDown）。
+          if (joinRes.status === 0) {
+            poolDown(true);
+            if (uiState) uiState.poolDown = true;
+            setLastError(MSG_POOL_NETWORK, "pool_net_error",
+              { periodId, uid, stage: "join", transportRetryAfter: POOL_TRANSPORT_BACKOFF_MS / 1000, ...buildPoolDiag("/v2/join", joinRes) });
+            return;
+          }
           poolDown();
           if (uiState) uiState.poolDown = true;
           if (joinRes.cfChallenge) {
