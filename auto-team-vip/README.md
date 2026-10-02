@@ -3,7 +3,7 @@
 自动参加概念版官方活动「组队瓜分酷狗概念版畅听VIP」并组队，插件入口在软件顶部⭐️。
 
 - 插件名：自动组队领VIP
-- 版本：1.2.3（v2 快照/租约协议）
+- 版本：1.2.4（v2 快照/租约协议）
 - 作者：Oneday5799
 - 依赖：EchoMusic `>=2.3.2-beta.2`（需已内置组队接口）
 - 架构设计文档：[`docs/auto-team-vip-redesign.md`](../docs/auto-team-vip-redesign.md)
@@ -67,7 +67,7 @@
 3. 验证 `POST /v2/health`（携带 `X-Admin-Token` 与 `X-Plugin-Version` 头）返回聚合计数
 4. 确认**没有**跳过规则会误伤插件流量（见下"跳过规则与限流的顺序"）
 5. 配置限流规则（**建议执行，非功能必需**；见下"限流规则配置"）——兜住"任意合法 `period_id` 批量创建 DO"的放大风险
-6. 插件 1.2.3 发版（与步骤 2 紧凑衔接，避免长时间功能空窗）
+6. 插件 1.2.4 发版（与步骤 2 紧凑衔接，避免长时间功能空窗）
 7. 浏览器打开 [`admin.html`](../team-pool-worker/admin.html) 看板核对数据面
 
 ### 限流规则配置（步骤 5 展开）
@@ -131,7 +131,7 @@ Worker 在调用 `getByName()` **之前**就校验 `period_id`，所以**不带 
 seq 1 100 | xargs -P 20 -I{} curl -s -o NUL -w "%{http_code}\n" -X POST \
   https://echo-team-pool.oneday.vip/v2/status \
   -H "Content-Type: application/json" \
-  -H "X-Plugin-Version: 1.2.3" \
+  -H "X-Plugin-Version: 1.2.4" \
   -d '{}' | sort | uniq -c
 ```
 
