@@ -1,0 +1,13 @@
+# 静态主题
+
+包含恋空、哈尼粉。
+
+安装并启用后，在「个性主题」中分别选择各款主题。禁用或卸载此插件会移除本包所有主题。
+
+## 开发
+
+修改 `themes.json` 或 `scripts/theme-kit/runtime.js` 后，在仓库根目录执行 `node scripts/build-theme-plugins.mjs`。入口 `index.js` 自包含，不依赖另一个主题包或根目录 `scripts`。素材按主题 ID 存放于 `assets/<主题 ID>/`。提交前校验及文件范围见 [维护脚本说明](../scripts/README.md)。
+
+## 素材来源
+
+本机 QQ 音乐 11.10.0 的缓存素材及配色参数，提取与适配记录见 `provenance.json`。原始图片及派生素材权利属于各自权利人，不适用仓库默认 MIT 授权；本地适配，不代表获得公开再分发许可。

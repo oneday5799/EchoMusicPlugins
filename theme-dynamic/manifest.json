@@ -1,0 +1,17 @@
+{
+  "id": "theme-dynamic",
+  "name": "动态主题",
+  "version": "1.0.0",
+  "description": "包含秋日枫叶、幻彩、金丝带、杨柳依依、旋转摩天轮。",
+  "author": "EchoMusic",
+  "main": "index.js",
+  "capabilities": {
+    "theme": true
+  },
+  "requires": {
+    "echoMusicVersion": ">=2.3.2-beta.7"
+  },
+  "tags": [
+    "动态"
+  ]
+}

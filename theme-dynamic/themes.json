@@ -1,0 +1,597 @@
+[
+  {
+    "id": "autumn",
+    "title": "秋日枫叶",
+    "kind": "autumn",
+    "description": "暖橙色秋景，枫叶缓缓飘落。",
+    "dark": true,
+    "shell": "#d07a00",
+    "accent": "#F1CF0B",
+    "files": [
+      "autumn.png",
+      "leaf.png"
+    ],
+    "poster": "autumn.png",
+    "tokens": {
+      "card": "#36363a",
+      "elevated": "#36363a",
+      "border": "#55555a"
+    }
+  },
+  {
+    "id": "prism",
+    "title": "幻彩",
+    "kind": "video",
+    "description": "流动的柔和彩光，交织成连续变化的背景。",
+    "dark": true,
+    "shell": "#29292b",
+    "accent": "#11BE71",
+    "files": [
+      "prism.png",
+      "prism-flow.mp4"
+    ],
+    "poster": "prism.png",
+    "video": "prism-flow.mp4",
+    "tokens": {
+      "card": "#36363a",
+      "elevated": "#36363a",
+      "border": "#55555a"
+    }
+  },
+  {
+    "id": "golden-ribbon",
+    "title": "金丝带",
+    "kind": "video",
+    "description": "深色背景上的金色丝带，舒缓流转。",
+    "dark": true,
+    "shell": "#010101",
+    "accent": "#CD8038",
+    "files": [
+      "golden-ribbon.png",
+      "golden-ribbon.mp4"
+    ],
+    "poster": "golden-ribbon.png",
+    "video": "golden-ribbon.mp4",
+    "tokens": {
+      "card": "#36363a",
+      "elevated": "#36363a",
+      "border": "#55555a"
+    }
+  },
+  {
+    "id": "willow",
+    "title": "杨柳依依",
+    "kind": "sprites",
+    "description": "晴空与草地间，柳枝轻摆，列车驶过远方。",
+    "dark": false,
+    "shell": "#318BA4",
+    "accent": "#FFDE00",
+    "files": [
+      "background.png",
+      "sprites.png",
+      "preview.png"
+    ],
+    "background": "background.png",
+    "sprite": "sprites.png",
+    "spriteSize": [
+      1384,
+      870
+    ],
+    "poster": "preview.png",
+    "layers": [
+      {
+        "crop": [
+          726,
+          348,
+          466,
+          45
+        ],
+        "x": -466,
+        "y": 620,
+        "easing": "linear",
+        "direction": "normal",
+        "frames": [
+          {
+            "transform": "translate(0px,0px)"
+          },
+          {
+            "transform": "translate(1846px,0px)"
+          }
+        ],
+        "duration": 24000
+      },
+      {
+        "crop": [
+          2,
+          141,
+          344,
+          727
+        ],
+        "x": 0,
+        "y": 48
+      },
+      {
+        "crop": [
+          348.0,
+          629.0,
+          276.0,
+          227.0
+        ],
+        "x": 2.0,
+        "y": 177.0,
+        "origin": "16.0px 15.0px",
+        "frames": [
+          {
+            "transform": "rotate(-3deg)"
+          },
+          {
+            "transform": "rotate(3deg)"
+          }
+        ],
+        "duration": 3500
+      },
+      {
+        "crop": [
+          861.0,
+          620.0,
+          227.0,
+          215.0
+        ],
+        "x": 232.0,
+        "y": 133.0,
+        "origin": "5.0px 12.0px",
+        "frames": [
+          {
+            "transform": "rotate(-2deg)"
+          },
+          {
+            "transform": "rotate(2deg)"
+          }
+        ],
+        "duration": 7000
+      },
+      {
+        "crop": [
+          726.0,
+          141.0,
+          222.0,
+          205.0
+        ],
+        "x": 35.0,
+        "y": 132.0,
+        "origin": "1.0px 18.0px",
+        "frames": [
+          {
+            "transform": "rotate(-2deg)"
+          },
+          {
+            "transform": "rotate(2deg)"
+          }
+        ],
+        "duration": 4500
+      },
+      {
+        "crop": [
+          716.0,
+          399.0,
+          199.0,
+          219.0
+        ],
+        "x": 175.0,
+        "y": 138.0,
+        "origin": "14.0px 12.0px",
+        "frames": [
+          {
+            "transform": "rotate(-3.5deg)"
+          },
+          {
+            "transform": "rotate(3.5deg)"
+          }
+        ],
+        "duration": 5000
+      },
+      {
+        "crop": [
+          917.0,
+          395.0,
+          212.0,
+          197.0
+        ],
+        "x": 317.0,
+        "y": 135.0,
+        "origin": "5.0px 3.0px",
+        "frames": [
+          {
+            "transform": "rotate(-3deg)"
+          },
+          {
+            "transform": "rotate(3deg)"
+          }
+        ],
+        "duration": 4000
+      },
+      {
+        "crop": [
+          443.0,
+          141.0,
+          281.0,
+          256.0
+        ],
+        "x": 177.0,
+        "y": 142.0,
+        "origin": "17.0px 8.0px",
+        "frames": [
+          {
+            "transform": "rotate(-2.5deg)"
+          },
+          {
+            "transform": "rotate(2.5deg)"
+          }
+        ],
+        "duration": 3500
+      },
+      {
+        "crop": [
+          1131.0,
+          395.0,
+          196.0,
+          183.0
+        ],
+        "x": 5.0,
+        "y": 171.0,
+        "origin": "19.0px 6.0px",
+        "frames": [
+          {
+            "transform": "rotate(-2deg)"
+          },
+          {
+            "transform": "rotate(2deg)"
+          }
+        ],
+        "duration": 5500
+      },
+      {
+        "crop": [
+          950.0,
+          141.0,
+          163.0,
+          200.0
+        ],
+        "x": 88.0,
+        "y": 103.0,
+        "origin": "22.0px 15.0px",
+        "frames": [
+          {
+            "transform": "rotate(-3.5deg)"
+          },
+          {
+            "transform": "rotate(3.5deg)"
+          }
+        ],
+        "duration": 4000
+      },
+      {
+        "crop": [
+          626.0,
+          623.0,
+          233.0,
+          240.0
+        ],
+        "x": 18.0,
+        "y": 87.0,
+        "origin": "9.0px 12.0px",
+        "frames": [
+          {
+            "transform": "rotate(-2deg)"
+          },
+          {
+            "transform": "rotate(2deg)"
+          }
+        ],
+        "duration": 3500
+      },
+      {
+        "crop": [
+          1194.0,
+          141.0,
+          184.0,
+          191.0
+        ],
+        "x": 140.0,
+        "y": 79.0,
+        "origin": "57.0px 55.0px",
+        "frames": [
+          {
+            "transform": "rotate(-3deg)"
+          },
+          {
+            "transform": "rotate(3deg)"
+          }
+        ],
+        "duration": 5000
+      },
+      {
+        "crop": [
+          1131.0,
+          580.0,
+          122.0,
+          130.0
+        ],
+        "x": 178.0,
+        "y": 52.0,
+        "origin": "28.0px 7.0px",
+        "frames": [
+          {
+            "transform": "rotate(-3deg)"
+          },
+          {
+            "transform": "rotate(3deg)"
+          }
+        ],
+        "duration": 3500
+      },
+      {
+        "crop": [
+          443.0,
+          399.0,
+          271.0,
+          222.0
+        ],
+        "x": 271.0,
+        "y": 130.0,
+        "origin": "12.0px 11.0px",
+        "frames": [
+          {
+            "transform": "rotate(-2deg)"
+          },
+          {
+            "transform": "rotate(2deg)"
+          }
+        ],
+        "duration": 4000
+      },
+      {
+        "crop": [
+          348,
+          141,
+          93,
+          486
+        ],
+        "x": 62,
+        "y": 166,
+        "origin": "10px 0px",
+        "frames": [
+          {
+            "transform": "rotate(-5deg)"
+          },
+          {
+            "transform": "rotate(5deg)"
+          }
+        ],
+        "duration": 6000
+      },
+      {
+        "crop": [
+          1255,
+          580,
+          91,
+          118
+        ],
+        "x": 65,
+        "y": 547,
+        "origin": "7px -381px",
+        "frames": [
+          {
+            "transform": "rotate(-5deg)"
+          },
+          {
+            "transform": "rotate(5deg)"
+          }
+        ],
+        "duration": 6000
+      },
+      {
+        "crop": [
+          2,
+          2,
+          1380,
+          137
+        ],
+        "x": 0,
+        "y": 643,
+        "origin": "50% 100%",
+        "frames": [
+          {
+            "transform": "skewX(-1deg)"
+          },
+          {
+            "transform": "skewX(1deg)"
+          }
+        ],
+        "duration": 6000
+      }
+    ]
+  },
+  {
+    "id": "ferris-wheel",
+    "title": "旋转摩天轮",
+    "kind": "sprites",
+    "description": "粉色游乐园里，摩天轮缓缓转动，气球随风轻浮。",
+    "dark": false,
+    "shell": "#f2c0c3",
+    "accent": "#a52656",
+    "files": [
+      "background.png",
+      "sprites.png",
+      "preview.png"
+    ],
+    "background": "background.png",
+    "sprite": "sprites.png",
+    "spriteSize": [
+      1384,
+      566
+    ],
+    "poster": "preview.png",
+    "layers": [
+      {
+        "crop": [
+          1144,
+          256,
+          108,
+          145
+        ],
+        "x": 342,
+        "y": 539
+      },
+      {
+        "crop": [
+          713,
+          153,
+          277,
+          309
+        ],
+        "x": 95,
+        "y": 375
+      },
+      {
+        "crop": [
+          302,
+          153,
+          409,
+          410
+        ],
+        "x": 16,
+        "y": 177,
+        "easing": "linear",
+        "direction": "normal",
+        "frames": [
+          {
+            "transform": "rotate(0deg)"
+          },
+          {
+            "transform": "rotate(360deg)"
+          }
+        ],
+        "duration": 30000
+      },
+      {
+        "crop": [
+          2,
+          153,
+          298,
+          411
+        ],
+        "x": 35,
+        "y": 278
+      },
+      {
+        "crop": [
+          2,
+          2,
+          1380,
+          149
+        ],
+        "x": 0,
+        "y": 631
+      },
+      {
+        "crop": [
+          1144,
+          153,
+          149,
+          101
+        ],
+        "x": 92,
+        "y": 679
+      },
+      {
+        "crop": [
+          992,
+          153,
+          150,
+          132
+        ],
+        "x": 92,
+        "y": 608,
+        "origin": "15% 90%",
+        "frames": [
+          {
+            "transform": "rotate(-3deg)"
+          },
+          {
+            "transform": "rotate(3deg)"
+          }
+        ],
+        "duration": 5000
+      },
+      {
+        "crop": [
+          713,
+          464,
+          103,
+          76
+        ],
+        "x": 74,
+        "y": 588
+      },
+      {
+        "crop": [
+          859,
+          464,
+          89,
+          54
+        ],
+        "x": 152,
+        "y": 606,
+        "origin": "0% 50%",
+        "frames": [
+          {
+            "transform": "rotate(-5deg)"
+          },
+          {
+            "transform": "rotate(5deg)"
+          }
+        ],
+        "duration": 4000
+      },
+      {
+        "crop": [
+          818,
+          464,
+          39,
+          69
+        ],
+        "x": 1246,
+        "y": 237,
+        "frames": [
+          {
+            "transform": "translate(0px,0px)"
+          },
+          {
+            "transform": "translate(0px,-16px)"
+          }
+        ],
+        "duration": 6500
+      },
+      {
+        "crop": [
+          950,
+          464,
+          39,
+          54
+        ],
+        "x": 674,
+        "y": 84,
+        "frames": [
+          {
+            "transform": "translate(0px,0px)"
+          },
+          {
+            "transform": "translate(0px,20px)"
+          }
+        ],
+        "duration": 7500
+      }
+    ]
+  }
+]

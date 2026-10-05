@@ -1,0 +1,42 @@
+{
+  "sky-of-love": {
+    "application": "QQMusic macOS",
+    "version": "11.10.0",
+    "themeId": 10211,
+    "themeParameters": {
+      "subname": "恋空",
+      "skinIsLight": 1,
+      "bottom_colour_val": "80e3e5",
+      "highlight_colour_val": "0165ab"
+    },
+    "assets": [
+      {
+        "file": "assets/sky-of-love/background.png",
+        "source": "10211/23c3ff72070e4977c4a5cfaa8e50341f",
+        "sourceSHA256": "9f72105d6bf6573c77cac204847370c123e6c8bf734ff1e6d64a9611daf6d826",
+        "sha256": "272f2cbaa864cd3404760f71f6d8046f1da00de8fbddf6d2260b7ef9892ee1ac",
+        "transformation": "Extract embedded PNG after 36-byte TGF/NINE header; no pixel changes."
+      }
+    ]
+  },
+  "honey-pink": {
+    "application": "QQMusic macOS",
+    "version": "11.10.0",
+    "themeId": 10212,
+    "themeParameters": {
+      "subname": "哈尼粉",
+      "skinIsLight": 1,
+      "bottom_colour_val": "eb8fa2",
+      "highlight_colour_val": "e10b65"
+    },
+    "assets": [
+      {
+        "file": "assets/honey-pink/background.png",
+        "source": "10212/cae9a2730dc575720ed4a702f52b3fdb",
+        "sourceSHA256": "cf58089eb5551df2e72615e6a33366c48b441132a05157bf2433f794aaae4fe0",
+        "sha256": "d91f29e28e1b864585ccf6a51528c285553c15c5a1345d190ef80352adc198b8",
+        "transformation": "Extract embedded PNG after 36-byte TGF/NINE header; no pixel changes."
+      }
+    ]
+  }
+}

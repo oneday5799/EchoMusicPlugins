@@ -1,0 +1,10 @@
+{
+  "id": "app-theme-example",
+  "name": "全局主题与快捷卡片示例",
+  "version": "1.0.0",
+  "description": "演示可选择的晨雾、暮色主题、主题设置、背景装饰及侧栏候选卡片。",
+  "author": "EchoMusic",
+  "main": "index.js",
+  "capabilities": { "theme": true },
+  "requires": { "echoMusicVersion": ">=2.3.2-beta.7" }
+}

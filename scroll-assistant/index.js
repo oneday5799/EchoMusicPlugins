@@ -7,14 +7,24 @@ const DEFAULT_SETTINGS = {
 };
 
 const STYLE = `
-.echo-scroll-assistant-button {
+.echo-scroll-assistant-position {
   --echo-scroll-assistant-stack-y: 0px;
-  --echo-scroll-assistant-hover-y: 0px;
-  --echo-scroll-assistant-appear-y: 0px;
-  --echo-scroll-assistant-active-scale: 1;
   position: fixed;
-  width: 44px;
-  height: 44px;
+  width: 36px;
+  height: 36px;
+  z-index: 1050;
+  transform: translateY(var(--echo-scroll-assistant-stack-y));
+  transition:
+    transform var(--motion-duration-fast, 120ms) var(--motion-ease-standard, ease),
+    right var(--motion-duration-fast, 120ms) var(--motion-ease-standard, ease),
+    bottom var(--motion-duration-fast, 120ms) var(--motion-ease-standard, ease);
+}
+
+.echo-scroll-assistant-button {
+  --echo-scroll-assistant-hover-y: 0px;
+  --echo-scroll-assistant-active-scale: 1;
+  width: 100%;
+  height: 100%;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -26,22 +36,12 @@ const STYLE = `
   -webkit-backdrop-filter: var(--surface-backdrop-filter);
   backdrop-filter: var(--surface-backdrop-filter);
   cursor: pointer;
-  z-index: 1050;
   transition:
-    color 0.18s ease,
-    border-color 0.18s ease,
-    box-shadow 0.18s ease,
-    transform 0.16s cubic-bezier(0.2, 0, 0, 1),
-    opacity 0.3s ease,
-    right 0.16s cubic-bezier(0.2, 0, 0, 1),
-    bottom 0.16s cubic-bezier(0.2, 0, 0, 1);
-  transform: translateY(
-      calc(
-        var(--echo-scroll-assistant-stack-y) +
-        var(--echo-scroll-assistant-hover-y) +
-        var(--echo-scroll-assistant-appear-y)
-      )
-    )
+    color var(--motion-duration-fast, 120ms) var(--motion-ease-standard, ease),
+    border-color var(--motion-duration-fast, 120ms) var(--motion-ease-standard, ease),
+    box-shadow var(--motion-duration-fast, 120ms) var(--motion-ease-standard, ease),
+    transform var(--motion-duration-fast, 120ms) var(--motion-ease-standard, ease);
+  transform: translateY(var(--echo-scroll-assistant-hover-y))
     scale(var(--echo-scroll-assistant-active-scale));
 }
 
@@ -54,7 +54,7 @@ const STYLE = `
 
 /* A page-owned button must not show through a transparent lyric overlay,
    including its enter/leave animation. */
-body:has(.lyric-page) .echo-scroll-assistant-button {
+body:has(.lyric-page) .echo-scroll-assistant-position {
   display: none;
 }
 
@@ -63,7 +63,7 @@ body:has(.lyric-page) .echo-scroll-assistant-button {
 }
 
 .echo-scroll-assistant-button-icon {
-  transition: transform 0.18s ease;
+  transition: transform var(--motion-duration-fast, 120ms) var(--motion-ease-standard, ease);
 }
 
 .echo-scroll-assistant-button:hover .echo-scroll-assistant-button-icon {
@@ -81,15 +81,29 @@ body:has(.lyric-page) .echo-scroll-assistant-button {
 
 .echo-scroll-assistant-fade-enter-active,
 .echo-scroll-assistant-fade-leave-active {
-  transition:
-    opacity 0.3s ease,
-    transform 0.3s ease;
+  transition: opacity var(--motion-duration-fast, 120ms) var(--motion-ease-standard, ease);
 }
 
 .echo-scroll-assistant-fade-enter-from,
 .echo-scroll-assistant-fade-leave-to {
   opacity: 0;
-  --echo-scroll-assistant-appear-y: 10px;
+}
+
+.echo-scroll-assistant-fade-leave-active {
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .echo-scroll-assistant-position,
+  .echo-scroll-assistant-button,
+  .echo-scroll-assistant-button-icon {
+    transition: none;
+  }
+
+  .echo-scroll-assistant-button,
+  .echo-scroll-assistant-button:hover .echo-scroll-assistant-button-icon {
+    transform: none;
+  }
 }
 
 .echo-scroll-assistant-settings {
@@ -261,6 +275,7 @@ const pickContainer = (ctx) => {
 };
 
 const createFloatingButton = (ctx) => {
+  const Tooltip = ctx.vue.defineAsyncComponent(ctx.ui.components.Tooltip);
   const {
     computed,
     defineComponent,
@@ -332,8 +347,7 @@ const createFloatingButton = (ctx) => {
       };
 
       const scheduleUpdate = () => {
-        if (stopped) return;
-        if (frame) window.cancelAnimationFrame(frame);
+        if (stopped || frame) return;
         frame = window.requestAnimationFrame(() => {
           frame = 0;
           updateMetrics();
@@ -384,6 +398,7 @@ const createFloatingButton = (ctx) => {
       });
 
       const scrollToBottom = () => {
+        if (stopped) return;
         updateMetrics();
         if (!container.value) return;
         ctx.scroll.scrollToBottom(container.value, { behavior: "auto" });
@@ -404,11 +419,15 @@ const createFloatingButton = (ctx) => {
             mutations.some(
               (mutation) =>
                 shouldHandleBackToTopMutation(mutation) ||
-                [
-                  ...mutation.addedNodes,
-                  ...mutation.removedNodes,
-                  mutation.target,
-                ].some(
+                // Changes within the active page can change scrollHeight without
+                // adding a new container (pagination, expanded sections, etc.).
+                Boolean(container.value?.contains(mutation.target)) ||
+                // For childList inspect changed branches, not their ancestor:
+                // a tooltip appended to body must not rescan every page below it.
+                (mutation.type === "attributes"
+                  ? [mutation.target]
+                  : [...mutation.addedNodes, ...mutation.removedNodes]
+                ).some(
                   (node) =>
                     node instanceof Element &&
                     (node.matches(
@@ -433,7 +452,7 @@ const createFloatingButton = (ctx) => {
       onBeforeUnmount(() => {
         stopped = true;
         if (frame) window.cancelAnimationFrame(frame);
-        container.value?.removeEventListener("scroll", scheduleUpdate);
+        setContainer(null);
         window.removeEventListener("resize", scheduleUpdate);
         unwatchRoute?.();
         unwatchContainers?.();
@@ -453,22 +472,37 @@ const createFloatingButton = (ctx) => {
             default: () =>
               visible.value
                 ? h(
-                    "button",
+                    "div",
                     {
-                      type: "button",
-                      class: "echo-scroll-assistant-button",
+                      class: "echo-scroll-assistant-position",
                       style: buttonStyle.value,
-                      title: "到底部",
-                      "aria-label": "到底部",
-                      onClick: scrollToBottom,
                     },
                     [
-                      h(Icon, {
-                        class: "echo-scroll-assistant-button-icon",
-                        icon: ctx.icons.iconArrowDown,
-                        width: 20,
-                        height: 20,
-                      }),
+                      h(
+                        Tooltip,
+                        { content: "回到底部", side: "left" },
+                        {
+                          trigger: () =>
+                            h(
+                              "button",
+                              {
+                                type: "button",
+                                class:
+                                  "echo-scroll-assistant-button app-focus-ring-soft",
+                                "aria-label": "回到底部",
+                                onClick: scrollToBottom,
+                              },
+                              [
+                                h(Icon, {
+                                  class: "echo-scroll-assistant-button-icon",
+                                  icon: ctx.icons.iconArrowDown,
+                                  width: 18,
+                                  height: 18,
+                                }),
+                              ],
+                            ),
+                        },
+                      ),
                     ],
                   )
                 : null,

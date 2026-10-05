@@ -1,0 +1,30 @@
+[
+  {
+    "id": "sky-of-love",
+    "title": "恋空",
+    "kind": "static",
+    "description": "清新的青蓝色背景，点缀轻盈的字母纹样。",
+    "dark": false,
+    "shell": "#80e3e5",
+    "accent": "#0165ab",
+    "files": [
+      "background.png"
+    ],
+    "background": "background.png",
+    "poster": "background.png"
+  },
+  {
+    "id": "honey-pink",
+    "title": "哈尼粉",
+    "kind": "static",
+    "description": "柔和粉色与樱桃图案，带来轻甜的夏日气息。",
+    "dark": false,
+    "shell": "#eb8fa2",
+    "accent": "#e10b65",
+    "files": [
+      "background.png"
+    ],
+    "background": "background.png",
+    "poster": "background.png"
+  }
+]

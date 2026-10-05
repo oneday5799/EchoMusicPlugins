@@ -394,6 +394,7 @@ export default {
 | `ctx.dom.observe(selector, handler)`                                  | 监听动态出现的 DOM，禁用插件时自动断开                                                                                                                                                                                                                                                                                                                                                                        |
 | `ctx.ui.settings.define(options)`                                     | 声明插件设置入口，必须提供自定义 Vue 组件                                                                                                                                                                                                                                                                                                                                                                     |
 | `ctx.ui.sidebar.addItem(item)`                                        | 注册正式侧边栏导航入口，支持路由匹配、高亮和折叠侧栏图标                                                                                                                                                                                                                                                                                                                                                      |
+| `ctx.ui.sidebar.shortcuts.register(options)` | 注册侧栏上方的常用功能候选卡片，由用户通过 `+` 添加和直接排序；返回清理函数，详见 [侧栏快捷卡片 API](sidebar-shortcuts.md) |
 | `ctx.ui.titlebar.register(item)` | 注册标题栏操作，支持默认顶栏/更多位置与统一 Tooltip；返回清理函数，详见 [标题栏 API](titlebar.md) |
 | `ctx.ui.playerbar.register(item)` | 注册播放栏和歌词页底部控制操作，支持默认左/中/右/更多位置、用户拖拽布局、徽标与交互触发语义；返回清理函数，详见 [播放栏 API](playerbar.md) |
 | `ctx.ui.cover.setFallback(resolver)`                                  | 设置无封面或封面加载失败时的兜底图片 URL，resolver 必须同步返回字符串；resolver 会收到包含尺寸、来源信息和当前主题色的 `context`，详见下文「封面兜底」                                                                                                                                                                                                                                                                                                         |
@@ -1563,7 +1564,8 @@ const coverUrl = ctx.cover.createThemedIconCoverUrl({
 插件既可以用稳定的宿主贡献 API，也可以直接介入主界面 DOM。
 
 - `ctx.ui.addPage(...)`：注册完整插件页面，可通过 `/main/plugin/:pluginId/:pageId` 访问；传入 `sidebar` 后会同时注册正式侧边栏入口。
-- `ctx.ui.sidebar.addItem(...)`：为插件页面或自定义动作注册正式侧边栏导航入口，支持路由匹配、高亮和折叠侧栏图标。
+- `ctx.ui.sidebar.addItem(...)`：为插件页面或自定义动作注册下方菜单入口，支持路由匹配、高亮和折叠侧栏图标。
+- `ctx.ui.sidebar.shortcuts.register(...)`：注册上方常用功能候选卡片，用户通过 `+` 自行添加、移除和直接排序；与下方「菜单与歌单」布局编辑独立，详见 [侧栏快捷卡片 API](sidebar-shortcuts.md)。
 - `ctx.ui.settings.define(...)`：声明插件设置入口，传入自定义 Vue 组件自由渲染。
 - `ctx.ui.playerbar.register(...)`：注册播放栏与歌词页底部控制操作，交由宿主处理布局、更多菜单、徽标和自动清理。
 - `ctx.ui.cover.setFallback(...)`：设置无封面或封面加载失败时的显示图片。
@@ -1938,7 +1940,7 @@ await ctx.appIcons.refresh();
 
 ## 主题表面接入
 
-需要让主界面露出背景图、动态壁纸或沉浸式皮肤时，插件应优先使用 `ctx.theme.surface.set(...)`，不要直接覆盖 `.bg-bg-main`、`.player-bar`、`.dialog-content` 等宿主选择器。宿主会统一调整主内容、侧栏、卡片、弹层和播放器的语义背景 token，并在插件禁用时自动清理。
+提供用户可以选择的全局皮肤时，应使用 [全局主题 API](themes.md) 的 `ctx.theme.register(...)`。需要为内置主题补充表面效果时，可使用 `ctx.theme.surface.set(...)`，不要直接覆盖 `.bg-bg-main`、`.player-bar`、`.dialog-content` 等宿主选择器。宿主会统一调整主内容、侧栏、卡片、弹层和播放器的语义背景 token，并在插件禁用时自动清理。
 
 ```js
 export function activate(ctx) {
@@ -2481,3 +2483,7 @@ export function activate(ctx) {
   });
 }
 ```
+
+## 可选择的全局主题与侧栏顶部卡片
+
+全局主题使用 `ctx.theme.register/useTheme/openThemes`，详见 [主题 API](themes.md) 与 [可运行示例](../app-theme-example)。侧栏顶部候选使用 `ctx.ui.sidebar.shortcuts.register`，详见 [快捷卡片 API](sidebar-shortcuts.md)。旧 sidebar.addItem 和 addPage.sidebar 仍控制下面菜单。主题中心统一解析主题、用户覆盖与旧 surface/gradient；用户显式设置优先，插件主题不受旧表面贡献覆盖。

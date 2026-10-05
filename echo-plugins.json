@@ -492,6 +492,26 @@
       "tags": [
         "share"
       ]
+    },
+    {
+      "id": "theme-static",
+      "path": "theme-static",
+      "homepage": "https://github.com/hoowhoami/EchoMusicPlugins/tree/main/theme-static",
+      "tags": [
+        "appearance",
+        "theme",
+        "static"
+      ]
+    },
+    {
+      "id": "theme-dynamic",
+      "path": "theme-dynamic",
+      "homepage": "https://github.com/hoowhoami/EchoMusicPlugins/tree/main/theme-dynamic",
+      "tags": [
+        "appearance",
+        "theme",
+        "dynamic"
+      ]
     }
   ]
 }

@@ -1,0 +1,175 @@
+{
+  "autumn": {
+    "application": "QQMusic macOS",
+    "version": "11.10.0",
+    "themeId": 10203,
+    "themeParameters": {
+      "subname": "秋日枫叶",
+      "skinIsLight": 2,
+      "bottom_colour_val": "d07a00",
+      "highlight_colour_val": "F1CF0B"
+    },
+    "assets": [
+      {
+        "file": "assets/autumn/autumn.png",
+        "source": "iTheme/10203/pcskin-fengye/staticImage.png",
+        "sourceSHA256": "131374a72cc45b4c2bce9d6cbf6ab99a1c39acc32f8cb71eb823dc09e06c003b",
+        "sha256": "131374a72cc45b4c2bce9d6cbf6ab99a1c39acc32f8cb71eb823dc09e06c003b"
+      },
+      {
+        "file": "assets/autumn/leaf.png",
+        "source": "iTheme/10203/pcskin-fengye/motionElement.png",
+        "sourceSHA256": "759e86fee286ae9d10803df0187f571a459005d173de03f06c1efbc57e55a5e6",
+        "sha256": "759e86fee286ae9d10803df0187f571a459005d173de03f06c1efbc57e55a5e6"
+      }
+    ],
+    "animation": {
+      "lifetimeSeconds": 15,
+      "birthRate": 0.5,
+      "scaleRange": [
+        1.2,
+        2
+      ],
+      "note": "Original parameters; Web Animations trajectory remains adapted."
+    }
+  },
+  "prism": {
+    "application": "QQMusic macOS",
+    "version": "11.10.0",
+    "themeId": 10205,
+    "themeParameters": {
+      "subname": "幻彩",
+      "skinIsLight": 2,
+      "bottom_colour_val": "29292b",
+      "highlight_colour_val": "11BE71"
+    },
+    "assets": [
+      {
+        "file": "assets/prism/prism.png",
+        "source": "iTheme/10205/pcskin-staticImage-4/staticImage.png",
+        "sourceSHA256": "950a4eccd985c4ca8658e499431bf2bffc92cdc35ab600c825cf764d6becec35",
+        "sha256": "950a4eccd985c4ca8658e499431bf2bffc92cdc35ab600c825cf764d6becec35"
+      },
+      {
+        "file": "assets/prism/prism-flow.mp4",
+        "source": "default.metallib:colorAniMutiColorSamplingShader",
+        "sourceSHA256": "60f01d2e03f998106131595726c86be8dcde40143429f4aaea3dd6e14b73eca6",
+        "sha256": "c4d5afff9b04aa9c8c765c315b48881a9cca36df4e9d2c1f611dc51ede575597"
+      }
+    ],
+    "playbackRate": 1,
+    "conversion": {
+      "resolution": [
+        960,
+        540
+      ],
+      "fps": 30,
+      "seconds": 36,
+      "frames": 1080,
+      "phase": "1 - cos(2*pi*frame/1080 + pi/2)",
+      "playbackRate": 1,
+      "note": "Smooth 0..2 phase range; starts at maximum flow speed, avoiding a nearly static opening.",
+      "playbackLoopSeconds": 36
+    }
+  },
+  "golden-ribbon": {
+    "application": "QQMusic macOS",
+    "version": "11.10.0",
+    "themeId": 10210,
+    "themeParameters": {
+      "subname": "金丝带",
+      "skinIsLight": 2,
+      "bottom_colour_val": "010101",
+      "highlight_colour_val": "CD8038"
+    },
+    "assets": [
+      {
+        "file": "assets/golden-ribbon/golden-ribbon.png",
+        "source": "iTheme/10210/jsdstaticImage/staticImage.png",
+        "sourceSHA256": "c6a8dd91942e1e689d499f2484524544b8bd6d3c38bb524e5889d847afcd2627",
+        "sha256": "c6a8dd91942e1e689d499f2484524544b8bd6d3c38bb524e5889d847afcd2627"
+      },
+      {
+        "file": "assets/golden-ribbon/golden-ribbon.mp4",
+        "source": "default.metallib:colorAniChocolateColorSamplingShader",
+        "sourceSHA256": "60f01d2e03f998106131595726c86be8dcde40143429f4aaea3dd6e14b73eca6",
+        "sha256": "87a156eab6eb59df8c003687748e102ace7d5fabb24c24de76bf31adb2fffd5f"
+      }
+    ],
+    "playbackRate": 1,
+    "conversion": {
+      "resolution": [
+        960,
+        540
+      ],
+      "fps": 24,
+      "seconds": 30,
+      "phase": "2200 * sin(2*pi*frame/720)",
+      "note": "Original Metal shaders rendered offline; loop timing adapted. Leaves animation reimplemented from the local sprite."
+    }
+  },
+  "willow": {
+    "application": "QQMusic macOS",
+    "version": "11.10.0",
+    "themeId": 10206,
+    "themeParameters": {
+      "subname": "杨柳依依",
+      "skinIsLight": 1,
+      "bottom_colour_val": "318BA4",
+      "highlight_colour_val": "FFDE00"
+    },
+    "assets": [
+      {
+        "file": "assets/willow/background.png",
+        "source": "10206/3fd8331471dca5c580fbd8f2edb10453",
+        "sourceSHA256": "8591a64f35594cbdffc17f0d52a6e77e5177850c69741c5a3461f485987201bf",
+        "sha256": "8591a64f35594cbdffc17f0d52a6e77e5177850c69741c5a3461f485987201bf"
+      },
+      {
+        "file": "assets/willow/sprites.png",
+        "source": "10206/pcskin-yangliu/motionElement.png",
+        "sourceSHA256": "d3c7e208f9cbc217e3da4ef693fec330f45cbf9045f4c813c7f7e6c2db0c0948",
+        "sha256": "d3c7e208f9cbc217e3da4ef693fec330f45cbf9045f4c813c7f7e6c2db0c0948"
+      },
+      {
+        "file": "assets/willow/preview.png",
+        "source": "10206/pcskin-yangliu/staticImage.png",
+        "sourceSHA256": "bd22f0bb5f7a8ba76546abb944e52bb5123ea8e320ba6f0fe917555d3b776f5d",
+        "sha256": "bd22f0bb5f7a8ba76546abb944e52bb5123ea8e320ba6f0fe917555d3b776f5d"
+      }
+    ],
+    "adaptation": "Original clean background and sprite atlas; native crop/frame coordinates adapted with Web Animations. Native animation not reproduced frame-for-frame. Ferris wheel 30s; willow branch angle/duration from native arrays. Paused by host motionEnabled."
+  },
+  "ferris-wheel": {
+    "application": "QQMusic macOS",
+    "version": "11.10.0",
+    "themeId": 10207,
+    "themeParameters": {
+      "subname": "旋转摩天轮",
+      "skinIsLight": 1,
+      "bottom_colour_val": "f2c0c3",
+      "highlight_colour_val": "a52656"
+    },
+    "assets": [
+      {
+        "file": "assets/ferris-wheel/background.png",
+        "source": "10207/6b10e39f06bcac35ef44cd4af14907cb",
+        "sourceSHA256": "d7d26641cbfa34f85143c595c04d7b899b9e540fa2657494e77a939a61e9f999",
+        "sha256": "d7d26641cbfa34f85143c595c04d7b899b9e540fa2657494e77a939a61e9f999"
+      },
+      {
+        "file": "assets/ferris-wheel/sprites.png",
+        "source": "10207/pcskin-motianlun/motionElement.png",
+        "sourceSHA256": "29a2a05b301df41f4ada4210923f5e698b5dbe9e9cf2c58567a30b3b6fb0bc16",
+        "sha256": "29a2a05b301df41f4ada4210923f5e698b5dbe9e9cf2c58567a30b3b6fb0bc16"
+      },
+      {
+        "file": "assets/ferris-wheel/preview.png",
+        "source": "10207/pcskin-motianlun/staticImage.png",
+        "sourceSHA256": "2c08f536be9567c1c18af65fd62c8dadeb393b4f821973f8e162062c82f20832",
+        "sha256": "2c08f536be9567c1c18af65fd62c8dadeb393b4f821973f8e162062c82f20832"
+      }
+    ],
+    "adaptation": "Original clean background and sprite atlas; native crop/frame coordinates adapted with Web Animations. Native animation not reproduced frame-for-frame. Ferris wheel 30s; willow branch angle/duration from native arrays. Paused by host motionEnabled."
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "id": "theme-static",
+  "name": "静态主题",
+  "version": "1.0.0",
+  "description": "包含恋空、哈尼粉。",
+  "author": "EchoMusic",
+  "main": "index.js",
+  "capabilities": {
+    "theme": true
+  },
+  "requires": {
+    "echoMusicVersion": ">=2.3.2-beta.7"
+  },
+  "tags": [
+    "静态"
+  ]
+}
