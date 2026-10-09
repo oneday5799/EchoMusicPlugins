@@ -9,3 +9,11 @@ team-pool-worker/.wrangler/
 # WorkBuddy 记忆/工作数据（本地留存，不入库）
 .workbuddy/
 .workbuddy-ai/
+
+# esbuild 构建副产物（宿主只加载 manifest 声明的 style.css）
+apple-music-style/index.css
+
+# 插件目录内的本地临时残留
+apple-music-style/preview-datauri.txt
+apple-music-style/style.merged.css
+apple-music-style.zip
