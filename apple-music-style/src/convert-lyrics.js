@@ -86,7 +86,7 @@ export function buildAmllLyricLines(lines, mode, romanizationAsRuby) {
   const withRomanization = mode === 'romanization' || mode === 'both'
 
   return (Array.isArray(lines) ? lines : [])
-    .map((line, index, sourceLines) => {
+    .map((line) => {
       const chars = line.characters ?? []
       const lineStart = (chars[0]?.startTime ?? Math.round((line.time || 0) * 1000)) || 0
       const lineEnd = Math.max(
@@ -104,5 +104,4 @@ export function buildAmllLyricLines(lines, mode, romanizationAsRuby) {
         isDuet: false,
       }
     })
-    .filter((line) => line.words.length > 0)
 }

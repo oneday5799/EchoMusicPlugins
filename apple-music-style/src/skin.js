@@ -4,16 +4,16 @@
 import { LyricPlayer as CoreLyricPlayer } from '@applemusic-like-lyrics/core'
 import '@applemusic-like-lyrics/core/style.css'
 import { buildAmllLyricLines } from './convert-lyrics.js'
-
-const PLAY_MODE_ORDER = ['sequential', 'list', 'random', 'single']
+import { normalizeSettings, clamp } from './settings.js'
 
 const QUALITY_MAP = {
   '128': 'SD',
   '320': 'HQ',
   flac: 'SQ',
   high: 'HR',
-  viper_tape: 'VPR',
-  cloud: 'CLD',
+  viper_tape: 'VPT',
+  viper_clear: 'VPC',
+  viper_atmos: 'VPA',
 }
 
 const QUALITY_LABELS = {
@@ -22,16 +22,14 @@ const QUALITY_LABELS = {
   flac: '无损',
   high: 'Hi-Res',
   viper_tape: '蝰蛇母带',
+  viper_clear: '蝰蛇超清',
+  viper_atmos: '蝰蛇全景声',
 }
 
 function formatTime(seconds) {
   const s = Math.floor(Math.max(0, seconds))
   const m = Math.floor(s / 60)
   return m + ':' + (s % 60 < 10 ? '0' : '') + (s % 60)
-}
-
-function clamp(v, min, max) {
-  return Math.max(min, Math.min(max, v))
 }
 
 // AMLL RAF 配置
@@ -41,7 +39,7 @@ const SET_TIME_INTERVAL = 1000 / 30
 const OVERSCAN_PX = 200
 
 export function createSkinComponent(ctx) {
-  const { defineComponent, h, ref, shallowRef, computed, watch, onMounted, onUnmounted } = ctx.vue
+  const { defineComponent, h, ref, shallowRef, computed, watch, onMounted, onUnmounted, Teleport } = ctx.vue
 
   return defineComponent({
     name: 'AppleMusicSkin',
@@ -50,21 +48,7 @@ export function createSkinComponent(ctx) {
     },
     setup(props) {
       const skin = ctx.ui.lyricsPage.useSkin()
-      const settings = computed(() => {
-        const s = skin.settings.value || {}
-        return {
-          enhanceContrast: Boolean(s.enhanceContrast),
-          fontScale: clamp(Number(s.fontScale ?? 100), 50, 200),
-          fontWeight: clamp(Number(s.fontWeight ?? 850), 300, 900),
-          enableBlur: Boolean(s.enableBlur ?? true),
-          enableScale: Boolean(s.enableScale ?? true),
-          enableSpring: Boolean(s.enableSpring ?? true),
-          fadeWidth: clamp(Number(s.fadeWidth ?? 50), 0, 100),
-          alignPosition: clamp(Number(s.alignPosition ?? 48), 0, 100),
-          showTranslation: Boolean(s.showTranslation),
-          showRomanization: Boolean(s.showRomanization),
-        }
-      })
+      const settings = computed(() => normalizeSettings(skin.settings.value))
 
       // DOM refs
       const playerAreaRef = ref(null)
@@ -86,19 +70,25 @@ export function createSkinComponent(ctx) {
       const seeking = ref(false)
       const hoverStartTime = ref(0)
 
+      // Side tools visibility (mirrors the host lyric page tools behaviour)
+      const sideToolsHovered = ref(false)
+      const hostContentEl = ref(null)
+      const commentBtnEl = ref(null)
+
       // --- Computed state from page ---
       const state = computed(() => props.page.state.value)
       const track = computed(() => state.value.track || {})
       const isPlaying = computed(() => state.value.isPlaying)
       const currentTime = computed(() => state.value.currentTime || 0)
       const duration = computed(() => state.value.duration || 0)
-      const volume = computed(() => state.value.volume ?? 80)
       const playMode = computed(() => state.value.playMode || 'list')
       const isFavorite = computed(() => state.value.isFavorite)
       const audioQuality = computed(() => state.value.audioQuality || '')
       const qualityOptions = computed(() => state.value.qualityOptions || [])
+      const isCloudSource = computed(() => Boolean(state.value.isCloudSource))
       const hasCloudSource = computed(() => state.value.hasCloudSource)
       const lyrics = computed(() => state.value.lyrics)
+      const lyricLines = computed(() => lyrics.value.lines || [])
 
       const readTimelineMs = () => {
         if (disposed) return null
@@ -132,25 +122,23 @@ export function createSkinComponent(ctx) {
       const currentTimeStr = computed(() => formatTime(currentTime.value))
       const remainTimeStr = computed(() => '-' + formatTime(Math.max(0, duration.value - currentTime.value)))
 
-      const qualityLabel = computed(() => QUALITY_MAP[audioQuality.value] || '')
+      const qualityLabel = computed(() =>
+        isCloudSource.value ? 'CLD' : (QUALITY_MAP[audioQuality.value] || ''),
+      )
 
       // --- Lyrics mode for AMLL ---
       const lyricsMode = computed(() => {
-        if (settings.value.showTranslation && settings.value.showRomanization) return 'both'
-        if (settings.value.showTranslation) return 'translation'
-        if (settings.value.showRomanization) return 'romanization'
+        const wantTranslation = Boolean(lyrics.value.wantTranslation)
+        const wantRomanization = Boolean(lyrics.value.wantRomanization)
+        if (wantTranslation && wantRomanization) return 'both'
+        if (wantTranslation) return 'translation'
+        if (wantRomanization) return 'romanization'
         return 'none'
       })
 
       const amllLines = computed(() =>
-        buildAmllLyricLines(lyrics.value.lines, lyricsMode.value, false),
+        buildAmllLyricLines(lyricLines.value, lyricsMode.value, false),
       )
-
-      let lastSetLinesKey = ''
-      const getLinesKey = (lines) => {
-        if (!lines || !lines.length) return ''
-        return lines.length + ':' + lines[0].startTime + ':' + lines[lines.length - 1].startTime
-      }
 
       // --- AMLL lifecycle ---
       const rafLoop = (timestamp) => {
@@ -245,13 +233,10 @@ export function createSkinComponent(ctx) {
 
       // --- Watchers ---
       watch(amllLines, (lines) => {
-        const key = getLinesKey(lines)
-        if (key === lastSetLinesKey) return
         const player = amllPlayer.value
         const timelineMs = readTimelineMs()
         if (!player || timelineMs === null) return
         player.setLyricLines(lines, timelineMs)
-        lastSetLinesKey = key
         lastAppliedTimeMs = Number.NaN
         lastSetTimeAt = 0
         if (!isPlaying.value || document.hidden) player.pause()
@@ -292,7 +277,7 @@ export function createSkinComponent(ctx) {
       })
 
       watch(
-        () => [currentTime.value, lyrics.value.timeOffset],
+        [() => currentTime.value, () => lyrics.value.timeOffset],
         () => requestFrame(),
       )
 
@@ -320,11 +305,26 @@ export function createSkinComponent(ctx) {
       )
 
       // --- Actions ---
+      const runGuarded = (label, fn) => {
+        try {
+          const result = fn()
+          if (result && typeof result.catch === 'function') {
+            result.catch((error) => console.warn(label, error))
+          }
+        } catch (error) {
+          console.warn(label, error)
+        }
+      }
+
       const togglePlay = () => props.page.playback.toggle()
       const playPrev = () => props.page.playback.prev()
       const playNext = () => props.page.playback.next()
-      const cycleMode = () => props.page.playback.cycleMode()
-      const toggleFavorite = () => props.page.favorite.toggle()
+      const openComments = () =>
+        runGuarded('[AppleMusicStyle] 打开评论面板失败', () => props.page.panels.open('comments'))
+      const toggleFavorite = () =>
+        runGuarded('[AppleMusicStyle] 收藏切换失败', () => props.page.favorite.toggle())
+      const setRandomMode = () => props.page.playback.setMode('random')
+      const setListMode = () => props.page.playback.setMode('list')
 
       const seekTo = (seconds) => {
         props.page.playback.seek(Math.max(0, Math.min(seconds, duration.value || 0)))
@@ -342,6 +342,32 @@ export function createSkinComponent(ctx) {
         handleProgressClick(e)
       }
 
+      const handleProgressMouseEnter = (e) => {
+        hoverStartTime.value = Date.now()
+        const el = e.currentTarget
+        if (el.classList.contains('spring')) {
+          const curH = getComputedStyle(el, '::before').height
+          el.style.setProperty('--fill-h', curH)
+          el.classList.remove('spring')
+          void el.offsetWidth
+        }
+      }
+
+      const handleProgressMouseLeave = (e) => {
+        const el = e.currentTarget
+        el.style.removeProperty('--fill-h')
+        const hoverDuration = Date.now() - hoverStartTime.value
+        el.classList.remove('spring')
+        if (hoverDuration >= 100) {
+          void el.offsetWidth
+          el.classList.add('spring')
+        }
+      }
+
+      const handleProgressAnimationEnd = (e) => {
+        e.currentTarget.classList.remove('spring')
+      }
+
       const handleMouseMove = (e) => {
         if (seeking.value) handleProgressClick(e)
       }
@@ -350,20 +376,15 @@ export function createSkinComponent(ctx) {
         seeking.value = false
       }
 
-      const handleQualitySelect = (quality) => {
-        try {
-          props.page.audio.setQuality(quality)
-        } catch (e) {
-          console.warn('[AppleMusicStyle] 音质切换失败', e)
-        }
-      }
+      const handleQualitySelect = (quality) =>
+        runGuarded('[AppleMusicStyle] 音质切换失败', () =>
+          quality === 'cloud'
+            ? props.page.audio.useCloudSource()
+            : props.page.audio.setQuality(quality),
+        )
 
       // Quality popup state
       const showQualityPopup = ref(false)
-      const qualityPopupRef = ref(null)
-
-      const QUALITY_MAP = { '128': 'SD', '320': 'HQ', flac: 'SQ', high: 'HR', viper_tape: 'VPR', cloud: 'CLD' }
-      const QUALITY_NAMES = { '128': '标准', '320': '高品质', flac: '无损', high: 'Hi-Res', viper_tape: '蝰蛇母带' }
 
       const toggleQualityPopup = (e) => {
         e.stopPropagation()
@@ -382,6 +403,7 @@ export function createSkinComponent(ctx) {
       // Button press animation handlers
       const btnPressTimers = new Map()
       const btnReleasing = new Set()
+      const btnReleaseTimers = new Set()
 
       const handleBtnMouseDown = (e) => {
         const btn = e.currentTarget
@@ -397,7 +419,7 @@ export function createSkinComponent(ctx) {
         btnPressTimers.set(btn, timer)
       }
 
-      const handleBtnMouseUp = (e) => {
+      const handleBtnPressEnd = (e) => {
         const btn = e.currentTarget
         clearTimeout(btnPressTimers.get(btn))
         btnPressTimers.delete(btn)
@@ -406,30 +428,25 @@ export function createSkinComponent(ctx) {
           void btn.offsetWidth
           btnReleasing.add(btn)
           btn.classList.add('releasing')
-          setTimeout(() => {
+          const timer = setTimeout(() => {
             btn.classList.remove('releasing')
             btnReleasing.delete(btn)
+            btnReleaseTimers.delete(timer)
           }, 300)
-        }
-      }
-
-      const handleBtnMouseLeave = (e) => {
-        const btn = e.currentTarget
-        clearTimeout(btnPressTimers.get(btn))
-        btnPressTimers.delete(btn)
-        if (btn.classList.contains('pressing') || btn.classList.contains('holding')) {
-          btn.classList.remove('pressing', 'holding')
-          void btn.offsetWidth
-          btnReleasing.add(btn)
-          btn.classList.add('releasing')
-          setTimeout(() => {
-            btn.classList.remove('releasing')
-            btnReleasing.delete(btn)
-          }, 300)
+          btnReleaseTimers.add(timer)
         }
       }
 
       // --- Lifecycle ---
+      const handleSideToolsEnter = () => {
+        sideToolsHovered.value = true
+      }
+
+      const handleSideToolsLeave = (e) => {
+        if (commentBtnEl.value && commentBtnEl.value.contains(e.relatedTarget)) return
+        sideToolsHovered.value = false
+      }
+
       onMounted(() => {
         disposed = false
         initAmll()
@@ -437,6 +454,11 @@ export function createSkinComponent(ctx) {
         const img = coverImgRef.value
         if (img) {
           img.style.transform = isPlaying.value ? 'scale(1)' : 'scale(0.75)'
+        }
+        hostContentEl.value = document.querySelector('.plugin-lyrics-content')
+        if (hostContentEl.value) {
+          hostContentEl.value.addEventListener('mouseenter', handleSideToolsEnter)
+          hostContentEl.value.addEventListener('mouseleave', handleSideToolsLeave)
         }
         document.addEventListener('mousemove', handleMouseMove)
         document.addEventListener('mouseup', handleMouseUp)
@@ -447,11 +469,18 @@ export function createSkinComponent(ctx) {
         disposed = true
         if (coverAnim) { coverAnim.cancel(); coverAnim = null }
         disposeAmll()
+        if (hostContentEl.value) {
+          hostContentEl.value.removeEventListener('mouseenter', handleSideToolsEnter)
+          hostContentEl.value.removeEventListener('mouseleave', handleSideToolsLeave)
+        }
+        hostContentEl.value = null
         document.removeEventListener('mousemove', handleMouseMove)
         document.removeEventListener('mouseup', handleMouseUp)
         document.removeEventListener('click', closeQualityPopup)
         btnPressTimers.forEach((t) => clearTimeout(t))
         btnPressTimers.clear()
+        btnReleaseTimers.forEach((t) => clearTimeout(t))
+        btnReleaseTimers.clear()
         btnReleasing.clear()
       })
 
@@ -517,14 +546,15 @@ export function createSkinComponent(ctx) {
               ref: progressTrackRef,
               class: 'amms-progress-track',
               onMousedown: handleProgressMouseDown,
+              onMouseenter: handleProgressMouseEnter,
+              onMouseleave: handleProgressMouseLeave,
+              onAnimationend: handleProgressAnimationEnd,
             },
             [
               h('div', {
                 class: 'amms-progress-fill',
                 style: { width: progressPct.value + '%' },
-              }, [
-                h('div', { class: 'amms-progress-thumb' }),
-              ]),
+              }),
             ],
           ),
           h('div', { class: 'amms-progress-times' }, [
@@ -533,8 +563,7 @@ export function createSkinComponent(ctx) {
               ? h(
                   'button',
                   {
-                    ref: qualityPopupRef,
-                    class: ['amms-quality-btn', 'has-quality'],
+                    class: 'amms-quality-btn',
                     title: '音质切换',
                     onClick: toggleQualityPopup,
                   },
@@ -546,20 +575,24 @@ export function createSkinComponent(ctx) {
                             ? h(
                                 'div',
                                 {
-                                  class: ['amms-quality-popup-item', audioQuality.value === 'cloud' ? 'active' : ''],
+                                  class: ['amms-quality-popup-item', isCloudSource.value ? 'active' : ''],
                                   onClick: () => selectQuality('cloud'),
                                 },
                                 'CLD 云盘',
                               )
                             : null,
-                          ...(qualityOptions.value || []).map((q) =>
+                          ...qualityOptions.value.map((q) =>
                             h(
                               'div',
                               {
-                                class: ['amms-quality-popup-item', q.value === audioQuality.value ? 'active' : ''],
-                                onClick: () => selectQuality(q.value),
-                              },
-                              (QUALITY_MAP[q.value] || q.value) + ' ' + (QUALITY_NAMES[q.value] || ''),
+                                class: [
+                                'amms-quality-popup-item',
+                                q.value === audioQuality.value && !isCloudSource.value ? 'active' : '',
+                                q.disabled ? 'disabled' : '',
+                              ],
+                              onClick: q.disabled ? undefined : () => selectQuality(q.value),
+                            },
+                            (QUALITY_MAP[q.value] || q.value) + ' ' + (QUALITY_LABELS[q.value] || ''),
                             ),
                           ),
                         ])
@@ -578,14 +611,10 @@ export function createSkinComponent(ctx) {
             {
               class: ['amms-ctrl-btn', 'small', playMode.value === 'random' ? 'active' : ''],
               title: '随机播放',
-              onClick: () => {
-                const idx = PLAY_MODE_ORDER.indexOf(playMode.value)
-                const next = PLAY_MODE_ORDER[(idx + 1) % PLAY_MODE_ORDER.length]
-                props.page.playback.setMode(next)
-              },
+              onClick: setRandomMode,
               onMousedown: handleBtnMouseDown,
-              onMouseup: handleBtnMouseUp,
-              onMouseleave: handleBtnMouseLeave,
+              onMouseup: handleBtnPressEnd,
+              onMouseleave: handleBtnPressEnd,
             },
             h(
               'svg',
@@ -601,8 +630,8 @@ export function createSkinComponent(ctx) {
                 title: '上一首',
                 onClick: playPrev,
                 onMousedown: handleBtnMouseDown,
-                onMouseup: handleBtnMouseUp,
-                onMouseleave: handleBtnMouseLeave,
+                onMouseup: handleBtnPressEnd,
+                onMouseleave: handleBtnPressEnd,
               },
               h(
                 'svg',
@@ -620,8 +649,8 @@ export function createSkinComponent(ctx) {
                 title: '播放/暂停',
                 onClick: togglePlay,
                 onMousedown: handleBtnMouseDown,
-                onMouseup: handleBtnMouseUp,
-                onMouseleave: handleBtnMouseLeave,
+                onMouseup: handleBtnPressEnd,
+                onMouseleave: handleBtnPressEnd,
               },
               isPlaying.value
                 ? h(
@@ -645,8 +674,8 @@ export function createSkinComponent(ctx) {
                 title: '下一首',
                 onClick: playNext,
                 onMousedown: handleBtnMouseDown,
-                onMouseup: handleBtnMouseUp,
-                onMouseleave: handleBtnMouseLeave,
+                onMouseup: handleBtnPressEnd,
+                onMouseleave: handleBtnPressEnd,
               },
               h(
                 'svg',
@@ -663,18 +692,17 @@ export function createSkinComponent(ctx) {
             {
               class: ['amms-ctrl-btn', 'small', playMode.value === 'list' ? 'active' : ''],
               title: '列表循环',
-              onClick: cycleMode,
+              onClick: setListMode,
               onMousedown: handleBtnMouseDown,
-              onMouseup: handleBtnMouseUp,
-              onMouseleave: handleBtnMouseLeave,
+              onMouseup: handleBtnPressEnd,
+              onMouseleave: handleBtnPressEnd,
             },
             h(
               'svg',
-              { viewBox: '0 0 1167 1024', fill: 'currentColor' },
-              [
-                h('path', { d: 'M146.45833314 644.4249998c21.62499961-6.00000029 34.27499971-28.4000001 28.27500029-50.00000009-6.72500039-24.2499999-10.14999961-49.42500029-10.14999961-74.87499991 0-153.8499999 125.17499971-279.02499961 279.02499961-279.02499961l378.0749997 1e-8L821.68333313 312.49999971c0 23.10000029 16.07500019 32.0500002 35.7000003 19.8749997l173.22500039-107.30000039c19.6250001-12.17499961 19.82499961-32.37500039 0.42500039-44.8999998L856.95833304 67.7499998c-19.4000001-12.52500029-35.2749999-3.8750001-35.27499991 19.19999971l0 72.3250002L443.58333294 159.27499971c-96.22500029 0-186.6999999 37.4749998-254.7500001 105.525C120.80833314 332.8499999 83.33333333 423.32500039 83.33333333 519.5499998c0 32.7999999 4.42500029 65.3000001 13.12499971 96.6250002 5.0000001 17.97500039 21.3249999 29.7500001 39.12500039 29.7500001C139.15833294 645.9250001 142.83333353 645.44999961 146.45833314 644.4249998z' }),
-                h('path', { d: 'M1082.33333333 391.74999981C1077.33333323 373.77500029 1061.00833343 361.99999971 1043.20833294 361.99999971c-3.6 0-7.2500001 0.47499961-10.90000019 1.50000029-21.62499961 6.00000029-34.27499971 28.4000001-28.2750003 50.0000001 6.72500039 24.2499999 10.14999961 49.42500029 10.14999961 74.8749999 0 153.8499999-125.17499971 279.02499961-279.02499961 279.02499961L357.10833323 767.39999961l0-71.97500039c0-23.10000029-16.07500019-32.0500002-35.70000029-19.87499971l-173.22500039 107.30000039c-19.6250001 12.17499961-19.82499961 32.37500039-0.42500039 44.89999981l174.04999981 112.42500029c19.40000029 3.8750001 35.2749999-19.19999971 0-72.32500019 0-72.32500019 378.07499971 0c96.22500029 0 186.6999999-37.4749998 254.75000009-105.525 68.05000019-68.05000019 105.525-158.5249998 105.525-254.7500001C1095.43333343 455.59999971 1091.03333362 423.0749999 1082.33333333 391.74999981z' }),
-              ],
+              { viewBox: '0 0 1024 1024', fill: 'currentColor' },
+              h('path', {
+                d: 'M301.392 805.072v53.856a20 20 0 0 1-33.056 15.104l-117.76-101.84a20 20 0 0 1 0-30.24l117.76-101.84a20 20 0 0 1 33.056 15.12v53.84h332.288c89.344 0 161.856-72.8 161.856-162.72v-9.6a48 48 0 1 1 96 0v9.6c0 142.832-115.408 258.72-257.856 258.72H301.392z m437.216-570.144v-53.856a20 20 0 0 1 33.056-15.104l117.76 101.84a20 20 0 0 1 0 30.24l-117.76 101.84a20 20 0 0 1-33.056-15.12v-53.84H406.32c-89.344 0-161.856 72.8-161.856 162.72v9.6a48 48 0 0 1-96 0v-9.6c0-142.832 115.408-258.72 257.856-258.72h332.288z',
+              }),
             ),
           ),
         ])
@@ -703,6 +731,14 @@ export function createSkinComponent(ctx) {
             style: {
               '--amll-font-scale': settings.value.fontScale / 100,
               '--amll-font-weight': settings.value.fontWeight,
+              '--amll-text-shadow': settings.value.enhanceContrast
+                ? '0 2px 10px rgba(0,0,0,0.62), 0 14px 36px rgba(0,0,0,0.45)'
+                : undefined,
+              '--amll-unplayed-color': settings.value.enhanceContrast
+                ? 'rgba(255,255,255,1)'
+                : undefined,
+              '--amll-sub-opacity': settings.value.enhanceContrast ? '0.72' : undefined,
+              '--amll-bg-opacity': settings.value.enhanceContrast ? '0.58' : undefined,
             },
           }, [
             h('div', {
@@ -711,6 +747,49 @@ export function createSkinComponent(ctx) {
               h('div', { ref: playerAreaRef, class: 'amms-amll-area' }),
             ]),
           ]),
+          // 评论按钮：传送到宿主工具区同级，脱离插件的 isolate 堆叠上下文
+          hostContentEl.value
+            ? h(Teleport, { to: hostContentEl.value.parentElement }, [
+                h(
+                  'div',
+                  {
+                    class: 'amms-side-tools',
+                    style: {
+                      opacity: sideToolsHovered.value ? 1 : 0,
+                      pointerEvents: sideToolsHovered.value ? 'auto' : 'none',
+                    },
+                    onMouseenter: handleSideToolsEnter,
+                    onMouseleave: handleSideToolsLeave,
+                  },
+                  track.value
+                    ? h(
+                        'button',
+                        {
+                          ref: commentBtnEl,
+                          class: 'action-icon soft-secondary-action amms-comment-btn',
+                          'aria-label': '查看评论',
+                          title: '查看评论',
+                          onClick: openComments,
+                        },
+                        h(
+                          'svg',
+                          {
+                            viewBox: '0 0 24 24',
+                            fill: 'none',
+                            stroke: 'currentColor',
+                            'stroke-width': '2',
+                            'stroke-linecap': 'round',
+                            'stroke-linejoin': 'round',
+                          },
+                          h('path', {
+                            d: 'm3 20l1.3-3.9C1.976 12.663 2.874 8.228 6.4 5.726c3.526-2.501 8.59-2.296 11.845.48c3.255 2.777 3.695 7.266 1.029 10.501C16.608 19.942 11.659 20.922 7.7 19L3 20',
+                          }),
+                        ),
+                      )
+                    : null,
+                ),
+              ])
+            : null,
         ])
     },
   })

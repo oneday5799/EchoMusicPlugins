@@ -4,52 +4,57 @@
 
 import { createSkinComponent } from './skin.js'
 import preview from './preview.js'
+import { DEFAULT_SETTINGS, isAllDefaults, validateSettings } from './settings.js'
 
-export const DEFAULT_SETTINGS = {
-  enhanceContrast: false,
-  fontScale: 100,
-  fontWeight: 850,
-  enableBlur: true,
-  enableScale: true,
-  enableSpring: true,
-  fadeWidth: 50,
-  alignPosition: 48,
-  showTranslation: false,
-  showRomanization: false,
+export { DEFAULT_SETTINGS }
+
+const SKIN_ID = 'apple-music'
+const AUTO_SELECT_KEY = 'apple-music-style-auto-select'
+
+function patchStoredSkinConfig(store, skinKey, patchData) {
+  const current = {
+    ...DEFAULT_SETTINGS,
+    ...(store.lyricsPageSkinConfigs[skinKey] ?? {}),
+  }
+  const next = { ...current, ...patchData }
+  if (!validateSettings(next)) return false
+  if (isAllDefaults(next)) {
+    store.resetLyricSkinConfig(skinKey)
+    return true
+  }
+  const overrides = {}
+  for (const key of Object.keys(DEFAULT_SETTINGS)) {
+    if (!Object.is(next[key], DEFAULT_SETTINGS[key])) overrides[key] = next[key]
+  }
+  store.patchLyricSkinConfig(skinKey, overrides)
+  return true
 }
 
-const SKIN_KEY = JSON.stringify(['apple-music-style', 'apple-music'])
-
-const SETTINGS_CSS = `
-.amms-settings { display: grid; gap: 14px; color: var(--color-text-main); }
-.amms-settings-row { display: grid; gap: 7px; }
-.amms-settings-line { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
-.amms-settings-title { font-size: 13px; font-weight: 760; }
-.amms-settings-hint { color: var(--color-text-secondary); font-size: 12px; line-height: 1.45; }
-.amms-settings-actions { display: flex; justify-content: flex-end; gap: 8px; }
-`
-
 function buildSettingsUI(h, Button, Slider, Switch, getCurrent, onPatch) {
-  const slider = (label, key, min, max, hint, formatter = (v) => String(v)) =>
-    h('div', { class: 'amms-settings-row' }, [
+  const slider = (label, key, min, max, hint, formatter = (v) => String(v)) => {
+    const current = getCurrent()[key]
+    return h('div', { class: 'amms-settings-row' }, [
       h('div', { class: 'amms-settings-line' }, [
         h('span', { class: 'amms-settings-title' }, label),
-        h('span', { class: 'amms-settings-hint' }, formatter(getCurrent()[key])),
+        h('span', { class: 'amms-settings-hint' }, formatter(current)),
       ]),
       h(Slider, {
-        modelValue: getCurrent()[key],
+        modelValue: current,
         min, max, step: 1,
+        'aria-label': label,
         'onUpdate:modelValue': (value) => onPatch({ [key]: Number(value) }),
       }),
       hint ? h('div', { class: 'amms-settings-hint' }, hint) : null,
     ])
+  }
 
   const toggle = (label, key, hint) =>
     h('div', { class: 'amms-settings-row' }, [
-      h('label', { class: 'amms-settings-line' }, [
+      h('div', { class: 'amms-settings-line' }, [
         h('span', { class: 'amms-settings-title' }, label),
         h(Switch, {
           modelValue: Boolean(getCurrent()[key]),
+          'aria-label': label,
           'onUpdate:modelValue': (value) => onPatch({ [key]: Boolean(value) }),
         }),
       ]),
@@ -61,10 +66,8 @@ function buildSettingsUI(h, Button, Slider, Switch, getCurrent, onPatch) {
     toggle('歌词缩放', 'enableScale', '开启当前行聚焦缩放效果。'),
     toggle('弹簧动画', 'enableSpring', '开启歌词滚动时的弹簧回弹动画。'),
     toggle('歌词模糊', 'enableBlur', '开启远离焦点行的模糊效果。'),
-    toggle('显示翻译', 'showTranslation', '显示歌词的中文翻译。'),
-    toggle('显示注音', 'showRomanization', '显示歌词的注音。'),
     slider('字体缩放', 'fontScale', 50, 200, '调整歌词字体大小。', (v) => `${v}%`),
-    slider('字体粗细', 'fontWeight', 300, 900, '调整歌词字重。', (v) => String(v)),
+    slider('字体粗细', 'fontWeight', 300, 900, '调整歌词字重。'),
     slider('对齐位置', 'alignPosition', 0, 100, '当前歌词行在页面高度中的位置。', (v) => `${v}%`),
     slider('逐字渐变', 'fadeWidth', 0, 100, '控制逐字高亮边缘的柔和宽度。', (v) => `${v}%`),
     h('div', { class: 'amms-settings-actions' }, [
@@ -77,9 +80,8 @@ function buildSettingsUI(h, Button, Slider, Switch, getCurrent, onPatch) {
   ])
 }
 
-// 全局设置页组件：直接读写宿主 settingStore
-function createGlobalSettingsComponent(ctx) {
-  const { defineComponent, h, defineAsyncComponent, computed } = ctx.vue
+function createGlobalSettingsComponent(ctx, skinKey) {
+  const { defineComponent, h, defineAsyncComponent } = ctx.vue
   const Button = defineAsyncComponent(ctx.ui.components.Button)
   const Slider = defineAsyncComponent(ctx.ui.components.Slider)
   const Switch = defineAsyncComponent(ctx.ui.components.Switch)
@@ -90,15 +92,16 @@ function createGlobalSettingsComponent(ctx) {
       const store = ctx.stores.settings
       const getCurrent = () => ({
         ...DEFAULT_SETTINGS,
-        ...(store.lyricsPageSkinConfigs[SKIN_KEY] ?? {}),
+        ...(store.lyricsPageSkinConfigs[skinKey] ?? {}),
       })
-      const onPatch = (data) => store.patchLyricSkinConfig(SKIN_KEY, { ...getCurrent(), ...data })
+      const onPatch = (data) => {
+        patchStoredSkinConfig(store, skinKey, data)
+      }
       return () => buildSettingsUI(h, Button, Slider, Switch, getCurrent, onPatch)
     },
   })
 }
 
-// 换肤面板设置组件：通过 useSkin() 读写
 function createSkinDrawerSettingsComponent(ctx) {
   const { defineComponent, h, defineAsyncComponent } = ctx.vue
   const Button = defineAsyncComponent(ctx.ui.components.Button)
@@ -110,70 +113,95 @@ function createSkinDrawerSettingsComponent(ctx) {
     setup() {
       const skin = ctx.ui.lyricsPage.useSkin()
       const getCurrent = () => skin.settings.value || {}
-      const onPatch = (data) => skin.patch(data)
+      const onPatch = (data) => {
+        const next = { ...getCurrent(), ...data }
+        if (isAllDefaults(next)) skin.reset()
+        else skin.patch(data)
+      }
       return () => buildSettingsUI(h, Button, Slider, Switch, getCurrent, onPatch)
     },
   })
 }
 
-export async function activate(ctx) {
-  let settingsStyleDispose = null
-  let settingsDispose = null
-  let skinDispose = null
-  let stopLyricWatch = null
+function createAutoSelectSkinTask(ctx, skinKey) {
+  let disposed = false
+  let running = false
+  let timer = 0
 
+  const selectOnce = async () => {
+    if (disposed || running) return
+    running = true
+    try {
+      const selected = await ctx.storage.get(AUTO_SELECT_KEY)
+      if (disposed || selected) return
+      const provider = String(ctx.stores.settings.lyricsPageProvider || '').trim()
+      if (!provider || provider === 'host' || provider === 'host:cover') {
+        ctx.stores.settings.lyricsPageProvider = skinKey
+      }
+      await ctx.storage.set(AUTO_SELECT_KEY, true)
+    } catch (error) {
+      console.warn('[AppleMusicStyle] 自动选中皮肤失败', error)
+    } finally {
+      running = false
+    }
+  }
+
+  const schedule = () => {
+    if (disposed) return
+    if (timer) window.clearTimeout(timer)
+    timer = window.setTimeout(() => {
+      timer = 0
+      void selectOnce()
+    }, 0)
+  }
+
+  const dispose = () => {
+    disposed = true
+    if (timer) window.clearTimeout(timer)
+    timer = 0
+  }
+
+  return { schedule, dispose }
+}
+
+export async function activate(ctx) {
+  const skinKey = JSON.stringify([ctx.id, SKIN_ID])
   const skinComponent = createSkinComponent(ctx)
 
-  settingsStyleDispose = ctx.css.inject(SETTINGS_CSS, { id: 'apple-music-style-settings' })
-  settingsDispose = ctx.ui.settings.define({
+  const settingsDispose = ctx.ui.settings.define({
     title: 'Apple Music Style',
     description: '调整歌词字体、动画效果和布局设置。',
-    component: createGlobalSettingsComponent(ctx),
+    component: createGlobalSettingsComponent(ctx, skinKey),
   })
 
-  skinDispose = ctx.ui.lyricsPage.register({
-    id: 'apple-music',
+  const skinDispose = ctx.ui.lyricsPage.register({
+    id: SKIN_ID,
     title: 'Apple Music Style',
     component: skinComponent,
     titlebar: 'host',
     tools: 'host',
     preview,
     settings: {
-      defaults: DEFAULT_SETTINGS,
+      defaults: { ...DEFAULT_SETTINGS },
       component: createSkinDrawerSettingsComponent(ctx),
-      validate: (values) => {
-        if (values && typeof values !== 'object') return false
-        return true
-      },
+      validate: validateSettings,
     },
   })
 
-  const activateSkin = () => {
-    try {
-      ctx.stores.settings.lyricsPageProvider = SKIN_KEY
-    } catch (e) {
-      console.warn('[AppleMusicStyle] 自动选中皮肤失败', e)
-    }
-  }
-
-  stopLyricWatch = ctx.vue.watch(
+  const autoSelectSkinTask = createAutoSelectSkinTask(ctx, skinKey)
+  const stopLyricWatch = ctx.vue.watch(
     () => ctx.stores.player.isLyricViewOpen,
     (open) => {
-      if (!open) return
-      setTimeout(activateSkin, 0)
+      if (open) autoSelectSkinTask.schedule()
     },
     { immediate: true },
   )
 
   ctx.dispose(() => {
-    stopLyricWatch?.()
-    skinDispose?.()
-    settingsDispose?.()
-    settingsStyleDispose?.()
-    stopLyricWatch = null
-    skinDispose = null
-    settingsDispose = null
-    settingsStyleDispose = null
+    autoSelectSkinTask.dispose()
+    stopLyricWatch()
+    skinDispose()
+    settingsDispose()
   })
 }
 
