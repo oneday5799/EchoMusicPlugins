@@ -48,6 +48,6 @@ EchoMusic 插件不是 Chrome 扩展，也不运行在强安全沙盒中。Manif
 
 除非插件目录另有说明，本仓库按 [MIT License](LICENSE) 分发。
 
-`apple-music-lyrics/` 因包含 `@applemusic-like-lyrics/core`，其目录及构建产物按 `AGPL-3.0-only` 分发，详见 [LICENSE](apple-music-lyrics/LICENSE) 与 [NOTICE](apple-music-lyrics/NOTICE.md)。
+`apple-music-lyrics/` 与 `apple-music-style/` 因包含 `@applemusic-like-lyrics/core`，其目录及构建产物按 `AGPL-3.0-only` 分发，详见 [apple-music-lyrics/LICENSE](apple-music-lyrics/LICENSE)、[apple-music-lyrics/NOTICE](apple-music-lyrics/NOTICE.md)、[apple-music-style/LICENSE](apple-music-style/LICENSE) 与 [apple-music-style/NOTICE](apple-music-style/NOTICE.md)。
 
 上述 `theme-*/assets` 的素材及派生文件不适用仓库默认 MIT 许可，权利归各自权利人；详见各目录 README 与 provenance.json。

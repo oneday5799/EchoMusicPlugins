@@ -110,12 +110,13 @@ EchoMusic 支持在线插件源和本地插件。用户可以在"插件管理"�
 - [服务请求拦截 API](server-interceptor.md)：通过 `ctx.server.intercept()` 拦截主程序发往 server 的 API 请求，支持观察、修改、Mock、转发与多插件优先级协作。
 - `water-lyrics`：歌词页皮肤示例，演示 `ctx.ui.lyricsPage.register()` 的完整皮肤组件接入方式，包含 Canvas 粒子背景和皮肤设置面板。
 - `apple-music-lyrics`：页面歌词 AMLL 渲染示例，演示通过 decorator 扩展点接入 `@applemusic-like-lyrics/core`。
+- `apple-music-style`：完整 `lyricsPage` 皮肤示例，演示双栏布局、AMLL 渲染、宿主工具栏与皮肤配置接入。
 
 ## 许可证
 
 除非子目录另有说明，本仓库插件代码默认按根目录 [LICENSE](../LICENSE) 的 MIT License 分发。
 
-`apple-music-lyrics/` 是例外：该插件打包了 `@applemusic-like-lyrics/core`，插件目录及其构建产物按 `AGPL-3.0-only` 分发。详见 [apple-music-lyrics/LICENSE](../apple-music-lyrics/LICENSE) 和 [apple-music-lyrics/NOTICE.md](../apple-music-lyrics/NOTICE.md)。
+`apple-music-lyrics/` 和 `apple-music-style/` 是例外：这两个插件打包了 `@applemusic-like-lyrics/core`，插件目录及其构建产物按 `AGPL-3.0-only` 分发。详见 [apple-music-lyrics/LICENSE](../apple-music-lyrics/LICENSE)、[apple-music-lyrics/NOTICE.md](../apple-music-lyrics/NOTICE.md)、[apple-music-style/LICENSE](../apple-music-style/LICENSE) 和 [apple-music-style/NOTICE.md](../apple-music-style/NOTICE.md)。
 
 ## 安全模式与故障恢复
 
