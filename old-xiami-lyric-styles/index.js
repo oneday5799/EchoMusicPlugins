@@ -12,6 +12,10 @@ const EMPTY_LINES = [];
 const SCROLL_ANCHOR_RATIO = 0.42;
 // 用户滚轮浏览后恢复自动跟随的等待时间
 const USER_SCROLL_RESUME_MS = 5000;
+// 距离衰减样式的饱和距离：|distance| 达到该值后放大/透明度/模糊都不再变化，
+// 钳制后远处行样式值恒定，Vue 会跳过无变化的 style 写入（长歌词每次换行省下大量重绘）；
+// 同一距离也用作模糊的作用范围，避免屏幕外的行白白占用 filter 合成层
+const STYLE_SATURATION_DISTANCE = 4;
 
 // 当前播放行的双色方案：已播放部分用主题色（字色 + 辉光），未播放部分保持纯白。
 // 两者都走 --oxls-played-color / --oxls-unplayed-color，由「歌词颜色」设置在根节点下发，
@@ -568,13 +572,21 @@ const createSkinComponent = (ctx) => {
           const isCurrent = index === idx;
           const isBrowse = browse >= 0 && index === browse;
           const effectsOn = !reducedMotion.value;
+          // 饱和距离后的样式值恒定，Vue 因此跳过这些行的 style 写入
+          const styleAbs = Math.min(abs, STYLE_SATURATION_DISTANCE);
           const scale = effectsOn
             ? isCurrent
               ? s.currentScale
-              : Math.max(0.88, 1 - abs * 0.04)
+              : Math.max(0.88, 1 - styleAbs * 0.04)
             : 1;
-          const opacity = isCurrent || isBrowse ? 1 : Math.max(s.idleOpacity, 1 - abs * 0.22);
-          const blur = effectsOn && !isCurrent ? Math.min(abs * 0.6, 2.4) : 0;
+          const opacity =
+            isCurrent || isBrowse ? 1 : Math.max(s.idleOpacity, 1 - styleAbs * 0.22);
+          // 模糊只作用在饱和距离内的行：全部歌词行都在 DOM 中，更远的行用户看不见，
+          // 却各占一个 filter 合成层（实测 200 行场景图层 200 -> 9）
+          const blur =
+            effectsOn && !isCurrent && styleAbs <= STYLE_SATURATION_DISTANCE
+              ? styleAbs * 0.6
+              : 0;
           const isYrc = (line.characters?.length ?? 0) > 1;
           const isRuby = ruby && (line.rubyUnits?.length ?? 0) > 0;
           const showRoman =
@@ -951,16 +963,23 @@ const createSkinComponent = (ctx) => {
     // 字符注册那一刻就按当前时间轴落色：短歌词的当前行往往在下一帧的
     // updateYrcDom 之前就被看到，若只依赖那一帧，时轴暂不可用或注册
     // 时序错位时字符会停在 CSS 默认的未播放态（整行白色，缺少已播主题色）
+    // 一次 patch 会逐个触发几十次 ref，这里对时间轴做短窗口缓存
+    let registeredTimelineMs;
+    let registeredTimelineAt = 0;
     const charProgressNow = (lineIndex, charIndex, chars) => {
       const char = (chars ?? lines.value[lineIndex]?.characters)?.[charIndex];
       if (!char) return "100%";
-      const timelineMs = readTimelineMs();
-      if (timelineMs === null) return "100%";
+      const now = performance.now();
+      if (registeredTimelineMs === undefined || now - registeredTimelineAt > 50) {
+        registeredTimelineMs = readTimelineMs();
+        registeredTimelineAt = now;
+      }
+      if (registeredTimelineMs === null) return "100%";
       const start = char.startTime || 0;
       const end = char.endTime || 0;
       return [
-        charBackgroundPosition(start, end, timelineMs),
-        charBackgroundPosition(start, end, timelineMs, GLOW_PROGRESS_GAMMA),
+        charBackgroundPosition(start, end, registeredTimelineMs),
+        charBackgroundPosition(start, end, registeredTimelineMs, GLOW_PROGRESS_GAMMA),
       ];
     };
 
@@ -1123,6 +1142,7 @@ const createSkinComponent = (ctx) => {
           () => settings.value.lineHeight,
           () => settings.value.textAlign,
           () => settings.value.lyricPadding,
+          () => settings.value.currentScale,
           reducedMotion,
         ],
         () => {
@@ -1135,6 +1155,18 @@ const createSkinComponent = (ctx) => {
 
       // ── 生命周期 ──
       let resizeObserver = null;
+      let resizeRafId = 0;
+
+      // ResizeObserver 回调紧跟布局结算，在观察回调内直接读 scrollWidth
+      // 会触发「ResizeObserver loop completed with undelivered notifications」，
+      // 这里延到下一帧再算跑马灯距离
+      const handleResize = () => {
+        if (resizeRafId) return;
+        resizeRafId = window.requestAnimationFrame(() => {
+          resizeRafId = 0;
+          syncMarquee();
+        });
+      };
 
       // 页面样式切换会重建滚动容器：重新挂载 ResizeObserver
       watch(scrollerRef, (el, previous) => {
@@ -1142,12 +1174,11 @@ const createSkinComponent = (ctx) => {
         if (el && resizeObserver) resizeObserver.observe(el);
       });
 
-
       onMounted(() => {
         reducedMotionQuery = window.matchMedia?.("(prefers-reduced-motion: reduce)") ?? null;
         updateReducedMotion();
         reducedMotionQuery?.addEventListener?.("change", updateReducedMotion);
-        resizeObserver = new ResizeObserver(() => syncMarquee());
+        resizeObserver = new ResizeObserver(handleResize);
         if (scrollerRef.value) resizeObserver.observe(scrollerRef.value);
         document.addEventListener("visibilitychange", handleVisibilityChange);
         updateYrcDom();
@@ -1175,6 +1206,8 @@ const createSkinComponent = (ctx) => {
         wheelRafId = 0;
         lastFrameTime = 0;
         scrollActive = false;
+        if (resizeRafId) window.cancelAnimationFrame(resizeRafId);
+        resizeRafId = 0;
       });
 
       // ── 渲染 ──
@@ -1224,6 +1257,10 @@ const createSkinComponent = (ctx) => {
           transform: `scale(${entry.scale.toFixed(3)})`,
           filter: entry.blur > 0 ? `blur(${entry.blur.toFixed(1)}px)` : "none",
         };
+        // 仅当前行及相邻行提升合成层，避免数百行常驻 will-change
+        if (entry.isCurrent || Math.abs(entry.distance) <= 1) {
+          contentStyle.willChange = "transform, filter";
+        }
 
         const primaryStyle = {
           "font-size": primaryFontSize.value,
