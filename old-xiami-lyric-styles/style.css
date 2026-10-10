@@ -1,0 +1,420 @@
+/* 旧版虾米歌词风格 - lyricsPage 皮肤样式 */
+
+/* ===== 根容器 ===== */
+.oxls-root {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  color: var(--color-text-main);
+  --oxls-glow-size: 9px;
+  --oxls-scroll-duration: 420ms;
+  --oxls-scroller-padding-x: 0px;
+}
+
+/* ===== 封面模糊背景 ===== */
+.oxls-blur-bg {
+  position: absolute;
+  inset: -60px;
+  z-index: 0;
+  background-size: cover;
+  background-position: center;
+  filter: blur(60px) saturate(1.15) brightness(0.55);
+  transform: scale(1.2);
+}
+.oxls-blur-bg::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+/* ===== 歌词列表区域 ===== */
+.oxls-body {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  min-height: 0;
+}
+
+.oxls-layout {
+  height: 100%;
+}
+
+/* ===== 普通模式：左封面+歌曲信息，右歌词（与宿主内置封面模式一致） ===== */
+.oxls-layout.is-normal {
+  display: flex;
+  gap: 32px;
+  padding: 0 32px;
+  max-width: 1400px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.oxls-cover-side {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: clamp(280px, 35%, 420px);
+  padding: 24px 0;
+}
+
+.oxls-cover-wrap {
+  width: clamp(220px, 80%, 380px);
+  aspect-ratio: 1;
+  border-radius: var(--radius-media, 12px);
+  overflow: hidden;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.3);
+}
+
+.oxls-cover-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  -webkit-user-drag: none;
+  user-select: none;
+}
+
+.oxls-cover-placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 56px;
+  color: rgba(255, 255, 255, 0.25);
+}
+
+.oxls-song-info {
+  margin-top: 24px;
+  text-align: center;
+  width: 100%;
+  max-width: 380px;
+  padding: 0 16px;
+}
+
+.oxls-song-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--color-text-main);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.oxls-song-artist {
+  margin-top: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.oxls-lyric-side {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ===== 简洁模式：单栏居中 ===== */
+.oxls-layout.is-simple {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 0 32px;
+}
+
+.oxls-scroll-wrap {
+  position: relative;
+  height: 100%;
+  min-height: 0;
+}
+
+@media (max-width: 768px) {
+  .oxls-layout.is-normal {
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .oxls-cover-side {
+    width: 100%;
+    padding: 16px 0 0;
+  }
+
+  .oxls-cover-wrap {
+    width: 160px;
+  }
+}
+
+.oxls-scroller {
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  padding-left: var(--oxls-scroller-padding-x, 0px);
+  padding-right: var(--oxls-scroller-padding-x, 0px);
+  mask-image: linear-gradient(180deg, transparent 0%, black 8%, black 92%, transparent 100%);
+  -webkit-mask-image: linear-gradient(
+    180deg,
+    transparent 0%,
+    black 8%,
+    black 92%,
+    transparent 100%
+  );
+}
+
+.oxls-scroller::-webkit-scrollbar {
+  display: none;
+}
+
+/* ===== 歌词行 ===== */
+.oxls-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.oxls-line {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 16px;
+  border-radius: var(--radius-control, 8px);
+  position: relative;
+  white-space: nowrap;
+  transition:
+    opacity var(--oxls-scroll-duration) cubic-bezier(0.4, 0, 0.2, 1),
+    transform var(--oxls-scroll-duration) cubic-bezier(0.4, 0, 0.2, 1),
+    filter var(--oxls-scroll-duration) ease;
+  will-change: transform, opacity, filter;
+}
+
+.oxls-primary {
+  display: inline-block;
+  line-height: 1.24;
+  letter-spacing: 0.01em;
+  transition: text-shadow 0.3s ease;
+}
+
+/* ===== 逐字歌词（YRC）：渐变已播/未播色按字符进度擦除 ===== */
+.oxls-char {
+  display: inline;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  background-size: 200% 100%;
+  background-repeat: no-repeat;
+  background-position-x: 100%;
+}
+
+/* 当前行溢出跑马灯（inline style 控制 overflow/mask/animation） */
+@keyframes oxls-marquee {
+  0% {
+    transform: translateX(0);
+  }
+  30%,
+  100% {
+    transform: translateX(calc(var(--oxls-marquee-distance, 0px) * -1));
+  }
+}
+
+.oxls-secondary {
+  display: block;
+  margin-top: 4px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.4;
+  transition: opacity var(--oxls-scroll-duration) ease;
+}
+
+/* ===== 当前行指示器：左对齐（绝对定位在行左侧） ===== */
+.oxls-root[data-align="left"][data-marker="dot"] .oxls-row {
+  position: relative;
+}
+
+.oxls-root[data-align="left"][data-marker="dot"] .oxls-row[data-current="true"]::before {
+  content: "";
+  position: absolute;
+  left: -16px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow:
+    0 0 6px currentColor,
+    0 0 14px currentColor;
+  animation: oxls-marker-pulse 1.8s ease-in-out infinite;
+}
+
+.oxls-root[data-align="left"][data-marker="bar"] .oxls-row {
+  position: relative;
+}
+
+.oxls-root[data-align="left"][data-marker="bar"] .oxls-row[data-current="true"]::before {
+  content: "";
+  position: absolute;
+  left: -16px;
+  top: 15%;
+  bottom: 15%;
+  width: 3px;
+  border-radius: 2px;
+  background: currentColor;
+  box-shadow: 0 0 8px currentColor;
+  animation: oxls-marker-bar 2.4s ease-in-out infinite;
+}
+
+/* ===== 当前行指示器：居中对齐（内联在文本前） ===== */
+.oxls-root[data-align="center"][data-marker="dot"] .oxls-row[data-current="true"] .oxls-primary::before {
+  content: "";
+  display: inline-block;
+  vertical-align: middle;
+  margin-right: 30px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow:
+    0 0 6px currentColor,
+    0 0 14px currentColor;
+  animation: oxls-marker-pulse-center 1.8s ease-in-out infinite;
+}
+
+.oxls-root[data-align="center"][data-marker="bar"] .oxls-row[data-current="true"] .oxls-primary::before {
+  content: "";
+  display: inline-block;
+  vertical-align: middle;
+  margin-right: 30px;
+  width: 3px;
+  height: 1.2em;
+  border-radius: 2px;
+  background: currentColor;
+  box-shadow: 0 0 8px currentColor;
+  animation: oxls-marker-bar 2.4s ease-in-out infinite;
+}
+
+@keyframes oxls-marker-pulse {
+  0%, 100% { opacity: 1; transform: translateY(-50%) scale(1); }
+  50% { opacity: 0.6; transform: translateY(-50%) scale(1.3); }
+}
+
+/* 居中指示器不经 translateY 定位，脉冲时不做位移 */
+@keyframes oxls-marker-pulse-center {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.6; transform: scale(1.3); }
+}
+
+@keyframes oxls-marker-bar {
+  0%, 100% { opacity: 1; transform: scaleY(1); }
+  50% { opacity: 0.5; transform: scaleY(0.7); }
+}
+
+/* ===== 空状态 ===== */
+.oxls-empty {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  font-weight: 600;
+  opacity: 0.8;
+}
+
+/* ===== 滚轮浏览时间标签 ===== */
+.oxls-time-tag {
+  position: fixed;
+  right: 16px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 60;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 5px 12px;
+  border-radius: var(--radius-item, 10px);
+  background: var(--control-muted-bg, rgba(255, 255, 255, 0.12));
+  border: 1px solid var(--control-border, rgba(255, 255, 255, 0.14));
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.oxls-time-tag:hover {
+  background: var(--control-hover-bg, rgba(255, 255, 255, 0.2));
+  color: var(--color-primary-text, #fff);
+}
+
+.oxls-time-tag-icon {
+  width: 9px;
+  height: 9px;
+}
+
+/* ===== 底部控制栏 ===== */
+.oxls-controls {
+  position: relative;
+  z-index: 2;
+  flex-shrink: 0;
+}
+
+/* ===== 设置面板 ===== */
+.oxls-settings {
+  display: grid;
+  gap: 14px;
+  color: var(--color-text-main);
+}
+
+.oxls-settings-row {
+  display: grid;
+  gap: 7px;
+}
+
+.oxls-settings-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.oxls-settings-title {
+  font-size: 13px;
+  font-weight: 760;
+}
+
+.oxls-settings-hint {
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.oxls-settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* ===== 减少动态效果 ===== */
+@media (prefers-reduced-motion: reduce) {
+  .oxls-line,
+  .oxls-secondary,
+  .oxls-time-tag {
+    transition: none;
+  }
+  .oxls-row[data-current="true"]::before,
+  .oxls-row[data-current="true"] .oxls-primary::before {
+    animation: none;
+  }
+}
