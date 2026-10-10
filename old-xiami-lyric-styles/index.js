@@ -16,6 +16,12 @@ const USER_SCROLL_RESUME_MS = 5000;
 // 钳制后远处行样式值恒定，Vue 会跳过无变化的 style 写入（长歌词每次换行省下大量重绘）；
 // 同一距离也用作模糊的作用范围，避免屏幕外的行白白占用 filter 合成层
 const STYLE_SATURATION_DISTANCE = 4;
+// 辉光进度的前倾曲线指数（<1）与起唱下限：字刚起唱时字色仍接近白色，若辉光同速跟进
+// 就会看起来「没有已播辉光」，等这个字唱完才突然出现。
+// 下限让字一起唱就有七成主题色辉光，等同卡拉OK的「点亮」手感。
+// 引擎在模块级创建，这两个常量必须与其同处模块级作用域
+const GLOW_PROGRESS_GAMMA = 0.15;
+const MIN_PLAYING_GLOW = 0.7;
 
 // 当前播放行的双色方案：已播放部分用主题色（字色 + 辉光），未播放部分保持纯白。
 // 两者都走 --oxls-played-color / --oxls-unplayed-color，由「歌词颜色」设置在根节点下发，
@@ -137,6 +143,7 @@ const normalizeLyricAccent = (hex) => {
 const createCoverAccent = (ctx) => () =>
   normalizeLyricAccent(ctx.stores.theme?.coverColor || FALLBACK_ACCENT);
 
+// 暂无布尔型设置（曾有「启用动效」开关，已移除）；保留结构以便后续扩展
 const BOOLEAN_SETTINGS = [];
 
 // 字符串型设置中需要按颜色格式校验的键
@@ -393,6 +400,266 @@ const formatTime = (seconds) => {
 // 字符元素由模板 ref 回调注册，RAF 按歌词时间轴直接写入进度，绕过 Vue
 // 响应式以保证性能（与宿主 useYrcAnimation 同一机制）。历次「已播色与辉光不同步」
 // 的问题都集中在这块，单独成模块便于维护。
+function createYrcEngine({ page, lines, visibleIndex, rubyMode, secondaryMode, isPlaying }) {
+    // 绕过 Vue 响应式以保证性能（与宿主 useYrcAnimation 同一机制）。
+    const mainCharEls = new Map();
+    const subCharEls = new Map();
+    let lastYrcLineIndex = -1;
+
+    // 逐字进度写入渲染单元的所有层：当前行字符是「宽辉光 + 近辉光 + 清晰文字」
+    // 三层（见 .oxls-char-cell）。文字层用线性进度，辉光层用前倾曲线，
+    // 使字刚起唱时辉光就已明显偏主题色。
+    // position 可为单个值（两层一致）或 [文字位置, 辉光位置]
+    const applyCharLayers = (el, position, glowPosition) => {
+      const isPair = Array.isArray(position);
+      el.style.backgroundPositionX = isPair ? position[0] : position;
+      const cell = el.parentElement;
+      if (!cell || !cell.classList.contains("oxls-char-cell")) return;
+      const glowPos = isPair ? position[1] : (glowPosition ?? position);
+      for (const layer of cell.children) {
+        if (layer !== el) layer.style.backgroundPositionX = glowPos;
+      }
+    };
+
+    // 字符辉光由 ref 回调 + RAF 独占管理：Vue 每次 patch 都会重写 style 对象里的
+    // 所有键，若把辉光放进 style 会覆盖 RAF 写入的结果
+    const registerMainChar = (lineIndex, charIndex, el) => {
+      if (el) {
+        // 非当前行固定停在未播放态；当前行立即按时间轴落色，不等下一帧
+        applyCharLayers(
+          el,
+          lineIndex === visibleIndex.value
+            ? charProgressNow(lineIndex, charIndex)
+            : "100%",
+        );
+        let arr = mainCharEls.get(lineIndex);
+        if (!arr) {
+          arr = [];
+          mainCharEls.set(lineIndex, arr);
+        }
+        arr[charIndex] = el;
+      } else {
+        const arr = mainCharEls.get(lineIndex);
+        if (arr) {
+          arr[charIndex] = null;
+          if (arr.every((item) => !item)) mainCharEls.delete(lineIndex);
+        }
+      }
+    };
+
+    const registerSubChar = (lineIndex, kind, charIndex, el) => {
+      const key = `${lineIndex}:${kind}`;
+      if (el) {
+        const line = lines.value[lineIndex];
+        const rubyUnits = line?.rubyUnits;
+        // 注音模式下音译按 rubyUnits 时间轴，与 updateYrcDom 保持一致
+        const chars =
+          kind === "romanized"
+            ? rubyMode.value && rubyUnits?.length
+              ? rubyUnits
+              : line?.romanizedCharacters
+            : line?.translatedCharacters;
+        applyCharLayers(
+          el,
+          lineIndex === visibleIndex.value
+            ? charProgressNow(lineIndex, charIndex, chars)
+            : "100%",
+        );
+        let arr = subCharEls.get(key);
+        if (!arr) {
+          arr = [];
+          subCharEls.set(key, arr);
+        }
+        arr[charIndex] = el;
+      } else {
+        const arr = subCharEls.get(key);
+        if (arr) {
+          arr[charIndex] = null;
+          if (arr.every((item) => !item)) subCharEls.delete(key);
+        }
+      }
+    };
+
+    const resetCharsProgress = (elements) => {
+      if (!elements) return;
+      for (const el of elements) {
+        if (el) applyCharLayers(el, "100%");
+      }
+    };
+
+    // 逐字进度：0=未播放（background-position-x 100%），1=已播放（0%）
+    // 辉光层（gamma < 1）用两条措施保证"刚起唱就能看到"：
+    // 1) 曲线前倾，让辉光进度远快于字色；
+    // 2) 起唱下限，字一旦开始唱就给一个可见的主题色辉光，
+    //    否则行首第一个字在小半秒内 progress≈0，辉光与白色几乎无异。
+    const charBackgroundPosition = (charStartMs, charEndMs, timelineMs, gamma = 1) => {
+      let progress;
+      if (timelineMs >= charEndMs) progress = 1;
+      else if (timelineMs <= charStartMs) progress = 0;
+      else {
+        const duration = charEndMs - charStartMs;
+        progress =
+          duration <= 0
+            ? 1
+            : Math.min(1, Math.max(0, (timelineMs - charStartMs) / duration));
+      }
+      if (gamma !== 1 && progress > 0 && progress < 1) {
+        progress = Math.max(Math.pow(progress, gamma), MIN_PLAYING_GLOW);
+      }
+      return `${100 - progress * 100}%`;
+    };
+
+    const applyCharsProgress = (elements, chars, seekMs) => {
+      const count = Math.min(elements.length, chars.length);
+      for (let i = 0; i < count; i++) {
+        const el = elements[i];
+        const char = chars[i];
+        if (!el || !char) continue;
+        const start = char.startTime || 0;
+        const end = char.endTime || 0;
+        applyCharLayers(
+          el,
+          charBackgroundPosition(start, end, seekMs),
+          charBackgroundPosition(start, end, seekMs, GLOW_PROGRESS_GAMMA),
+        );
+      }
+    };
+
+    // 字符注册那一刻就按当前时间轴落色：短歌词的当前行往往在下一帧的
+    // updateYrcDom 之前就被看到，若只依赖那一帧，时轴暂不可用或注册
+    // 时序错位时字符会停在 CSS 默认的未播放态（整行白色，缺少已播主题色）
+    // 一次 patch 会逐个触发几十次 ref，这里对时间轴做短窗口缓存
+    let registeredTimelineMs;
+    let registeredTimelineAt = 0;
+    const charProgressNow = (lineIndex, charIndex, chars) => {
+      const char = (chars ?? lines.value[lineIndex]?.characters)?.[charIndex];
+      if (!char) return "100%";
+      const now = performance.now();
+      if (registeredTimelineMs === undefined || now - registeredTimelineAt > 50) {
+        registeredTimelineMs = readTimelineMs();
+        registeredTimelineAt = now;
+      }
+      if (registeredTimelineMs === null) return "100%";
+      const start = char.startTime || 0;
+      const end = char.endTime || 0;
+      return [
+        charBackgroundPosition(start, end, registeredTimelineMs),
+        charBackgroundPosition(start, end, registeredTimelineMs, GLOW_PROGRESS_GAMMA),
+      ];
+    };
+
+    const resetYrcLineDom = (lineIndex) => {
+      if (lineIndex < 0) return;
+      resetCharsProgress(mainCharEls.get(lineIndex));
+      resetCharsProgress(subCharEls.get(`${lineIndex}:romanized`));
+      resetCharsProgress(subCharEls.get(`${lineIndex}:translated`));
+    };
+
+    const readTimelineMs = () => {
+      try {
+        const timelineMs = Number(page.lyrics.getTimelineMs());
+        return Number.isFinite(timelineMs) ? timelineMs : null;
+      } catch {
+        return null;
+      }
+    };
+
+    const updateYrcDom = () => {
+      const idx = visibleIndex.value;
+      const line = lines.value[idx];
+      if (!line?.characters?.length) {
+        resetYrcLineDom(lastYrcLineIndex);
+        lastYrcLineIndex = -1;
+        return;
+      }
+      const seekMs = readTimelineMs();
+      if (seekMs === null) return;
+      if (idx !== lastYrcLineIndex) {
+        resetYrcLineDom(lastYrcLineIndex);
+        lastYrcLineIndex = idx;
+      }
+      // 主歌词逐字
+      const mainEls = mainCharEls.get(idx);
+      if (mainEls) applyCharsProgress(mainEls, line.characters, seekMs);
+      // 副歌词逐字（音译/翻译；注音模式下音译按 rubyUnits 时间轴）
+      const mode = secondaryMode.value;
+      if (mode === "both" || mode === "romanization") {
+        const els = subCharEls.get(`${idx}:romanized`);
+        const rubyUnits = line.rubyUnits;
+        const chars = rubyMode.value && rubyUnits?.length ? rubyUnits : line.romanizedCharacters;
+        if (els && chars && chars.length > 0) applyCharsProgress(els, chars, seekMs);
+      }
+      if (mode === "both" || mode === "translation") {
+        const els = subCharEls.get(`${idx}:translated`);
+        const chars = line.translatedCharacters;
+        if (els && chars && chars.length > 1) applyCharsProgress(els, chars, seekMs);
+      }
+    };
+
+    const resetCharRegistry = () => {
+      mainCharEls.clear();
+      subCharEls.clear();
+      lastYrcLineIndex = -1;
+    };
+
+    // 逐字进度 RAF：仅「正在播放且窗口可见」时逐帧刷新（与宿主一致）
+    let progressRafId = 0;
+    let progressLastTime = 0;
+
+    const progressLoop = () => {
+      progressRafId = window.requestAnimationFrame((timestamp) => {
+        progressRafId = 0;
+        if (document.hidden) {
+          progressLastTime = 0;
+          return;
+        }
+        if (timestamp - progressLastTime >= 33) {
+          progressLastTime = timestamp;
+          updateYrcDom();
+        }
+        progressLoop();
+      });
+    };
+
+    const startProgressLoop = () => {
+      if (progressRafId) return;
+      progressLastTime = performance.now();
+      progressLoop();
+    };
+
+    const stopProgressLoop = () => {
+      if (progressRafId) {
+        window.cancelAnimationFrame(progressRafId);
+        progressRafId = 0;
+      }
+      progressLastTime = 0;
+    };
+
+    const syncProgressRaf = () => {
+      if (isPlaying.value && !document.hidden) startProgressLoop();
+      else stopProgressLoop();
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        stopProgressLoop();
+        return;
+      }
+      // 回到前台：立即补一次全量刷新，避免看到错位的逐字进度
+      updateYrcDom();
+      syncProgressRaf();
+    };
+  return {
+    registerMainChar,
+    registerSubChar,
+    resetCharRegistry,
+    updateYrcDom,
+    syncProgressRaf,
+    stopProgressLoop,
+    handleVisibilityChange,
+  };
+}
+
 const createSkinComponent = (ctx) => {
   const {
     defineComponent,
@@ -482,11 +749,6 @@ const createSkinComponent = (ctx) => {
         `linear-gradient(to right, ${THEME_COLOR} 50%, rgba(255, 255, 255, ${alpha}) 50%)`;
       const UNPLAYED_GLOW_ALPHA_WIDE = 0.06;
       const UNPLAYED_GLOW_ALPHA_NEAR = 0.14;
-      // 辉光进度的前倾曲线指数（<1）与起唱下限：字刚起唱时字色仍接近白色，若辉光同速跟进
-      // 就会看起来"没有已播辉光"，等这个字唱完才突然出现。
-      // 下限让字一起唱就有七成主题色辉光，等同卡拉OK的"点亮"手感
-      const GLOW_PROGRESS_GAMMA = 0.15;
-      const MIN_PLAYING_GLOW = 0.7;
 
       // ── 副歌词（翻译/音译）显示模式 ──
       const secondaryMode = computed(() => {
@@ -569,11 +831,11 @@ const createSkinComponent = (ctx) => {
           if (isLineFiltered(line)) continue;
           const distance = idx >= 0 ? index - idx : 0;
           const abs = Math.abs(distance);
+          // 饱和距离后的样式值恒定，Vue 因此跳过这些行的 style 写入
+          const styleAbs = Math.min(abs, STYLE_SATURATION_DISTANCE);
           const isCurrent = index === idx;
           const isBrowse = browse >= 0 && index === browse;
           const effectsOn = !reducedMotion.value;
-          // 饱和距离后的样式值恒定，Vue 因此跳过这些行的 style 写入
-          const styleAbs = Math.min(abs, STYLE_SATURATION_DISTANCE);
           const scale = effectsOn
             ? isCurrent
               ? s.currentScale
@@ -581,8 +843,9 @@ const createSkinComponent = (ctx) => {
             : 1;
           const opacity =
             isCurrent || isBrowse ? 1 : Math.max(s.idleOpacity, 1 - styleAbs * 0.22);
-          // 模糊只作用在饱和距离内的行：全部歌词行都在 DOM 中，更远的行用户看不见，
-          // 却各占一个 filter 合成层（实测 200 行场景图层 200 -> 9）
+          // 模糊只作用在饱和距离内的行：本插件不做虚拟滚动，全部歌词行都在 DOM 中，
+          // 更远的行虽然用户看不见，却各自要占一个 filter 合成层（长歌下开销明显）。
+          // 实测可见范围（约前后 7 行）都在该距离内，因此不影响观感
           const blur =
             effectsOn && !isCurrent && styleAbs <= STYLE_SATURATION_DISTANCE
               ? styleAbs * 0.6
@@ -836,259 +1099,20 @@ const createSkinComponent = (ctx) => {
         runGuarded("发送弹幕失败", () => props.page.barrage.send(content));
 
   // 逐字（YRC）进度引擎：字符注册、进度写入与 RAF 驱动都收在引擎内部
-    // 绕过 Vue 响应式以保证性能（与宿主 useYrcAnimation 同一机制）。
-    const mainCharEls = new Map();
-    const subCharEls = new Map();
-    let lastYrcLineIndex = -1;
+  const yrc = createYrcEngine({
+    page: props.page,
+    lines,
+    visibleIndex,
+    rubyMode,
+    secondaryMode,
+    isPlaying,
+  });
 
-    // 逐字进度写入渲染单元的所有层：当前行字符是「宽辉光 + 近辉光 + 清晰文字」
-    // 三层（见 .oxls-char-cell）。文字层用线性进度，辉光层用前倾曲线，
-    // 使字刚起唱时辉光就已明显偏主题色。
-    // position 可为单个值（两层一致）或 [文字位置, 辉光位置]
-    const applyCharLayers = (el, position, glowPosition) => {
-      const isPair = Array.isArray(position);
-      el.style.backgroundPositionX = isPair ? position[0] : position;
-      const cell = el.parentElement;
-      if (!cell || !cell.classList.contains("oxls-char-cell")) return;
-      const glowPos = isPair ? position[1] : (glowPosition ?? position);
-      for (const layer of cell.children) {
-        if (layer !== el) layer.style.backgroundPositionX = glowPos;
-      }
-    };
-
-    // 字符辉光由 ref 回调 + RAF 独占管理：Vue 每次 patch 都会重写 style 对象里的
-    // 所有键，若把辉光放进 style 会覆盖 RAF 写入的结果
-    const registerMainChar = (lineIndex, charIndex, el) => {
-      if (el) {
-        // 非当前行固定停在未播放态；当前行立即按时间轴落色，不等下一帧
-        applyCharLayers(
-          el,
-          lineIndex === visibleIndex.value
-            ? charProgressNow(lineIndex, charIndex)
-            : "100%",
-        );
-        let arr = mainCharEls.get(lineIndex);
-        if (!arr) {
-          arr = [];
-          mainCharEls.set(lineIndex, arr);
-        }
-        arr[charIndex] = el;
-      } else {
-        const arr = mainCharEls.get(lineIndex);
-        if (arr) {
-          arr[charIndex] = null;
-          if (arr.every((item) => !item)) mainCharEls.delete(lineIndex);
-        }
-      }
-    };
-
-    const registerSubChar = (lineIndex, kind, charIndex, el) => {
-      const key = `${lineIndex}:${kind}`;
-      if (el) {
-        const line = lines.value[lineIndex];
-        const rubyUnits = line?.rubyUnits;
-        // 注音模式下音译按 rubyUnits 时间轴，与 updateYrcDom 保持一致
-        const chars =
-          kind === "romanized"
-            ? rubyMode.value && rubyUnits?.length
-              ? rubyUnits
-              : line?.romanizedCharacters
-            : line?.translatedCharacters;
-        applyCharLayers(
-          el,
-          lineIndex === visibleIndex.value
-            ? charProgressNow(lineIndex, charIndex, chars)
-            : "100%",
-        );
-        let arr = subCharEls.get(key);
-        if (!arr) {
-          arr = [];
-          subCharEls.set(key, arr);
-        }
-        arr[charIndex] = el;
-      } else {
-        const arr = subCharEls.get(key);
-        if (arr) {
-          arr[charIndex] = null;
-          if (arr.every((item) => !item)) subCharEls.delete(key);
-        }
-      }
-    };
-
-    const resetCharsProgress = (elements) => {
-      if (!elements) return;
-      for (const el of elements) {
-        if (el) applyCharLayers(el, "100%");
-      }
-    };
-
-    // 逐字进度：0=未播放（background-position-x 100%），1=已播放（0%）
-    // 辉光层（gamma < 1）用两条措施保证"刚起唱就能看到"：
-    // 1) 曲线前倾，让辉光进度远快于字色；
-    // 2) 起唱下限，字一旦开始唱就给一个可见的主题色辉光，
-    //    否则行首第一个字在小半秒内 progress≈0，辉光与白色几乎无异。
-    const charBackgroundPosition = (charStartMs, charEndMs, timelineMs, gamma = 1) => {
-      let progress;
-      if (timelineMs >= charEndMs) progress = 1;
-      else if (timelineMs <= charStartMs) progress = 0;
-      else {
-        const duration = charEndMs - charStartMs;
-        progress =
-          duration <= 0
-            ? 1
-            : Math.min(1, Math.max(0, (timelineMs - charStartMs) / duration));
-      }
-      if (gamma !== 1 && progress > 0 && progress < 1) {
-        progress = Math.max(Math.pow(progress, gamma), MIN_PLAYING_GLOW);
-      }
-      return `${100 - progress * 100}%`;
-    };
-
-    const applyCharsProgress = (elements, chars, seekMs) => {
-      const count = Math.min(elements.length, chars.length);
-      for (let i = 0; i < count; i++) {
-        const el = elements[i];
-        const char = chars[i];
-        if (!el || !char) continue;
-        const start = char.startTime || 0;
-        const end = char.endTime || 0;
-        applyCharLayers(
-          el,
-          charBackgroundPosition(start, end, seekMs),
-          charBackgroundPosition(start, end, seekMs, GLOW_PROGRESS_GAMMA),
-        );
-      }
-    };
-
-    // 字符注册那一刻就按当前时间轴落色：短歌词的当前行往往在下一帧的
-    // updateYrcDom 之前就被看到，若只依赖那一帧，时轴暂不可用或注册
-    // 时序错位时字符会停在 CSS 默认的未播放态（整行白色，缺少已播主题色）
-    // 一次 patch 会逐个触发几十次 ref，这里对时间轴做短窗口缓存
-    let registeredTimelineMs;
-    let registeredTimelineAt = 0;
-    const charProgressNow = (lineIndex, charIndex, chars) => {
-      const char = (chars ?? lines.value[lineIndex]?.characters)?.[charIndex];
-      if (!char) return "100%";
-      const now = performance.now();
-      if (registeredTimelineMs === undefined || now - registeredTimelineAt > 50) {
-        registeredTimelineMs = readTimelineMs();
-        registeredTimelineAt = now;
-      }
-      if (registeredTimelineMs === null) return "100%";
-      const start = char.startTime || 0;
-      const end = char.endTime || 0;
-      return [
-        charBackgroundPosition(start, end, registeredTimelineMs),
-        charBackgroundPosition(start, end, registeredTimelineMs, GLOW_PROGRESS_GAMMA),
-      ];
-    };
-
-    const resetYrcLineDom = (lineIndex) => {
-      if (lineIndex < 0) return;
-      resetCharsProgress(mainCharEls.get(lineIndex));
-      resetCharsProgress(subCharEls.get(`${lineIndex}:romanized`));
-      resetCharsProgress(subCharEls.get(`${lineIndex}:translated`));
-    };
-
-    const readTimelineMs = () => {
-      try {
-        const timelineMs = Number(props.page.lyrics.getTimelineMs());
-        return Number.isFinite(timelineMs) ? timelineMs : null;
-      } catch {
-        return null;
-      }
-    };
-
-    const updateYrcDom = () => {
-      const idx = visibleIndex.value;
-      const line = lines.value[idx];
-      if (!line?.characters?.length) {
-        resetYrcLineDom(lastYrcLineIndex);
-        lastYrcLineIndex = -1;
-        return;
-      }
-      const seekMs = readTimelineMs();
-      if (seekMs === null) return;
-      if (idx !== lastYrcLineIndex) {
-        resetYrcLineDom(lastYrcLineIndex);
-        lastYrcLineIndex = idx;
-      }
-      // 主歌词逐字
-      const mainEls = mainCharEls.get(idx);
-      if (mainEls) applyCharsProgress(mainEls, line.characters, seekMs);
-      // 副歌词逐字（音译/翻译；注音模式下音译按 rubyUnits 时间轴）
-      const mode = secondaryMode.value;
-      if (mode === "both" || mode === "romanization") {
-        const els = subCharEls.get(`${idx}:romanized`);
-        const rubyUnits = line.rubyUnits;
-        const chars = rubyMode.value && rubyUnits?.length ? rubyUnits : line.romanizedCharacters;
-        if (els && chars && chars.length > 0) applyCharsProgress(els, chars, seekMs);
-      }
-      if (mode === "both" || mode === "translation") {
-        const els = subCharEls.get(`${idx}:translated`);
-        const chars = line.translatedCharacters;
-        if (els && chars && chars.length > 1) applyCharsProgress(els, chars, seekMs);
-      }
-    };
-
-    const resetCharRegistry = () => {
-      mainCharEls.clear();
-      subCharEls.clear();
-      lastYrcLineIndex = -1;
-    };
-
-    // 逐字进度 RAF：仅「正在播放且窗口可见」时逐帧刷新（与宿主一致）
-    let progressRafId = 0;
-    let progressLastTime = 0;
-
-    const progressLoop = () => {
-      progressRafId = window.requestAnimationFrame((timestamp) => {
-        progressRafId = 0;
-        if (document.hidden) {
-          progressLastTime = 0;
-          return;
-        }
-        if (timestamp - progressLastTime >= 33) {
-          progressLastTime = timestamp;
-          updateYrcDom();
-        }
-        progressLoop();
-      });
-    };
-
-    const startProgressLoop = () => {
-      if (progressRafId) return;
-      progressLastTime = performance.now();
-      progressLoop();
-    };
-
-    const stopProgressLoop = () => {
-      if (progressRafId) {
-        window.cancelAnimationFrame(progressRafId);
-        progressRafId = 0;
-      }
-      progressLastTime = 0;
-    };
-
-    const syncProgressRaf = () => {
-      if (isPlaying.value && !document.hidden) startProgressLoop();
-      else stopProgressLoop();
-    };
-
-    const handleVisibilityChange = () => {
-      if (document.hidden) {
-        stopProgressLoop();
-        return;
-      }
-      // 回到前台：立即补一次全量刷新，避免看到错位的逐字进度
-      updateYrcDom();
-      syncProgressRaf();
-    };
       // ── 跟随与重定位 ──
       watch(currentIndex, (index, previous) => {
         if (index === previous) return;
         // 同步逐字进度（重置上一行、应用当前行）；nextTick 等 ref 注册完成后再应用
-        void nextTick(() => updateYrcDom());
+        void nextTick(() => yrc.updateYrcDom());
         // 用户正在浏览时不自动跟随
         if (isUserScrolling.value) return;
         void nextTick(() => {
@@ -1099,13 +1123,13 @@ const createSkinComponent = (ctx) => {
 
       // 歌词整体变化（切歌 / 换歌词源 / 副歌词模式）→ 瞬间重定位
       watch([lines, secondaryMode], () => {
-        resetCharRegistry();
+        yrc.resetCharRegistry();
         isUserScrolling.value = false;
         scrollHighlightIndex.value = -1;
         clearUserScrollResume();
         void nextTick(() => {
           // 暂停时 RAF 停转，需主动应用一次当前行逐字进度
-          updateYrcDom();
+          yrc.updateYrcDom();
           syncMarquee();
           scrollToLine(visibleIndex.value, false);
         });
@@ -1115,13 +1139,13 @@ const createSkinComponent = (ctx) => {
       watch(
         () => state.value.playbackClock,
         () => {
-          updateYrcDom();
-          syncProgressRaf();
+          yrc.updateYrcDom();
+          yrc.syncProgressRaf();
         },
       );
       watch(isPlaying, () => {
-        updateYrcDom();
-        syncProgressRaf();
+        yrc.updateYrcDom();
+        yrc.syncProgressRaf();
       });
 
       // 显式跳转（进度条/歌词行 seek）→ 立即恢复跟随（与宿主 useLyricScroll 一致），
@@ -1141,8 +1165,8 @@ const createSkinComponent = (ctx) => {
           () => settings.value.fontWeight,
           () => settings.value.lineHeight,
           () => settings.value.textAlign,
-          () => settings.value.lyricPadding,
           () => settings.value.currentScale,
+          () => settings.value.lyricPadding,
           reducedMotion,
         ],
         () => {
@@ -1157,9 +1181,14 @@ const createSkinComponent = (ctx) => {
       let resizeObserver = null;
       let resizeRafId = 0;
 
-      // ResizeObserver 回调紧跟布局结算，在观察回调内直接读 scrollWidth
-      // 会触发「ResizeObserver loop completed with undelivered notifications」，
-      // 这里延到下一帧再算跑马灯距离
+      // 页面样式切换会重建滚动容器：重新挂载 ResizeObserver
+      watch(scrollerRef, (el, previous) => {
+        if (previous) resizeObserver?.unobserve(previous);
+        if (el && resizeObserver) resizeObserver.observe(el);
+      });
+
+      // ResizeObserver 回调紧跟布局结算，syncMarquee 会读 scrollWidth 触发同步布局。
+      // 这里延后一帧执行，避免在观察回调内读写样式引起的循环通知
       const handleResize = () => {
         if (resizeRafId) return;
         resizeRafId = window.requestAnimationFrame(() => {
@@ -1168,21 +1197,15 @@ const createSkinComponent = (ctx) => {
         });
       };
 
-      // 页面样式切换会重建滚动容器：重新挂载 ResizeObserver
-      watch(scrollerRef, (el, previous) => {
-        if (previous) resizeObserver?.unobserve(previous);
-        if (el && resizeObserver) resizeObserver.observe(el);
-      });
-
       onMounted(() => {
         reducedMotionQuery = window.matchMedia?.("(prefers-reduced-motion: reduce)") ?? null;
         updateReducedMotion();
         reducedMotionQuery?.addEventListener?.("change", updateReducedMotion);
         resizeObserver = new ResizeObserver(handleResize);
         if (scrollerRef.value) resizeObserver.observe(scrollerRef.value);
-        document.addEventListener("visibilitychange", handleVisibilityChange);
-        updateYrcDom();
-        syncProgressRaf();
+        document.addEventListener("visibilitychange", yrc.handleVisibilityChange);
+        yrc.updateYrcDom();
+        yrc.syncProgressRaf();
         // 初始定位到当前行（不动画）
         void nextTick(() => {
           syncMarquee();
@@ -1195,8 +1218,10 @@ const createSkinComponent = (ctx) => {
         reducedMotionQuery = null;
         resizeObserver?.disconnect();
         resizeObserver = null;
-        document.removeEventListener("visibilitychange", handleVisibilityChange);
-        stopProgressLoop();
+        if (resizeRafId) window.cancelAnimationFrame(resizeRafId);
+        resizeRafId = 0;
+        document.removeEventListener("visibilitychange", yrc.handleVisibilityChange);
+        yrc.stopProgressLoop();
         if (scrollFrame) window.cancelAnimationFrame(scrollFrame);
         if (rafId) window.cancelAnimationFrame(rafId);
         if (wheelRafId) window.cancelAnimationFrame(wheelRafId);
@@ -1206,8 +1231,6 @@ const createSkinComponent = (ctx) => {
         wheelRafId = 0;
         lastFrameTime = 0;
         scrollActive = false;
-        if (resizeRafId) window.cancelAnimationFrame(resizeRafId);
-        resizeRafId = 0;
       });
 
       // ── 渲染 ──
@@ -1376,7 +1399,7 @@ const createSkinComponent = (ctx) => {
                                   // 注音读音字号小，不叠加字符级辉光以保持清晰
                                   false,
                                   (el) =>
-                                    registerSubChar(entry.index, "romanized", unitIndex, el),
+                                    yrc.registerSubChar(entry.index, "romanized", unitIndex, el),
                                 )
                               : null,
                           ),
@@ -1385,7 +1408,7 @@ const createSkinComponent = (ctx) => {
                             { class: "oxls-ruby-base" },
                             (unit.chars ?? []).map((char, charIndex) =>
                               renderChar(char.text, true, (el) =>
-                                registerMainChar(
+                                yrc.registerMainChar(
                                   entry.index,
                                   (unit.charStart ?? 0) + charIndex,
                                   el,
@@ -1399,7 +1422,7 @@ const createSkinComponent = (ctx) => {
                       entry.isYrc
                       ? entry.line.characters.map((char, charIndex) =>
                           renderChar(char.text, true, (el) =>
-                            registerMainChar(entry.index, charIndex, el),
+                            yrc.registerMainChar(entry.index, charIndex, el),
                           ),
                         )
                       : (entry.line.text || " "),
@@ -1412,7 +1435,7 @@ const createSkinComponent = (ctx) => {
                         (entry.line.romanizedCharacters?.length ?? 0) > 1
                         ? entry.line.romanizedCharacters.map((char, charIndex) =>
                             renderChar(char.text, false, (el) =>
-                              registerSubChar(entry.index, "romanized", charIndex, el),
+                              yrc.registerSubChar(entry.index, "romanized", charIndex, el),
                             ),
                           )
                         : entry.line.romanized,
@@ -1426,7 +1449,7 @@ const createSkinComponent = (ctx) => {
                         (entry.line.translatedCharacters?.length ?? 0) > 1
                         ? entry.line.translatedCharacters.map((char, charIndex) =>
                             renderChar(char.text, false, (el) =>
-                              registerSubChar(entry.index, "translated", charIndex, el),
+                              yrc.registerSubChar(entry.index, "translated", charIndex, el),
                             ),
                           )
                         : entry.line.translated,
@@ -1666,7 +1689,7 @@ function createLyricColorSettings(ctx, getCurrent, onPatch) {
       // 色块展示：封面取色显示当前封面色，其余未设置时显示默认色
       const displayOf = (key) => {
         const custom = getCurrent()[key];
-        if (custom === COVER_COLOR_VALUE) return coverAccent();
+        if (custom === COVER_COLOR_VALUE) return dynamicOption.value.color;
         return custom || FALLBACK[key];
       };
 
@@ -1942,5 +1965,7 @@ export async function activate(ctx) {
   });
 }
 
+// 所有资源（皮肤注册、设置、自动选中任务、歌词页监听）都在 activate 里通过
+  // ctx.dispose 登记，宿主停用插件时会自动调用，无需在此重复清理
 export function deactivate() {}
 
