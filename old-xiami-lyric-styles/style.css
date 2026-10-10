@@ -190,15 +190,30 @@
   border-radius: var(--radius-control, 8px);
   position: relative;
   white-space: nowrap;
-  transition:
-    opacity var(--oxls-scroll-duration) cubic-bezier(0.4, 0, 0.2, 1),
-    transform var(--oxls-scroll-duration) cubic-bezier(0.4, 0, 0.2, 1),
-    filter var(--oxls-scroll-duration) ease;
-  will-change: transform, opacity, filter;
+  /* 裁剪容器不参与缩放：所有行的可截断宽度与渐隐位置完全一致 */
+  overflow: hidden;
+  mask-image: linear-gradient(90deg, transparent 0px, black 16px, black calc(100% - 16px), transparent 100%);
+  -webkit-mask-image: linear-gradient(
+    90deg,
+    transparent 0px,
+    black 16px,
+    black calc(100% - 16px),
+    transparent 100%
+  );
 }
 
+/* 行内内容层：放大与模糊只作用于此层，裁剪边界不受其影响 */
+.oxls-content {
+  transition:
+    transform var(--oxls-scroll-duration) cubic-bezier(0.4, 0, 0.2, 1),
+    filter var(--oxls-scroll-duration) ease;
+  /* will-change 由内联样式按需附加：仅当前行及相邻行提升合成层 */
+}
+
+/* 歌词文本盒：宽度受行约束，超长部分由 .oxls-line 裁剪并渐隐（不显示省略号） */
 .oxls-primary {
-  display: inline-block;
+  display: block;
+  max-width: 100%;
   line-height: 1.24;
   letter-spacing: 0.01em;
   transition: text-shadow 0.3s ease;
@@ -213,6 +228,71 @@
   background-size: 200% 100%;
   background-repeat: no-repeat;
   background-position-x: 100%;
+  /* 辉光改由独立的模糊层承担，这里切断整行 text-shadow 的继承 */
+  text-shadow: none;
+}
+
+/* 当前行逐字字符：外层容器承载「宽辉光 + 近辉光 + 清晰文字」三层，
+   三层共用同一背景渐变与同一进度，辉光因此与字色连续同步 */
+.oxls-char-cell {
+  position: relative;
+  display: inline-block;
+  /* 逐字渲染时空格会单独成格，需保留不被折叠 */
+  white-space: pre;
+}
+
+.oxls-char-glow {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* 宽辉光：比原来的双层 text-shadow 略收敛，扩散过远会盖住相邻已播字的辉光 */
+.oxls-char-glow-wide {
+  filter: blur(calc(var(--oxls-glow-size) * 1.5));
+}
+
+.oxls-char-glow-near {
+  filter: blur(var(--oxls-glow-size));
+}
+
+/* 清晰文字层压在辉光之上 */
+.oxls-char-ink {
+  position: relative;
+}
+
+/* ===== 注音模式：每个注音单元是「读音在上、原词在下」的纵向小列 ===== */
+.oxls-ruby-unit {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  vertical-align: baseline;
+  /* 避免单元内部换行，换行发生在单元之间 */
+  white-space: nowrap;
+}
+
+.oxls-ruby-text {
+  display: block;
+  line-height: 1.1;
+  /* 读音比原词窄时不撑开列宽，靠 padding 留出与原词的呼吸空间 */
+  padding: 0 0.06em;
+  /* 即使该单元没有读音也占位，保证同一行内基线对齐 */
+  min-height: 1.1em;
+  /* 保留读音内部的音节空格 */
+  white-space: pre;
+  opacity: 0.75;
+}
+
+.oxls-line[data-current="true"] .oxls-ruby-text {
+  opacity: 0.9;
+}
+
+.oxls-ruby-base {
+  display: block;
+  line-height: 1.24;
+  /* 保留原词中的空格 */
+  white-space: pre;
 }
 
 /* 当前行溢出跑马灯（inline style 控制 overflow/mask/animation） */
@@ -231,10 +311,15 @@
   margin-top: 4px;
   max-width: 100%;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
   line-height: 1.4;
   transition: opacity var(--oxls-scroll-duration) ease;
+}
+
+/* 歌词文本可双击跳转播放位置（与宿主一致的光标提示） */
+.oxls-primary,
+.oxls-secondary {
+  cursor: pointer;
 }
 
 /* ===== 当前行指示器：左对齐（绝对定位在行左侧） ===== */
@@ -251,10 +336,12 @@
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: currentColor;
+  /* 用主题色而非 currentColor：指示器贴着行首文字，currentColor 继承的是宿主
+     正文色（白色），白色辉光会漫进首字，把主题色辉光染白 */
+  background: var(--oxls-played-color, var(--color-primary, #00cc65));
   box-shadow:
-    0 0 6px currentColor,
-    0 0 14px currentColor;
+    0 0 4px var(--oxls-played-color, var(--color-primary, #00cc65)),
+    0 0 9px var(--oxls-played-color, var(--color-primary, #00cc65));
   animation: oxls-marker-pulse 1.8s ease-in-out infinite;
 }
 
@@ -270,8 +357,9 @@
   bottom: 15%;
   width: 3px;
   border-radius: 2px;
-  background: currentColor;
-  box-shadow: 0 0 8px currentColor;
+  /* 主题色而非 currentColor：见上方 dot 规则，宿主白色辉光会染白行首文字的辉光 */
+  background: var(--oxls-played-color, var(--color-primary, #00cc65));
+  box-shadow: 0 0 5px var(--oxls-played-color, var(--color-primary, #00cc65));
   animation: oxls-marker-bar 2.4s ease-in-out infinite;
 }
 
@@ -284,10 +372,10 @@
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: currentColor;
+  background: var(--oxls-played-color, var(--color-primary, #00cc65));
   box-shadow:
-    0 0 6px currentColor,
-    0 0 14px currentColor;
+    0 0 4px var(--oxls-played-color, var(--color-primary, #00cc65)),
+    0 0 9px var(--oxls-played-color, var(--color-primary, #00cc65));
   animation: oxls-marker-pulse-center 1.8s ease-in-out infinite;
 }
 
@@ -299,8 +387,8 @@
   width: 3px;
   height: 1.2em;
   border-radius: 2px;
-  background: currentColor;
-  box-shadow: 0 0 8px currentColor;
+  background: var(--oxls-played-color, var(--color-primary, #00cc65));
+  box-shadow: 0 0 5px var(--oxls-played-color, var(--color-primary, #00cc65));
   animation: oxls-marker-bar 2.4s ease-in-out infinite;
 }
 
@@ -406,9 +494,59 @@
   gap: 8px;
 }
 
+/* 歌词颜色：已播 / 未播两个色块 */
+.oxls-settings-colors {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.oxls-settings-color {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.oxls-settings-color-label {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.oxls-settings-swatch {
+  position: relative;
+  width: 34px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--color-border, rgba(255, 255, 255, 0.18));
+  border-radius: 7px;
+  cursor: pointer;
+  overflow: hidden;
+  transition: transform 0.15s ease;
+}
+
+.oxls-settings-swatch:hover {
+  transform: scale(1.06);
+}
+
+/* 未单独设置（跟随默认）时右上角加斜纹角标 */
+.oxls-settings-swatch::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  border-width: 0 9px 9px 0;
+  border-style: solid;
+  border-color: transparent rgba(0, 0, 0, 0.45) transparent transparent;
+  opacity: 0;
+}
+
+.oxls-settings-swatch.is-follow::after {
+  opacity: 1;
+}
+
 /* ===== 减少动态效果 ===== */
 @media (prefers-reduced-motion: reduce) {
-  .oxls-line,
+  .oxls-content,
   .oxls-secondary,
   .oxls-time-tag {
     transition: none;
