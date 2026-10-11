@@ -21900,6 +21900,8 @@ var TARGET_FPS = 60;
 var FRAME_INTERVAL = 1e3 / TARGET_FPS;
 var SET_TIME_INTERVAL = 1e3 / 30;
 var OVERSCAN_PX = 200;
+var SEEK_JUMP_MS = 250;
+var SEEK_SETTLE_MS = 1200;
 function createSkinComponent(ctx) {
   const { defineComponent, h: h2, ref, shallowRef, computed, watch, onMounted, onUnmounted, Teleport } = ctx.vue;
   return defineComponent({
@@ -21919,6 +21921,7 @@ function createSkinComponent(ctx) {
       let lastSetTimeAt = 0;
       let settleUntil = 0;
       let lastAppliedTimeMs = Number.NaN;
+      let seekPending = false;
       let disposed = false;
       const seeking = ref(false);
       const hoverStartTime = ref(0);
@@ -21996,7 +21999,14 @@ function createSkinComponent(ctx) {
         if (player) {
           const timelineMs = readTimelineMs();
           if (timelineMs !== null && lastAppliedTimeMs !== timelineMs && timestamp - lastSetTimeAt >= SET_TIME_INTERVAL) {
-            player.setCurrentTime(timelineMs);
+            const jumped = Number.isFinite(lastAppliedTimeMs) && Math.abs(timelineMs - lastAppliedTimeMs) > SEEK_JUMP_MS;
+            const isSeek = seekPending || jumped;
+            player.setCurrentTime(timelineMs, isSeek);
+            if (isSeek) {
+              player.setIsSeeking(false);
+              settleUntil = Math.max(settleUntil, timestamp + SEEK_SETTLE_MS);
+            }
+            seekPending = false;
             lastAppliedTimeMs = timelineMs;
             lastSetTimeAt = timestamp;
           }
@@ -22039,9 +22049,11 @@ function createSkinComponent(ctx) {
         player.setLyricLines(amllLines.value, timelineMs);
         lastAppliedTimeMs = Number.NaN;
         lastSetTimeAt = 0;
+        seekPending = false;
         if (isPlaying.value && !document.hidden) player.resume();
         else player.pause();
         amllPlayer.value = player;
+        player.addEventListener("line-click", handleLyricLineClick);
         document.addEventListener("visibilitychange", handleVisibilityChange);
         lastFrameTime = performance.now();
         requestFrame();
@@ -22052,6 +22064,7 @@ function createSkinComponent(ctx) {
         rafId = null;
         const player = amllPlayer.value;
         if (player) {
+          player.removeEventListener("line-click", handleLyricLineClick);
           player.dispose();
           const ro = player.resizeObserver;
           ro?.disconnect();
@@ -22145,7 +22158,16 @@ function createSkinComponent(ctx) {
       const setRandomMode = () => props.page.playback.setMode("random");
       const setListMode = () => props.page.playback.setMode("list");
       const seekTo = (seconds) => {
+        seekPending = true;
         props.page.playback.seek(Math.max(0, Math.min(seconds, duration.value || 0)));
+      };
+      const handleLyricLineClick = (evt) => {
+        const index = evt?.lineIndex;
+        if (!Number.isInteger(index) || index < 0) return;
+        const startMs = amllLines.value[index]?.startTime;
+        if (!Number.isFinite(startMs)) return;
+        const offsetMs = Number(lyrics.value.timeOffset) || 0;
+        seekTo((startMs - offsetMs) / 1e3);
       };
       const handleProgressClick = (e2) => {
         const rect = progressTrackRef.value?.getBoundingClientRect();

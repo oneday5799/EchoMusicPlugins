@@ -37,6 +37,11 @@ const TARGET_FPS = 60
 const FRAME_INTERVAL = 1000 / TARGET_FPS
 const SET_TIME_INTERVAL = 1000 / 30
 const OVERSCAN_PX = 200
+// 相邻两次 setCurrentTime 的时间推进超过该值即判定为跳转。正常播放约 33ms
+// （setCurrentTime 的节流间隔），该阈值远大于掉帧波动，足以捕获小幅跳转。
+const SEEK_JUMP_MS = 250
+// 跳转后继续驱动弹簧动画收敛的时长，需覆盖大跨度位移的滑动时间
+const SEEK_SETTLE_MS = 1200
 
 export function createSkinComponent(ctx) {
   const { defineComponent, h, ref, shallowRef, computed, watch, onMounted, onUnmounted, Teleport } = ctx.vue
@@ -64,6 +69,7 @@ export function createSkinComponent(ctx) {
       let lastSetTimeAt = 0
       let settleUntil = 0
       let lastAppliedTimeMs = Number.NaN
+      let seekPending = false
       let disposed = false
 
       // Progress bar state
@@ -162,7 +168,23 @@ export function createSkinComponent(ctx) {
             lastAppliedTimeMs !== timelineMs &&
             timestamp - lastSetTimeAt >= SET_TIME_INTERVAL
           ) {
-            player.setCurrentTime(timelineMs)
+            // 跳转必须走 AMLL 的 seek 分支（isSeek=true）：该分支会重置用户滚动
+            // 状态、清空缓冲行并改用 seek 专用的稳定弹簧参数。若按普通推进处理，
+            // 大跨度跳转会带着残留的滚动偏移停在错误位置——AMLL 文档也明确要求
+            // 「用户滚动后点击跳转歌词」时先 resetScroll 再 calcLayout。
+            const jumped =
+              Number.isFinite(lastAppliedTimeMs) &&
+              Math.abs(timelineMs - lastAppliedTimeMs) > SEEK_JUMP_MS
+            const isSeek = seekPending || jumped
+            player.setCurrentTime(timelineMs, isSeek)
+            if (isSeek) {
+              // isSeeking 只需在 setCurrentTime 同步触发的布局计算期间为 true；
+              // calcLayout 无 await，此刻复位不会影响已套用的 seek 弹簧参数，
+              // 却能避免后续普通推进一直沿用 seek 模式。
+              player.setIsSeeking(false)
+              settleUntil = Math.max(settleUntil, timestamp + SEEK_SETTLE_MS)
+            }
+            seekPending = false
             lastAppliedTimeMs = timelineMs
             lastSetTimeAt = timestamp
           }
@@ -208,9 +230,11 @@ export function createSkinComponent(ctx) {
         player.setLyricLines(amllLines.value, timelineMs)
         lastAppliedTimeMs = Number.NaN
         lastSetTimeAt = 0
+        seekPending = false
         if (isPlaying.value && !document.hidden) player.resume()
         else player.pause()
         amllPlayer.value = player
+        player.addEventListener('line-click', handleLyricLineClick)
         document.addEventListener('visibilitychange', handleVisibilityChange)
         lastFrameTime = performance.now()
         requestFrame()
@@ -222,6 +246,7 @@ export function createSkinComponent(ctx) {
         rafId = null
         const player = amllPlayer.value
         if (player) {
+          player.removeEventListener('line-click', handleLyricLineClick)
           player.dispose()
           const ro = player.resizeObserver
           ro?.disconnect()
@@ -327,7 +352,22 @@ export function createSkinComponent(ctx) {
       const setListMode = () => props.page.playback.setMode('list')
 
       const seekTo = (seconds) => {
+        seekPending = true
         props.page.playback.seek(Math.max(0, Math.min(seconds, duration.value || 0)))
+      }
+
+      // AMLL 的 `line-click` 事件带有 lineIndex，对应 setLyricLines 传入数组的下标
+      // （AMLL 的歌词优化只原地改时间戳、不增删行，故下标与 amllLines 严格 1:1）。
+      // 注意不能用 evt.line.lyricLine.startTime：AMLL 默认开启 tryAdvanceStartTime，
+      // 会把行首提前最多 600ms 用于逐词动画，直接用会跳到行首之前。
+      const handleLyricLineClick = (evt) => {
+        const index = evt?.lineIndex
+        if (!Number.isInteger(index) || index < 0) return
+        const startMs = amllLines.value[index]?.startTime
+        if (!Number.isFinite(startMs)) return
+        // 宿主时间轴 = 播放位置 + 歌词偏移，seek 需反向扣除偏移量
+        const offsetMs = Number(lyrics.value.timeOffset) || 0
+        seekTo((startMs - offsetMs) / 1000)
       }
 
       const handleProgressClick = (e) => {

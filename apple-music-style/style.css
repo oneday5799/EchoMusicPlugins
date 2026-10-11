@@ -683,6 +683,9 @@
   text-shadow: var(--amll-text-shadow, 0 2px 8px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.2));
 }
 
+.amms-lyrics-container .amll-lyric-player [class*="_lyricLine"] {
+  cursor: pointer;
+}
 .amms-lyrics-container .amll-lyric-player [class*="_lyricMainLine"] {
   color: var(--amll-unplayed-color, rgba(255, 255, 255, 0.92));
   font-weight: var(--amll-font-weight, 850);
