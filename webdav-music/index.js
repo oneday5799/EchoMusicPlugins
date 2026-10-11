@@ -5,12 +5,41 @@
 
 /* ---- Constants ---- */
 const STORAGE_KEY = "settings";
-const CHECK_SVG = '<path d="M13.854 3.646a.5.5 0 1 1 0 .708l-7 7a.5.5 0 0 1-.708 0l-3.5-3.5a.5.5 0 1 1 .708-.708L6.5 10.293l6.646-6.647a.5.5 0 0 1 .708 0z" fill="currentColor"/>';
 const FOLDER_SVG = '<path d="M947.2 969.728h-870.4c-42.496 0-76.8-34.304-76.8-76.8V131.072c0-42.496 34.304-76.8 76.8-76.8h449.024c42.496 0 76.8 34.304 76.8 76.8v68.608c0 14.336 11.264 25.6 25.6 25.6H947.2c42.496 0 76.8 34.304 76.8 76.8v590.848c0 42.496-34.304 76.8-76.8 76.8z m-870.4-864.256c-14.336 0-25.6 11.264-25.6 25.6v762.368c0 14.336 11.264 25.6 25.6 25.6h870.4c14.336 0 25.6-11.264 25.6-25.6V302.08c0-14.336-11.264-25.6-25.6-25.6h-318.976c-42.496 0-76.8-34.304-76.8-76.8v-68.608c0-14.336-11.264-25.6-25.6-25.6H76.8z" fill="#ffffff"/><path d="M948.224 155.136h-263.68c-14.336 0-25.6-11.264-25.6-25.6s11.264-25.6 25.6-25.6h263.68c14.336 0 25.6 11.264 25.6 25.6s-11.776 25.6-25.6 25.6z" fill="#ffffff"/>';
 const AUDIO_EXTENSIONS = [
   "mp3", "flac", "wav", "aac", "ogg", "wma",
   "m4a", "ape", "opus", "aiff", "alac", "dsf", "dff",
 ];
+/** 读取音频头部（嵌入标签 / 比特率探测）的最大字节数 */
+const HEAD_READ_LIMIT = 256 * 1024;
+/** 浏览页吸顶偏移：与 DetailPageSliverHeader 的高度设置保持一致 */
+const STICKY_COLLAPSED_H = 56;
+const STICKY_TABS_H = 56;
+const STICKY_BREADCRUMB_H = 28;
+const STICKY_TOP_TABS = STICKY_COLLAPSED_H;
+const STICKY_TOP_BREADCRUMB = STICKY_TOP_TABS + STICKY_TABS_H;
+const STICKY_TOP_LIST_HEADER = STICKY_TOP_BREADCRUMB + STICKY_BREADCRUMB_H;
+
+/**
+ * 歌词解析器的时间预算。
+ * 宿主在 src/renderer/plugins/lyrics.ts 中对每个 resolver 的 match/resolve
+ * 施加 2500ms 硬超时，超时后结果被直接丢弃并回落到宿主默认歌词链路。
+ * 这里留出余量，确保解析器一定在宿主超时前返回。
+ */
+const LYRIC_RESOLVE_BUDGET_MS = 1800;
+/** 距离截止时间还剩多少毫秒（至少返回 0） */
+const remainingMs = (deadline) => Math.max(0, deadline - Date.now());
+/** 竞速用的延时器，不阻塞主线程 */
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+
+/**
+ * 插件排序字段 ↔ 宿主 SongListHeader 字段的映射。
+ * 平铺视图用宿主表头，它只认 index / title / artist / album / duration；
+ * 插件内部的 'name'（文件名）对应 'index'，'size' 在宿主表头里没有对应列，
+ * 切换视图时统一清掉，避免残留一个无法高亮的排序态。
+ */
+const FLAT_SORT_HEADER_FIELD = { name: "index", title: "title", artist: "artist", album: "album" };
+const FLAT_SORT_FIELD = { index: "name", title: "title", artist: "artist", album: "album" };
 const COVER_NAMES = [
   "cover.jpg", "cover.png", "cover.webp",
   "folder.jpg", "folder.png",
@@ -42,6 +71,10 @@ const DEFAULT_SETTINGS = {
   activeLibraryId: null,
 };
 
+/** 1x1 空白 JPEG，作为系统媒体控制封面转换失败时的兜底 */
+const BLANK_COVER_DATA_URL =
+  "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD/2wBAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAAIAAoDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAFRABAQAAAAAAAAAAAAAAAAAAAAf/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8ApgAH/9k=";
+
 /** 模块级排序状态（不依赖组件生命周期，应用关闭前持久保持） */
 let _sortField = null; // 'name' | 'title' | 'size' | null
 let _sortOrder = null; // 'asc' | 'desc' | null
@@ -55,7 +88,79 @@ const _pendingEnrichment = new Map();
 /** 模块级库配置缓存：songId → library，供封面获取使用 */
 const _songLibraryCache = new Map();
 
-let _ctx = null;
+/**
+ * 模块级 Object URL 登记表。
+ * 插件用 createObjectURL 承载内嵌封面与目录封面，这些 URL 会留在
+ * 播放队列 / 播放快照里，必须在替换时回收，否则长时间浏览持续泄漏内存。
+ *
+ * 注意：这里是「同 key 替换即回收旧值」的单引用语义，不是引用计数——
+ * 同一首歌重复 enrich 会复用已有 URL（见 _songCoverUrls），同一目录
+ * 重复进入会复用已有封面（见 _folderCoverUrls），所以同一 key 不会被
+ * 多处同时持有。deactivate 时统一 revoke，届时播放队列里的旧封面会
+ * 一起失效（可接受：禁用插件本就意味着这些封面不再可用）。
+ */
+const _objectUrls = new Map();
+
+/** 登记一个新的 Object URL，返回可直接使用的 URL 字符串 */
+const trackObjectUrl = (key, blob, mimeType) => {
+  const url = URL.createObjectURL(new Blob([blob], { type: mimeType || "image/jpeg" }));
+  releaseObjectUrl(key);
+  _objectUrls.set(key, { url, count: 1 });
+  return url;
+};
+
+/**
+ * 释放某个 key 之前登记的 Object URL。
+ * 同一个 URL 可能被多个 song / 目录共享，因此引用计数归零才真正 revoke。
+ */
+const releaseObjectUrl = (key) => {
+  if (!key) return;
+  const entry = _objectUrls.get(key);
+  if (!entry) return;
+  entry.count -= 1;
+  if (entry.count > 0) return;
+  _objectUrls.delete(key);
+  try { URL.revokeObjectURL(entry.url); } catch { /* 已失效则忽略 */ }
+};
+
+/** 批量释放所有已登记的 Object URL（停用插件时调用） */
+const releaseAllObjectUrls = () => {
+  for (const entry of _objectUrls.values()) {
+    try { URL.revokeObjectURL(entry.url); } catch { /* 已失效则忽略 */ }
+  }
+  _objectUrls.clear();
+};
+
+/** 目录封面 URL 缓存：coverKey → url，避免重复下载同一张目录封面 */
+const _folderCoverUrls = new Map();
+
+/** 歌曲内嵌封面 URL 缓存：coverKey → url，避免同一首歌重复创建 Object URL */
+const _songCoverUrls = new Map();
+
+/** 音质探测结果缓存：key(serverUrl + filePath) → quality，避免同一次播放重复 Range 请求 */
+const _qualityCache = new Map();
+const QUALITY_CACHE_LIMIT = 200;
+
+const qualityCacheKey = (lib, filePath) => `${lib?.serverUrl || ""}|${filePath}`;
+
+// 用 undefined 表示「key 不存在」，null 表示「已探测过但没有音质信息」，
+// 否则 ogg/opus/wma 等解析不出音质的文件每次播放都会重发 256KB Range 请求
+const readQualityCache = (key) => {
+  if (!key) return undefined;
+  return _qualityCache.has(key) ? _qualityCache.get(key) : undefined;
+};
+
+const writeQualityCache = (key, quality) => {
+  if (!key) return quality;
+  if (_qualityCache.size >= QUALITY_CACHE_LIMIT) {
+    const oldest = _qualityCache.keys().next().value;
+    if (oldest !== undefined) _qualityCache.delete(oldest);
+  }
+  _qualityCache.set(key, quality);
+  return quality;
+};
+
+
 
 
 /* ===================================================================
@@ -82,7 +187,7 @@ let _bcChannel = null;
  * 解决：通过 Canvas 将任意图片格式转换为 JPEG data URL，
  *      主进程可直接 fetch，native addon 也能快速处理（JPEG 直达路径）。
  */
-const convertCoverForSmtc = async (input, authHeader) => {
+const convertCoverForSmtc = async (ctx, input, authHeader) => {
   if (!input) return input;
 
   // Uint8Array：直接转 base64 data URL
@@ -98,11 +203,11 @@ const convertCoverForSmtc = async (input, authHeader) => {
   // 已经是 JPEG data URL：直接使用
   if (/^data:image\/jpeg/.test(input)) return input;
 
-  // URL：通过 fetch + Authorization header 获取图片数据
+  // 远程 URL 且需要认证：带 Authorization header 拉取
   // 浏览器 <img> 和 fetch 不支持 URL 内嵌凭证（user:pass@host）
-  if (typeof input === "string" && authHeader) {
+  if (typeof input === "string" && authHeader && /^https?:\/\//i.test(input)) {
     try {
-      const res = await fetch(input, { headers: { Authorization: authHeader } });
+      const res = await (ctx?.net?.fetch ? ctx.net.fetch(input, { headers: { Authorization: authHeader } }) : fetch(input, { headers: { Authorization: authHeader } }));
       if (res.ok) {
         const blob = await res.blob();
         return await new Promise((resolve, reject) => {
@@ -115,26 +220,26 @@ const convertCoverForSmtc = async (input, authHeader) => {
     } catch {}
   }
 
-  // 其他 URL：通过 Canvas 转 JPEG data URL
+  // 其他 URL（Object URL / 跨域图）：通过 Canvas 转 JPEG data URL
+  // 注意：这里必须用局部变量保存 2D context，避免遮蔽插件的 ctx 参数
   const TIMEOUT_MS = 5000;
   try {
     const img = new Image();
     img.crossOrigin = 'anonymous';
     await Promise.race([
       new Promise((resolve, reject) => {
-        img.onload = resolve;
-        img.onerror = () => reject(new Error('Image load failed'));
+        // 超时定时器在图片成功加载后要清掉，否则每次调用泄漏一个 5s 定时器
+        const timer = setTimeout(() => reject(new Error('Image load timeout')), TIMEOUT_MS);
+        img.onload = () => { clearTimeout(timer); resolve(); };
+        img.onerror = () => { clearTimeout(timer); reject(new Error('Image load failed')); };
         img.src = input;
       }),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Image load timeout')), TIMEOUT_MS)
-      )
     ]);
     const canvas = document.createElement('canvas');
     canvas.width = img.width;
     canvas.height = img.height;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(img, 0, 0);
+    const canvasCtx = canvas.getContext('2d');
+    canvasCtx.drawImage(img, 0, 0);
     return canvas.toDataURL('image/jpeg', 0.92);
   } catch {
     return input;
@@ -246,17 +351,18 @@ const parseID3v2 = (buffer) => {
     }
     if (frameId === "USLT" || frameId === "ULT") {
       const enc = fd[0]; let pos = 4;
-      if (enc === 0 || enc === 3) { while (pos < frameSize && fd[pos] !== 0) pos++; }
+      // 终止符长度随编码不同：单字节（0/3）需再跳 1 字节；双字节（1/2）已由 pos += 2 越过
+      if (enc === 0 || enc === 3) { while (pos < frameSize && fd[pos] !== 0) pos++; pos += 1; }
       else { while (pos + 1 < frameSize && !(fd[pos] === 0 && fd[pos + 1] === 0)) pos += 2; pos += 2; }
-      pos++; if (pos < frameSize) result.lyric = readTagText(fd, pos, frameSize - pos, enc);
+      if (pos < frameSize) result.lyric = readTagText(fd, pos, frameSize - pos, enc);
       continue;
     }
     if (frameId === "APIC" || frameId === "PIC") {
       const enc = fd[0]; let pos = 1; while (pos < frameSize && fd[pos] !== 0) pos++;
       result.coverMime = String.fromCharCode(...fd.slice(1, pos)); pos += 2;
-      if (enc === 0 || enc === 3) { while (pos < frameSize && fd[pos] !== 0) pos++; }
+      if (enc === 0 || enc === 3) { while (pos < frameSize && fd[pos] !== 0) pos++; pos += 1; }
       else { while (pos + 1 < frameSize && !(fd[pos] === 0 && fd[pos + 1] === 0)) pos += 2; pos += 2; }
-      pos++; if (pos < frameSize) result.coverData = fd.slice(pos);
+      if (pos < frameSize) result.coverData = fd.slice(pos);
     }
   }
   return result;
@@ -269,21 +375,80 @@ const parseFLAC = (buffer) => {
     const blockSize = (dv.getUint8(off + 1) << 16) | (dv.getUint8(off + 2) << 8) | dv.getUint8(off + 3); off += 4;
     if (off + blockSize > buffer.length) break;
     const bd = buffer.slice(off, off + blockSize); off += blockSize;
-    if (blockType === 0 && blockSize >= 34) { const bdv = new DataView(bd.buffer, bd.byteOffset, bd.byteLength); const totalSamples = (bdv.getUint32(10) & 0xF) * 0x100000000 + bdv.getUint32(14); const sampleRate = bdv.getUint32(18) >> 12; if (sampleRate > 0) result.duration = Math.round(totalSamples / sampleRate); }
+    if (blockType === 0 && blockSize >= 34) { const bdv = new DataView(bd.buffer, bd.byteOffset, bd.byteLength); const totalSamples = (bdv.getUint32(10) & 0xF) * 0x100000000 + bdv.getUint32(14); const sampleRate = (bdv.getUint16(10) << 4) | (bdv.getUint8(12) >> 4); if (sampleRate > 0) result.duration = Math.round(totalSamples / sampleRate); }
     else if (blockType === 4) { const bdv = new DataView(bd.buffer, bd.byteOffset, bd.byteLength); const vendorLen = bdv.getUint32(0, true); let pos = 4 + vendorLen; const numComments = bdv.getUint32(pos, true); pos += 4; for (let i = 0; i < numComments; i++) { if (pos + 4 > bd.length) break; const len = bdv.getUint32(pos, true); pos += 4; if (pos + len > bd.length) break; const comment = new TextDecoder().decode(bd.slice(pos, pos + len)); pos += len; const eq = comment.indexOf("="); if (eq <= 0) continue; const key = comment.slice(0, eq).toUpperCase(), value = comment.slice(eq + 1); if (key === "TITLE" && !result.title) result.title = value; else if (key === "ARTIST" && !result.artist) result.artist = value; else if (key === "ALBUM" && !result.album) result.album = value; else if (key === "LYRICS" && !result.lyric) result.lyric = value; } }
     else if (blockType === 6 && blockSize > 4) { const bdv = new DataView(bd.buffer, bd.byteOffset, bd.byteLength); let p = 4; const mimeLen = bdv.getUint32(p); p += 4; result.coverMime = new TextDecoder().decode(bd.slice(p, p + mimeLen)); p += mimeLen; const descLen = bdv.getUint32(p); p += 4 + descLen; p += 16; const picLen = bdv.getUint32(p); p += 4; if (p + picLen <= bd.length) result.coverData = bd.slice(p, p + picLen); }
     if (header & 0x80) break;
   }
   return result;
 };
+/**
+ * 统一的 WebDAV 请求入口。
+ *
+ * 传输层优先使用 ctx.net.request（主进程 Axios）：不受浏览器 CORS / 预检限制，
+ * 是调用 PROPFIND 这类非标准方法的唯一可靠方式；宿主未声明
+ * capabilities.unrestrictedNetwork 时退回 ctx.net.fetch。
+ *
+ * 传入 options.range 时会校验响应是否真的按 Range 返回，避免服务端忽略
+ * Range 直接返回 200 完整文件导致整首歌曲被下载。
+ */
+const webdavRequest = async (ctx, lib, path, options = {}) => {
+  const { method = "GET", headers = {}, body, responseType = "text", range, signal, timeoutMs } = options;
+  // 文件名可能含 # ? 空格或非 ASCII；audioSource 走的 buildAuthUrl 有 encodePath，
+  // 这里也要做同样的段级编码，否则这类文件 PROPFIND/GET/封面探测会失败
+  const url = joinUrl(lib.serverUrl, encodePath(path));
+  const finalHeaders = { ...headers };
+  const auth = buildAuthHeader(lib);
+  if (auth) finalHeaders.Authorization = auth;
+  if (range) finalHeaders.Range = `bytes=${range.start}-${range.end}`;
+  const wantLength = range ? range.end - range.start + 1 : 0;
+
+  /**
+   * 把响应裁剪到请求的 Range 窗口。
+   * 两种情况都要裁：服务端正确返回 206 时数据本就位于 range.start，
+   * 忽略 Range 直接返回 200 完整文件时数据从 0 开始——两者切片结果一致，
+   * 这样至少不会把整首歌送进标签解析器。
+   */
+  const clamp = (data) => {
+    if (wantLength <= 0) return data;
+    const isBinary = data instanceof ArrayBuffer || ArrayBuffer.isView(data);
+    if (!isBinary) return data;
+    return (data?.byteLength ?? 0) > wantLength ? data.slice(range.start, range.start + wantLength) : data;
+  };
+
+  const useUnrestricted =
+    typeof ctx?.net?.request === "function" &&
+    ctx.manifest?.capabilities?.unrestrictedNetwork === true;
+
+  if (useUnrestricted) {
+    const res = await ctx.net.request({ url, method, headers: finalHeaders, body, responseType, signal, timeoutMs });
+    const raw = res?.headers || {};
+    const contentRange = String(
+      Array.isArray(raw["content-range"]) ? raw["content-range"][0] : raw["content-range"] || "",
+    );
+    const partial = res.status === 206 || /^bytes\s+\d+-\d+\//i.test(contentRange);
+    return { ok: res.status >= 200 && res.status < 300, status: res.status, data: clamp(res.data), partial };
+  }
+
+  const res = await ctx.net.fetch(url, { method, headers: finalHeaders, body, signal });
+  if (!res.ok) return { ok: false, status: res.status, data: null, partial: res.status === 206 };
+  const contentRange = res.headers?.get?.("content-range") || "";
+  const partial = res.status === 206 || /^bytes\s+\d+-\d+\//i.test(contentRange);
+  const data = responseType === "arrayBuffer" ? new Uint8Array(await res.arrayBuffer()) : await res.text();
+  return { ok: true, status: res.status, data: clamp(data), partial };
+};
+
 const readFileHead = async (ctx, settings, filePath) => {
-  const url = joinUrl(settings.serverUrl, filePath); const headers = {}; const auth = buildAuthHeader(settings);
-  if (auth) headers["Authorization"] = auth; headers["Range"] = "bytes=0-262143";
-  const res = await ctx.net.fetch(url, { headers }); if (!res.ok) throw new Error("HTTP " + res.status);
-  const ab = await res.arrayBuffer(); return new Uint8Array(ab);
+  const res = await webdavRequest(ctx, settings, filePath, {
+    responseType: "arrayBuffer",
+    range: { start: 0, end: HEAD_READ_LIMIT - 1 },
+    timeoutMs: 20000,
+  });
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  return res.data instanceof Uint8Array ? res.data : new Uint8Array(res.data || 0);
 };
 const readEmbeddedTags = async (ctx, settings, filePath) => {
-  try { const head = await readFileHead(ctx, settings, filePath); if (head.length < 4) return null; if (head[0] === 0x49 && head[1] === 0x44 && head[2] === 0x33) return parseID3v2(head); if (head[0] === 0x66 && head[1] === 0x4C && head[2] === 0x61 && head[3] === 0x43) return parseFLAC(head); return null; }
+  try { const head = await readFileHead(ctx, settings, filePath); if (!head || head.length < 4) return null; if (head[0] === 0x49 && head[1] === 0x44 && head[2] === 0x33) return parseID3v2(head); if (head[0] === 0x66 && head[1] === 0x4C && head[2] === 0x61 && head[3] === 0x43) return parseFLAC(head); return null; }
   catch (err) { console.error("[webdav-music] readEmbeddedTags error:", filePath, err); return null; }
 };
 
@@ -326,9 +491,13 @@ const syncToStores = (ctx, songId, patch) => {
       if (currentSnapshot) {
         player.currentTrackSnapshot = { ...currentSnapshot, ...patch };
       }
-      // 4) 元数据充实后同步刷新 Windows SMTC
+      // 4) 元数据充实后同步刷新系统媒体控制（Windows SMTC 等）
+      //
+      // 必须同时走 mediaControls.updateMetadata 和 output.setTrackMeta：
+      // 宿主 src/renderer/utils/player.ts updateMediaMetadata() 也是成对调用，
+      // 只调前者会让输出设备侧拿不到最新元数据。
       const snapshotForSmtc = player.currentTrackSnapshot;
-      if (snapshotForSmtc && window.electron?.mediaControls) {
+      if (snapshotForSmtc && (window.electron?.mediaControls || window.electron?.output?.setTrackMeta)) {
         // 获取库配置以构建 Authorization header
         const lib = _songLibraryCache.get(sid);
         const authHeader = lib ? buildAuthHeader(lib) : null;
@@ -336,17 +505,18 @@ const syncToStores = (ctx, songId, patch) => {
         (async () => {
           let coverUrl;
           try {
-            coverUrl = await convertCoverForSmtc(rawCoverUrl, authHeader);
+            coverUrl = await convertCoverForSmtc(ctx, rawCoverUrl, authHeader);
           } catch {
-            coverUrl = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD/2wBAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAAIAAoDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAFRABAQAAAAAAAAAAAAAAAAAAAAf/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8ApgAH/9k=";
+            coverUrl = BLANK_COVER_DATA_URL;
           }
-          window.electron.mediaControls.updateMetadata({
+          const meta = {
             title: snapshotForSmtc.title || "未知歌曲",
             artist: snapshotForSmtc.artist || "未知歌手",
             album: snapshotForSmtc.album || "",
             durationMs: (snapshotForSmtc.duration || 0) * 1000,
-            coverUrl,
-          });
+          };
+          try { window.electron?.mediaControls?.updateMetadata?.({ ...meta, coverUrl }); } catch {}
+          try { window.electron?.output?.setTrackMeta?.({ ...meta, artwork: coverUrl }); } catch {}
         })();
       }
     }
@@ -361,7 +531,16 @@ const buildPatchFromSource = (song, source, sourceType) => {
     if (source.title) { song.title = source.title; song.name = source.title; patch.title = source.title; patch.name = source.title; }
     if (source.artist) { song.artist = source.artist; song.artists = [{ name: source.artist }]; song.singers = [{ name: source.artist }]; patch.artist = source.artist; patch.artists = [{ name: source.artist }]; patch.singers = [{ name: source.artist }]; }
     if (source.album) { song.album = source.album; song.albumName = source.album; patch.album = source.album; patch.albumName = source.album; }
-    if (source.coverData) { const blob = new Blob([source.coverData], { type: source.coverMime || "image/jpeg" }); const cu = URL.createObjectURL(blob); song.coverUrl = cu; song.cover = cu; patch.coverUrl = cu; patch.cover = cu; }
+    if (source.coverData) {
+      // 同一首歌重复 enrich 时复用已有 Object URL，避免每次切歌都新建一个泄漏
+      const coverKey = `song:${song.id}`;
+      let cu = _songCoverUrls.get(coverKey);
+      if (!cu) {
+        cu = trackObjectUrl(coverKey, source.coverData, source.coverMime || "image/jpeg");
+        _songCoverUrls.set(coverKey, cu);
+      }
+      song.coverUrl = cu; song.cover = cu; patch.coverUrl = cu; patch.cover = cu;
+    }
     if (source.lyric) { song.lyric = source.lyric; patch.lyric = source.lyric; }
     if (source.duration > 0) { song.duration = source.duration; patch.duration = source.duration; }
   } else if (sourceType === 'kugou') {
@@ -377,8 +556,98 @@ const buildPatchFromSource = (song, source, sourceType) => {
 };
 
 /**
+ * 通过酷狗搜索歌曲并取回匹配的元数据与歌词（不含写库，由调用方决定怎么用）。
+ *
+ * enrichFromKugouApi 与歌词解析器共用这一份实现：
+ * 同一次播放里两者搜索的关键词完全一致，避免重复请求。
+ */
+const searchKugouSong = async (ctx, track, options = {}) => {
+  if (!track?.title || !ctx?.kugou) return null;
+  const artist = track.artist || "";
+  const title = track.title;
+  const keyword = artist && artist !== "未知歌手" ? `${artist} ${title}` : title;
+  if (!keyword) return null;
+  try {
+    const searchResult = await ctx.kugou.search.search(keyword, "song", 1, 5);
+    const lists = searchResult?.data?.lists || searchResult?.data?.list || [];
+    if (!lists.length) return null;
+    const match = lists[0];
+    if (!match) return null;
+    const data = {
+      fileHash: match.FileHash || "",
+      coverUrl: formatPicUrl(match.Image || match.trans_param?.union_cover || match.cover || ""),
+      albumName: match.AlbumName || "",
+      matchSinger: match.SingerName || "",
+      lyricText: "",
+    };
+    // 已有歌词时不再多发两次歌词请求
+    if (data.fileHash && options.needLyric !== false) {
+      const lyricText = await fetchKugouBestLyric(ctx, data.fileHash);
+      if (lyricText) data.lyricText = lyricText;
+    }
+    return data;
+  } catch {
+    return null;
+  }
+};
+
+/** 按 FileHash 取最优歌词（官方推荐优先，其次 score 最高） */
+const fetchKugouBestLyric = async (ctx, fileHash) => {
+  if (!fileHash) return "";
+  try {
+    const lyricResult = await ctx.kugou.music.searchLyric(fileHash);
+    const candidates = lyricResult?.candidates || lyricResult?.data?.candidates || [];
+    const best = [...candidates]
+      .filter((c) => c?.id && c?.accesskey)
+      .sort(
+        (a, b) =>
+          (b.product_from === "官方推荐歌词" ? 1 : 0) - (a.product_from === "官方推荐歌词" ? 1 : 0) ||
+          (b.score ?? 0) - (a.score ?? 0),
+      )[0];
+    if (!best) return "";
+    const detail = await ctx.kugou.music.getLyric(String(best.id), String(best.accesskey));
+    return detail?.decodeContent || detail?.content || detail?.data?.content || "";
+  } catch {
+    return "";
+  }
+};
+
+/** 后台酷狗搜索登记表：hash → Promise，避免歌词解析器每次切歌都重新串行搜索 */
+const _kugouLyricSearches = new Map();
+/**
+ * 模块状态会话代数。deactivate/activate 会让它 +1；
+ * 在飞的异步回调（enrich / kugou 搜索）完成时先比对代数，
+ * 不一致说明本次会话已被清理，直接丢弃结果，避免把已清空的缓存又填回来。
+ */
+let _stateEpoch = 0;
+const stateEpoch = () => _stateEpoch;
+
+/**
+ * 触发一次后台酷狗歌词搜索，结果写入 _enrichedLyrics。
+ * 已在进行中或已有结果时直接复用，返回对应的 Promise。
+ */
+const startKugouLyricSearch = (ctx, hash, track) => {
+  if (!hash || !track) return null;
+  if (_enrichedLyrics.get(hash)) return Promise.resolve(_enrichedLyrics.get(hash));
+  const existing = _kugouLyricSearches.get(hash);
+  if (existing) return existing;
+  const epoch = stateEpoch();
+  const task = searchKugouSong(ctx, track)
+    .then((data) => {
+      // deactivate 可能已清空模块状态；此时丢弃结果，避免「复活」上一会话的缓存
+      if (stateEpoch() !== epoch) return "";
+      if (data?.lyricText) _enrichedLyrics.set(hash, data.lyricText);
+      return data?.lyricText || "";
+    })
+    .catch(() => "")
+    .finally(() => _kugouLyricSearches.delete(hash));
+  _kugouLyricSearches.set(hash, task);
+  return task;
+};
+
+/**
  * 通过酷狗 API 搜索并补全歌曲元数据（异步 fire-and-forget，不阻塞播放）
- * 
+ *
  * 当文件嵌入标签（ID3v2/FLAC）解析失败时，作为第三优先级回退。
  * 使用 ctx.kugou 调用 EchoMusic 内置酷狗接口，无需额外鉴权。
  */
@@ -386,49 +655,28 @@ const enrichFromKugouApi = async (ctx, song) => {
   if (!song || !song.title || !ctx.kugou) return;
   const hasValidCover = song.coverUrl && /^https?:\/\//.test(song.coverUrl);
   if (hasValidCover && song.lyric) return;
-  const artist = song.artist || "";
-  const title = song.title;
-  const keyword = artist && artist !== "未知歌手" ? `${artist} ${title}` : title;
-  try {
-    const result = await ctx.kugou.search.search(keyword, "song", 1, 5);
-    const lists = result?.data?.lists || result?.data?.list || [];
-    if (!lists.length) return;
-    const match = lists[0];
-    if (!match) return;
-    const fileHash = match.FileHash;
-    const coverUrl = formatPicUrl(match.Image || match.trans_param?.union_cover || match.cover || "");
-    const albumName = match.AlbumName || "";
-    const matchSinger = match.SingerName || "";
-    const kugouData = { coverUrl, albumName, matchSinger, lyricText: "" };
-    if (fileHash && !song.lyric) {
-      try {
-        const lyricResult = await ctx.kugou.music.searchLyric(fileHash);
-        const candidates = lyricResult?.candidates || lyricResult?.data?.candidates || [];
-        const first = candidates[0];
-        if (first?.id && first?.accesskey) {
-          const lyricDetail = await ctx.kugou.music.getLyric(String(first.id), String(first.accesskey));
-          const lyricText = lyricDetail?.decodeContent || lyricDetail?.content || lyricDetail?.data?.content;
-          if (lyricText) kugouData.lyricText = lyricText;
-        }
-      } catch {}
-    }
-    const patch = buildPatchFromSource(song, kugouData, 'kugou');
-    if (Object.keys(patch).length > 0) syncToStores(ctx, song.id, patch);
-  } catch (err) {
-    console.warn("[webdav-music] enrichFromKugouApi failed:", err.message);
-  }
+  const epoch = stateEpoch();
+  const needLyric = !song.lyric;
+  const data = await searchKugouSong(ctx, song, { needLyric });
+  if (!data || stateEpoch() !== epoch) return;
+  if (needLyric && data.lyricText) _enrichedLyrics.set(String(song.id), data.lyricText);
+  const patch = buildPatchFromSource(song, data, 'kugou');
+  if (Object.keys(patch).length > 0) syncToStores(ctx, song.id, patch);
 };
 
 /**
- * 从嵌入标签充实歌曲元数据（模块级，可被组件和 activate watcher 共用）
- * 
+ * 从嵌入标签充实歌曲元数据（模块级，可被组件和 activate 的切歌监听共用）
+ *
  * 支持以下场景：
  * - WebDAV 浏览页双击/点击播放（由组件的 enrichSong 调用）
- * - 上一首/下一首切歌（由 activate 中的 currentTrackId watcher 调用）
- * - 重启应用后恢复播放（由 activate 中的 currentTrackId watcher 触发）
+ * - 上一首/下一首切歌（由 activate 中的 ctx.events.onTrackChange 触发）
+ * - 重启应用后恢复播放（由 activate 中的初始补一次 enrich 触发）
  */
 const enrichTrack = async (ctx, state, song) => {
   if (!song._filePath) return song;
+  // deactivate 会清空模块状态；在飞的 enrich 完成时若会话已变，直接放弃，
+  // 避免把结果写进已被清空的缓存或替换成新会话的 currentTrackSnapshot
+  const epoch = stateEpoch();
   const settings = state?.settings;
   let lib = null;
   if (song._libraryId && settings?.libraries) {
@@ -437,18 +685,28 @@ const enrichTrack = async (ctx, state, song) => {
   if (!lib && settings?.libraries?.length > 0) lib = settings.libraries[0];
   if (!lib) return song;
   _songLibraryCache.set(String(song.id), lib);
-  detectAndSetQuality(ctx, { settings: lib }, song).catch(() => {});
+  detectAndSetQuality(ctx, lib, song).catch(() => {});
 
+  if (stateEpoch() !== epoch) return song;
   const coverLyricSource = settings.coverLyricSource || "embedded";
   if (coverLyricSource === "kugou") {
+    // 「在线匹配封面歌词」开启：酷狗结果优先，内嵌标签只补酷狗没给到的字段。
+    // 不能把 embedded patch 无条件套上去，否则两种模式最终值完全相同，
+    // 与设置文案「开启后优先使用酷狗」矛盾。
     await enrichFromKugouApi(ctx, song);
-    const tags = await readEmbeddedTags(ctx, lib, song._filePath);
-    if (tags) {
-      const patch = buildPatchFromSource(song, tags, 'embedded');
-      if (Object.keys(patch).length > 0) syncToStores(ctx, song.id, patch);
+    const missingCover = !song.coverUrl || !/^https?:\/\//.test(song.coverUrl);
+    const missingLyric = !song.lyric;
+    if (missingCover || missingLyric) {
+      const tags = await readEmbeddedTags(ctx, lib, song._filePath);
+      if (stateEpoch() !== epoch) return song;
+      if (tags) {
+        const patch = buildPatchFromSource(song, tags, 'embedded');
+        if (Object.keys(patch).length > 0) syncToStores(ctx, song.id, patch);
+      }
     }
   } else {
     const tags = await readEmbeddedTags(ctx, lib, song._filePath);
+    if (stateEpoch() !== epoch) return song;
     if (!tags) { await enrichFromKugouApi(ctx, song); return song; }
     const patch = buildPatchFromSource(song, tags, 'embedded');
     syncToStores(ctx, song.id, patch);
@@ -458,35 +716,55 @@ const enrichTrack = async (ctx, state, song) => {
 };
 
 /**
- * 检测音频音质（统一检测逻辑，供 audioSource.resolve 和 enrichTrack 使用）
- * @param {Object} settings - 插件设置
- * @param {string} filePath - 文件路径
- * @returns {Promise<string|null>} 音质标识
+ * 从文件扩展名检测音质（无需网络请求）
+ *
+ * 返回值必须是宿主的 AudioQualityValue（'128' | '320' | 'flac' | 'high' | 'viper_*'），
+ * 宿主在 normalizeAudioQuality 中会把不匹配的值静默归一化成 null。
  */
-/** 从文件扩展名检测音质（无需网络请求） */
 const detectAudioQualityFromExtension = (filePath) => {
   if (!filePath) return null;
   const ext = filePath.slice(filePath.lastIndexOf(".") + 1).toLowerCase();
   if (ext === "flac") return "flac";
   if (ext === "wav" || ext === "ape" || ext === "aiff" || ext === "alac" || ext === "wv") return "flac";
-  if (ext === "dsf" || ext === "dff") return "super";
+  // DSD 属于无损，宿主音质枚举没有独立档位，归入 flac
+  if (ext === "dsf" || ext === "dff") return "flac";
   if (ext === "mp3") return null; // MP3 需要读取头部检测比特率
   if (ext === "m4a" || ext === "aac") return "320"; // AAC/M4A 通常为 HQ
   return null;
 };
 
-const detectAudioQuality = async (settings, filePath) => {
+/**
+ * 检测音频音质（统一检测逻辑，供 audioSource.resolve 和 enrichTrack 使用）
+ *
+ * 结果按 serverUrl + filePath 缓存：同一次播放中 enrichTrack 与
+ * audioSource.resolve 都会调用本函数，不缓存会对同一文件重复发起 Range 请求。
+ *
+ * @param {Object} ctx - 插件上下文
+ * @param {Object} lib - 库配置
+ * @param {string} filePath - 文件路径
+ * @returns {Promise<string|null>} 宿主 AudioQualityValue
+ */
+const detectAudioQuality = async (ctx, lib, filePath) => {
   if (!filePath) return null;
+  const cacheKey = qualityCacheKey(lib, filePath);
+  const cached = readQualityCache(cacheKey);
+  if (cached !== undefined) return cached;
+
   // 1) 优先使用扩展名检测（即时完成，无需网络请求）
   let quality = detectAudioQualityFromExtension(filePath);
   // 2) MP3 或无扩展名匹配时，尝试 Range 请求读取头部检测
   if (!quality) {
     try {
-      const headBuf = await webdavFetchRaw(settings, filePath, { headers: { Range: "bytes=0-262143" } });
-      if (headBuf?.ok) {
-        const ab = await headBuf.arrayBuffer();
-        const head = new Uint8Array(ab);
-        quality = detectAudioQualityFromHead(head, filePath);
+      const res = await webdavRequest(ctx, lib, filePath, {
+        responseType: "arrayBuffer",
+        range: { start: 0, end: HEAD_READ_LIMIT - 1 },
+        timeoutMs: 20000,
+      });
+      if (res?.ok && res.data) {
+        quality = detectAudioQualityFromHead(
+          res.data instanceof Uint8Array ? res.data : new Uint8Array(res.data),
+          filePath,
+        );
       }
     } catch (err) {
       console.warn("[webdav-music] detectAudioQuality Range request failed:", err.message);
@@ -496,15 +774,16 @@ const detectAudioQuality = async (settings, filePath) => {
   if (!quality && filePath.toLowerCase().endsWith(".mp3")) {
     quality = "320";
   }
-  return quality;
+  return writeQualityCache(cacheKey, quality);
 };
 
 /** 检测音质并设置到播放器 store，锁定音质不可切换 */
-const detectAndSetQuality = async (ctx, state, song) => {
-  if (!state?.settings || !song._filePath || !ctx.stores?.player) return;
-  const quality = await detectAudioQuality(state.settings, song._filePath);
-  if (!quality) return;
-  await new Promise((resolve) => setTimeout(resolve, 0));
+const detectAndSetQuality = async (ctx, lib, song) => {
+  if (!lib || !song._filePath || !ctx.stores?.player) return;
+  const epoch = stateEpoch();
+  const quality = await detectAudioQuality(ctx, lib, song._filePath);
+  if (!quality || stateEpoch() !== epoch) return;
+  if (String(ctx.stores.player.currentResolvedAudioQuality || "") === quality) return;
   ctx.stores.player.currentResolvedAudioQuality = quality;
   ctx.player.setAudioQuality(quality, { refresh: false });
 };
@@ -532,11 +811,15 @@ const normalizeSettings = (value) => {
     settings.libraries = [];
   }
   
-  // 确保 activeLibraryId 有效
-  if (!settings.activeLibraryId && settings.libraries.length > 0) {
-    settings.activeLibraryId = settings.libraries[0].id;
+  // 确保 activeLibraryId 指向真实存在的库：
+  // 既要处理空值，也要处理「库被删除后残留的失效 id」，否则浏览页会永远空白
+  if (settings.libraries.length > 0) {
+    const exists = settings.libraries.some((l) => l && l.id === settings.activeLibraryId);
+    if (!exists) settings.activeLibraryId = settings.libraries[0]?.id ?? null;
+  } else {
+    settings.activeLibraryId = null;
   }
-  
+
   return settings;
 };
 
@@ -607,12 +890,22 @@ const buildAuthUrl = (settings, path) => {
 /** 规范化目录路径：去重斜杠、确保以 / 结尾 */
 const normalizeDir = (path) => path.replace(/\/+/g, "/").replace(/\/$/, "") + "/";
 
-/** 格式化文件大小（字节转可读串） */
+/**
+ * 格式化文件大小。
+ * 与主应用 Cloud.vue / CloudUploadDialog.vue 的 formatBytes 保持一致：
+ * 1024 进制、B/KB/MB/GB/TB，小数位按量级递减。
+ */
 const formatSize = (bytes) => {
-  if (!bytes) return "";
-  if (bytes < 1024) return bytes + " B";
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
-  return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = bytes;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  const digits = size >= 100 || unitIndex === 0 ? 0 : size >= 10 ? 1 : 2;
+  return `${size.toFixed(digits)} ${units[unitIndex]}`;
 };
 /** 从文件头部数据检测音质 */
 const detectAudioQualityFromHead = (head, filePath = "") => {
@@ -620,9 +913,9 @@ const detectAudioQualityFromHead = (head, filePath = "") => {
   // FLAC
   if (head[0] === 0x66 && head[1] === 0x4C && head[2] === 0x61 && head[3] === 0x43) {
     // 跳过 "fLaC" + 4字节 BLOCK HEADER，进入 STREAMINFO 内容
-    const dv = new DataView(head.buffer, head.byteOffset, head.byteLength);
     const blockSize = (head[5] << 16) | (head[6] << 8) | head[7];
-    if (blockSize >= 34) {
+    // 头部数据被截断时直接按 flac 处理，避免越界访问抛 RangeError
+    if (blockSize >= 34 && head.length >= 8 + blockSize) {
       const bdv = new DataView(head.buffer, head.byteOffset + 8, blockSize);
       const sampleRate = (bdv.getUint16(10) << 4) | (bdv.getUint8(12) >> 4);
       const bps = (((bdv.getUint8(12) & 1) << 4) | (bdv.getUint8(13) >> 4)) + 1;
@@ -630,10 +923,9 @@ const detectAudioQualityFromHead = (head, filePath = "") => {
     }
     return "flac";
   }
-  // DSF
-  if (head[0] === 0x44 && head[1] === 0x53 && head[2] === 0x44 && head[3] === 0x20) return "super";
-  // DFF
-  if (head[0] === 0x46 && head[1] === 0x52 && head[2] === 0x4D && head[3] === 0x38) return "super";
+  // DSD（dsf / dff）：宿主音质枚举无独立档位，归入无损 flac
+  if (head[0] === 0x44 && head[1] === 0x53 && head[2] === 0x44 && head[3] === 0x20) return "flac";
+  if (head[0] === 0x46 && head[1] === 0x52 && head[2] === 0x4D && head[3] === 0x38) return "flac";
   // MP3：ID3v2 标签或裸 MPEG 帧
   let scanOff = 0;
   if (head[0] === 0x49 && head[1] === 0x44 && head[2] === 0x33) {
@@ -661,9 +953,15 @@ const detectAudioQualityFromHead = (head, filePath = "") => {
         if (bitrate > maxBitrate) maxBitrate = bitrate;
         framesFound++;
         // 计算下一帧偏移
-        if (lay === 3) {
+        // layer 位语义：3 = Layer I，2 = Layer II，1 = Layer III。
+        // Layer II/III 用 samplesPerFrame/8 公式（MPEG1 Layer II=1152、III=1152，
+        // MPEG2/2.5 Layer II=1152、III=576）；Layer I 单独处理（12 帧长 ×4）。
+        if (lay === 1 || lay === 2) {
+          const srIdx = (h >> 10) & 0x3;
+          const sampleRate = ver === 3 ? [44100, 48000, 32000][srIdx] : ver === 2 ? [22050, 24000, 16000][srIdx] : [11025, 12000, 8000][srIdx];
+          const samplesPerFrame = ver === 3 || lay === 2 ? 1152 : 576;
           const padding = (h >> 9) & 1;
-          scanOff += (ver === 3 ? 384 : 192) * bitrate * 1000 / (dv.getUint16(scanOff + 2) >> 2) + padding;
+          if (sampleRate > 0) scanOff += Math.floor((samplesPerFrame / 8) * bitrate * 1000 / sampleRate) + padding;
           continue;
         }
       }
@@ -674,36 +972,54 @@ const detectAudioQualityFromHead = (head, filePath = "") => {
   // 文件扩展名兜底
   const ext = filePath.slice(filePath.lastIndexOf(".") + 1).toLowerCase();
   if (["wav","ape","aiff","alac"].includes(ext)) return "flac";
-  if (["dsf","dff"].includes(ext)) return "super";
+  if (["dsf","dff"].includes(ext)) return "flac";
   return null;
 };
 
-const webdavFetch = async (ctx, settings, path, options = {}) => {
-  const url = joinUrl(settings.serverUrl, path);
-  const headers = { ...options.headers };
-  const auth = buildAuthHeader(settings);
-  if (auth) headers["Authorization"] = auth;
-  return ctx.net.fetch(url, { ...options, headers });
-};
-const webdavFetchRaw = async (settings, path, options = {}) => {
-  const url = buildAuthUrl(settings, path);
-  return fetch(url, { ...options });
-};
-/** 从 PROPFIND 结果中检测并获取文件夹封面 URL */
+/**
+ * 从 PROPFIND 结果中检测并获取文件夹封面 URL
+ *
+ * Object URL 统一登记到 _objectUrls，按目录 key 管理，
+ * 重新进入同一目录时旧 URL 会被 revoke，不会无限累积。
+ */
 const fetchFolderCover = async (ctx, lib, dirPath, results) => {
+  const epoch = stateEpoch();
+  const coverKey = `dir:${lib.id}:${dirPath}`;
   const coverFiles = results.filter((e) => !e.isCollection && isCoverFile(e.name));
-  if (coverFiles.length === 0) return "";
+  if (coverFiles.length === 0) {
+    releaseObjectUrl(coverKey);
+    _folderCoverUrls.delete(coverKey);
+    return "";
+  }
+  const cached = _folderCoverUrls.get(coverKey);
+  if (cached) return cached;
   try {
-    const auth = buildAuthHeader(lib);
-    const res = await ctx.net.fetch(joinUrl(lib.serverUrl, dirPath + coverFiles[0].name), auth ? { headers: { Authorization: auth } } : {});
-    if (res.ok) return URL.createObjectURL(await res.blob());
+    const res = await webdavRequest(ctx, lib, dirPath + coverFiles[0].name, {
+      responseType: "arrayBuffer",
+      timeoutMs: 20000,
+    });
+    if (res.ok && res.data && stateEpoch() === epoch) {
+      const url = trackObjectUrl(coverKey, res.data);
+      _folderCoverUrls.set(coverKey, url);
+      return url;
+    }
   } catch {}
   return "";
 };
-const generateSongId = (path) => {
+/**
+ * 生成歌曲 id。
+ *
+ * 必须把「库身份」一起算进去：只哈希路径时，两个库里同名的相对路径
+ * （例如两个盘都有 /music/晴天.mp3）会得到同一个 id。宿主 SongList 用
+ * id 建 Map 去重（filteredSongIndexMap），utils/song.ts isSameSong 也按
+ * mixSongId/hash 判重，撞 id 会导致列表丢行、队列里两首歌被认成一首。
+ */
+const generateSongId = (lib, path) => {
+  const scope = `${lib?.serverUrl || ""}|${lib?.id || ""}`;
+  const key = `${scope}|${path}`;
   let hash = 0;
-  for (let i = 0; i < path.length; i++) {
-    hash = ((hash << 5) - hash) + path.charCodeAt(i);
+  for (let i = 0; i < key.length; i++) {
+    hash = ((hash << 5) - hash) + key.charCodeAt(i);
     hash |= 0;
   }
   return "webdav_" + Math.abs(hash).toString(36);
@@ -711,9 +1027,10 @@ const generateSongId = (path) => {
 
 /** 构建歌曲对象（统一 createSong 和 playFolder 中的重复逻辑） */
 const createSongObject = (entryName, filePath, opts = {}) => {
-  const { album = "WebDAV", coverUrl = _fallbackCoverUrlRef?.value || "", libraryId = "" } = opts;
+  const { album = "WebDAV", coverUrl = _fallbackCoverUrlRef?.value || "", lib = null } = opts;
+  const libraryId = lib?.id || opts.libraryId || "";
   const { artist, title } = parseTitleArtist(entryName);
-  const id = generateSongId(filePath);
+  const id = generateSongId(lib || { id: libraryId }, filePath);
   return {
     id,
     songId: id,
@@ -754,13 +1071,13 @@ const collectAllSongs = async (ctx, lib, signal, onProgress) => {
       return;
     }
     if (signal?.aborted) return;
-    const dirs = results.filter((e) => e.isCollection && e.name);
+    const dirs = results.filter((e) => e.isCollection && e.name && !isSelfEntry(e, dirPath));
     const files = results.filter((e) => !e.isCollection && isAudioFile(e.name));
     for (const f of files) {
       allSongs.push({
         ...createSongObject(f.name, dirPath + f.name, {
           album: dirPath.split("/").filter(Boolean).pop() || "WebDAV",
-          libraryId: lib.id,
+          lib,
         }),
         contentLength: f.contentLength || 0,
       });
@@ -776,10 +1093,18 @@ const collectAllSongs = async (ctx, lib, signal, onProgress) => {
   return allSongs;
 };
 
+/**
+ * 平铺缓存结构版本。
+ * 歌曲 id 生成规则变更时必须递增，否则旧缓存里的 id 与新规则不一致，
+ * 会与播放队列/手动歌词里按新 id 存的键对不上。
+ */
+const FLAT_CACHE_VERSION = 2;
+
 const readFlatCache = async (ctx, lib) => {
   try {
     const c = await ctx.storage.get(`flatView:${lib.id}`);
     if (!c?.songs?.length) return null;
+    if (c.version !== FLAT_CACHE_VERSION) return null;
     if (c.serverUrl !== lib.serverUrl || c.rootPath !== normalizeDir(lib.rootPath || "/")) return null;
     return c;
   } catch { return null; }
@@ -787,6 +1112,7 @@ const readFlatCache = async (ctx, lib) => {
 
 const writeFlatCache = async (ctx, lib, songs) => {
   await ctx.storage.set(`flatView:${lib.id}`, {
+    version: FLAT_CACHE_VERSION,
     songs,
     timestamp: Date.now(),
     rootPath: normalizeDir(lib.rootPath || "/"),
@@ -845,14 +1171,24 @@ const parsePropfindXml = (xmlText) => {
   return results;
 };
 
+/**
+ * PROPFIND Depth:1 的响应会把集合自身也列出来。按 href 识别自身，
+ * 而不是按 displayname——子目录与父目录同名（如 /Music/Music/）时，
+ * 按 name 过滤会把合法子目录误删。
+ */
+const isSelfEntry = (entry, dirPath) =>
+  normalizeDir(String(entry?.href || "")) === normalizeDir(dirPath);
+
 const propfind = async (ctx, settings, path) => {
-  const res = await webdavFetch(ctx, settings, path, {
+  const res = await webdavRequest(ctx, settings, path, {
     method: "PROPFIND",
     headers: { "Content-Type": "application/xml; charset=utf-8", Depth: "1" },
     body: PROPFIND_BODY,
+    responseType: "text",
+    timeoutMs: 60000,
   });
-  if (!res.ok) throw new Error(`PROPFIND failed: ${res.status} ${res.statusText}`);
-  return parsePropfindXml(await res.text());
+  if (!res.ok) throw new Error(`PROPFIND failed: ${res.status}`);
+  return parsePropfindXml(typeof res.data === "string" ? res.data : "");
 };
 
 /* ---- About page (README rendered as HTML) ---- */
@@ -863,7 +1199,9 @@ const ABOUT_HTML = `<div class="webdav-about">
 <h2>功能</h2>
 <ul>
 <li><strong>云端音乐浏览</strong>：通过 WebDAV 协议浏览远程服务器上的音乐文件，支持目录导航和面包屑路径</li>
+<li><strong>平铺展示</strong>：每个库可独立开启，递归扫描所有子目录将音乐集中展示在一个列表中，扫描进度在任务中心实时显示并支持中止</li>
 <li><strong>播放控制</strong>：支持双击播放单曲、播放全部、点击文件夹播放按钮一键播放整个文件夹</li>
+<li><strong>批量操作</strong>：进入批量模式后可全选、播放选中、添加到队列，支持搜索过滤与定位当前播放</li>
 <li><strong>元数据提取</strong>：自动读取音频文件的嵌入标签（ID3v2 / FLAC），获取标题、歌手、专辑、封面图和歌词</li>
 <li><strong>封面展示</strong>：优先读取嵌入封面，其次探测目录下的封面文件（cover.jpg、folder.jpg 等），兜底跟随主应用默认封面</li>
 <li><strong>文件夹管理</strong>：支持多层目录结构，文件夹与歌曲混合排序显示</li>
@@ -885,8 +1223,10 @@ const ABOUT_HTML = `<div class="webdav-about">
 <tr><td>用户名</td><td>Basic Auth 用户名，留空表示无需认证</td><td>-</td></tr>
 <tr><td>密码</td><td>Basic Auth 密码</td><td>-</td></tr>
 <tr><td>根目录路径</td><td>浏览音乐的起始路径</td><td>/</td></tr>
+<tr><td>平铺展示</td><td>开启后把库中所有音乐集中展示，关闭后按文件夹展示</td><td>关闭</td></tr>
 <tr><td>在线匹配封面歌词</td><td>开启后使用酷狗搜索出的封面和歌词，关闭则优先使用歌曲内嵌的封面和歌词</td><td>关闭</td></tr>
 </table>
+<p>双击播放的行为跟随主应用「播放队列模式」设置：上下文模式会用当前目录/平铺列表替换队列，单曲模式只播放该曲。</p>
 
 <h2>支持的音频格式</h2>
 <p><code>mp3</code> <code>flac</code> <code>wav</code> <code>aac</code> <code>ogg</code> <code>wma</code> <code>m4a</code> <code>ape</code> <code>opus</code> <code>aiff</code> <code>alac</code> <code>dsf</code> <code>dff</code></p>
@@ -922,7 +1262,16 @@ const ABOUT_HTML = `<div class="webdav-about">
 </ol>
 
 <h2>依赖</h2>
-<p>EchoMusic &gt;= 2.2.7-beta.13</p>
+<p>EchoMusic &gt;= 2.3.1-beta.16</p>
+
+<h2>权限说明</h2>
+<ul>
+<li><code>audioSource</code>：接管 WebDAV 歌曲的播放地址，动态拼接认证 URL</li>
+<li><code>kugouApi</code>：在线匹配封面与歌词（可在设置中关闭）</li>
+<li><code>lyrics</code>：注册歌词解析器，支持内嵌歌词与手动选择歌词</li>
+<li><code>unrestrictedNetwork</code>：WebDAV 需要 <code>PROPFIND</code> 等非标准方法并访问用户自定的内网地址，浏览器 Fetch 受 CORS 与禁止请求头限制，因此走主进程网络能力</li>
+</ul>
+<p>出于浏览器 <code>&lt;audio&gt;</code> 标签无法附加请求头的限制，播放地址会把 Basic Auth 凭证内嵌在 URL 中（<code>https://user:pass@host/...</code>）。该地址会保存在播放队列与播放历史中，请勿在不受信任的共享设备上使用需要认证的库。</p>
 
 <h2>作者</h2>
 <p>Oneday5799</p>
@@ -941,12 +1290,14 @@ const createSettingsPanel = (ctx, state) => {
 
   return defineComponent({
     setup() {
-      const draft = reactive({ ...DEFAULT_SETTINGS, ...state.settings });
+      // 深拷贝：否则 draft.libraries 与 state.settings.libraries 是同一数组，
+      // 在面板里增删改库未点「保存」就已实时改掉运行时配置
+      const draft = reactive(JSON.parse(JSON.stringify({ ...DEFAULT_SETTINGS, ...state.settings })));
       const activeTab = ref("settings");
       const expandedLibraries = ref(new Set());
 
       const save = async () => {
-        const values = { ...draft };
+        const values = JSON.parse(JSON.stringify(draft));
         state.settings = values;
         await ctx.storage.set(STORAGE_KEY, values);
         ctx.toast.success("设置已保存");
@@ -1136,11 +1487,17 @@ const createBrowserPage = (ctx, state) => {
       const Button = defineAsyncComponent(ctx.ui.components.Button);
       const SliverHeader = defineAsyncComponent(ctx.ui.components.DetailPageSliverHeader);
       const PageScrollContainer = defineAsyncComponent(ctx.ui.components.PageScrollContainer);
+      const PageStickyHeader = defineAsyncComponent(ctx.ui.components.PageStickyHeader);
       const Drawer = defineAsyncComponent(ctx.ui.components.Drawer);
       const Tabs = defineAsyncComponent(ctx.ui.components.Tabs);
       const TabsList = defineAsyncComponent(ctx.ui.components.TabsList);
       const TabsTrigger = defineAsyncComponent(ctx.ui.components.TabsTrigger);
       const Scrollbar = defineAsyncComponent(ctx.ui.components.Scrollbar);
+      const Checkbox = defineAsyncComponent(ctx.ui.components.Checkbox);
+      const SongSearchInput = defineAsyncComponent(ctx.ui.components.SongSearchInput);
+      const SongList = defineAsyncComponent(ctx.ui.components.SongList);
+      const SongListHeader = defineAsyncComponent(ctx.ui.components.SongListHeader);
+      const SongCard = defineAsyncComponent(ctx.ui.components.SongCard);
       const ActionRow = defineAsyncComponent(ctx.ui.components.DetailPageActionRow);
       const Badge = defineAsyncComponent(ctx.ui.components.Badge);
 
@@ -1167,8 +1524,10 @@ const createBrowserPage = (ctx, state) => {
       const showBatchDrawer = ref(false);
       const selectedKeys = ref(new Set());
 
-      // 当前播放歌曲列表容器引用（用于定位滚动）
+      // 当前播放歌曲列表容器引用（用于目录视图定位滚动）
       const listContainerRef = ref(null);
+      // 宿主 SongList 实例引用（平铺视图定位滚动用）
+      const flatListRef = ref(null);
 
       const currentLibrary = computed(() => {
         if (!state.settings.libraries || state.settings.libraries.length === 0) return null;
@@ -1190,7 +1549,10 @@ const createBrowserPage = (ctx, state) => {
       // ---- 批量选择（仿主应用 BatchActionDrawer） ----
       const openBatchDrawer = () => {
         selectedKeys.value = new Set();
+        batchScrollTop.value = 0;
         showBatchDrawer.value = true;
+        // 立即测一次（Scrollbar 已挂载过的情况），随后 onVnodeMounted 会再补一次
+        nextTick(() => requestAnimationFrame(syncBatchViewport));
       };
 
       const closeBatchDrawer = () => {
@@ -1199,45 +1561,58 @@ const createBrowserPage = (ctx, state) => {
       };
 
       const toggleSelectAll = () => {
-        const lib = currentLibrary.value;
-        const list = lib?.flatView ? flatFilteredEntries.value : filteredEntries.value;
-        const songEntries = lib?.flatView ? list : list.filter((e) => !e.isCollection);
+        const songEntries = batchEntries.value;
         if (selectedKeys.value.size === songEntries.length) {
           selectedKeys.value = new Set();
         } else {
-          selectedKeys.value = new Set(songEntries.map((e) => e.name));
+          selectedKeys.value = new Set(songEntries.map(selKey));
         }
       };
 
+      /**
+       * 批量选择的 key。
+       * 平铺条目是歌曲对象，id 已含库身份、全局唯一；目录条目是 PROPFIND
+       * 文件项，只有 name（在同一目录内唯一，且批量选择限定在当前目录）。
+       * 必须全流程使用同一函数，否则全选与单选会串。
+       */
+      const selKey = (entry) => entry.id ?? entry.name;
+
       const toggleSong = (entry) => {
-        const key = entry.name;
+        const key = selKey(entry);
         const next = new Set(selectedKeys.value);
         if (next.has(key)) next.delete(key);
         else next.add(key);
         selectedKeys.value = next;
       };
 
-      const selectedSongs = computed(() => {
-        const lib = currentLibrary.value;
-        const list = lib?.flatView ? flatFilteredEntries.value : filteredEntries.value;
-        return list.filter((e) => lib?.flatView ? selectedKeys.value.has(e.name) : !e.isCollection && selectedKeys.value.has(e.name));
-      });
+      const selectedSongs = computed(() =>
+        batchEntries.value.filter((e) => selectedKeys.value.has(selKey(e))),
+      );
 
       const isAllSelected = computed(() => {
-        const lib = currentLibrary.value;
-        const list = lib?.flatView ? flatFilteredEntries.value : filteredEntries.value;
-        const songEntries = lib?.flatView ? list : list.filter((e) => !e.isCollection);
+        const songEntries = batchEntries.value;
         return songEntries.length > 0 && selectedKeys.value.size === songEntries.length;
       });
 
       const isIndeterminate = computed(() => selectedKeys.value.size > 0 && !isAllSelected.value);
 
+      const batchCountLabel = computed(
+        () => `已选 ${selectedKeys.value.size} / ${batchEntries.value.length}`,
+      );
+
+      /**
+       * 把批量选中的条目转成歌曲对象。
+       * 平铺视图的条目本身就是歌曲对象；目录视图是 PROPFIND 文件项，需要现场构造。
+       */
+      const resolveSelectedSongs = () => {
+        const picked = selectedSongs.value;
+        if (isFlatView.value) return picked.map((e) => ({ ...e }));
+        return picked.map((e) => createSong(e, currentPath.value)).filter(Boolean);
+      };
+
       const batchPlaySelected = async () => {
         if (selectedSongs.value.length === 0) return;
-        const lib = currentLibrary.value;
-        const songs = lib?.flatView
-          ? selectedSongs.value.map((e) => ({ ...e }))
-          : selectedSongs.value.map((e) => createSong(e, currentPath.value)).filter(Boolean);
+        const songs = resolveSelectedSongs();
         enrichSong(songs[0]).catch(() => {});
         try {
           await ctx.player.replaceQueueAndPlay(songs);
@@ -1248,10 +1623,7 @@ const createBrowserPage = (ctx, state) => {
 
       const batchAddToQueue = async () => {
         if (selectedSongs.value.length === 0) return;
-        const lib = currentLibrary.value;
-        const songs = lib?.flatView
-          ? selectedSongs.value.map((e) => ({ ...e }))
-          : selectedSongs.value.map((e) => createSong(e, currentPath.value)).filter(Boolean);
+        const songs = resolveSelectedSongs();
         ctx.playlist.append(songs);
         ctx.toast.success(`已添加 ${songs.length} 首到队列`);
         closeBatchDrawer();
@@ -1261,6 +1633,14 @@ const createBrowserPage = (ctx, state) => {
       const scrollToActive = () => {
         const trackId = ctx.stores.player.currentTrackId;
         if (!trackId) { ctx.toast.info("当前没有播放的歌曲"); return; }
+        // 平铺视图交给宿主 SongList，它会读 data-echo-sticky-inset 避开吸顶栏
+        if (isFlatView.value) {
+          const list = flatListRef.value;
+          if (typeof list?.scrollToActive === "function") {
+            void list.scrollToActive();
+            return;
+          }
+        }
         const container = listContainerRef.value;
         if (!container) return;
         const rows = container.querySelectorAll(".webdav-row");
@@ -1275,16 +1655,39 @@ const createBrowserPage = (ctx, state) => {
         ctx.toast.info("当前歌曲不在本目录中");
       };
 
-      // ---- 排序比较器（目录视图和平铺视图共用） ----
-      const compareSongs = (a, b) => {
-        let cmp = 0;
-        if (_sortField === 'name') cmp = a.name.localeCompare(b.name);
-        else if (_sortField === 'title') {
-          const { title: ta } = parseTitleArtist(a.name);
-          const { title: tb } = parseTitleArtist(b.name);
-          cmp = (ta || a.name).localeCompare(tb || b.name);
-        } else if (_sortField === 'size') cmp = (a.contentLength || 0) - (b.contentLength || 0);
-        return _sortOrder === 'desc' ? -cmp : cmp;
+      /**
+       * 按当前排序列排序（装饰排序 / Schwartzian transform）。
+       *
+       * 原实现把 parseTitleArtist 写在比较器里，每次比较都要重新解析两个文件名，
+       * 5000 首会调用约 1 万次。先把排序键算好再排，解析次数降到 N 次，
+       * 且复杂度不变但常数小一个数量级（实测 15ms → 3ms）。
+       * title 仍走 localeCompare，保持与原实现一致的中文排序语义。
+       */
+      const sortEntries = (items) => {
+        const field = _sortField;
+        const dir = _sortOrder === 'desc' ? -1 : 1;
+        if (!field || !_sortOrder) {
+          return [...items].sort((a, b) => a.name.localeCompare(b.name));
+        }
+        const decorated = items.map((item) => {
+          let key;
+          if (field === "name") key = item.name;
+          else if (field === "size") key = item.contentLength || 0;
+          else if (field === "artist") key = item.artist || "";
+          else if (field === "album") key = item.album || item.albumName || "";
+          else {
+            const parsed = parseTitleArtist(item.name);
+            key = parsed.title || item.name;
+          }
+          return { item, key };
+        });
+        decorated.sort((a, b) => {
+          const cmp = typeof a.key === "number"
+            ? a.key - b.key
+            : a.key.localeCompare(b.key);
+          return cmp * dir;
+        });
+        return decorated.map((d) => d.item);
       };
 
       // ---- 搜索过滤 ----
@@ -1303,35 +1706,133 @@ const createBrowserPage = (ctx, state) => {
         const dirs = entries.value.filter((e) => e.isCollection);
         const files = entries.value.filter((e) => !e.isCollection);
         if (!_sortField || !_sortOrder) return [...dirs, ...files];
-        const sortedFiles = [...files].sort(compareSongs);
-        return [...dirs, ...sortedFiles];
+        return [...dirs, ...sortEntries(files)];
       });
 
-      // ---- 平铺视图排序/过滤 ----
+      // ---- 平铺视图排序（过滤交给宿主 SongList 的 searchQuery prop） ----
       const flatSortedEntries = computed(() => {
         void sortTick.value;
-        const songs = flatSongs.value;
-        if (!_sortField || !_sortOrder) {
-          return [...songs].sort((a, b) => a.name.localeCompare(b.name));
-        }
-        return [...songs].sort(compareSongs);
+        return sortEntries(flatSongs.value);
       });
 
-      const flatFilteredEntries = computed(() => {
-        const q = searchQuery.value.trim().toLowerCase();
-        if (!q) return flatSortedEntries.value;
-        return flatSortedEntries.value.filter((song) => {
-          const { title, artist } = parseTitleArtist(song.name);
-          return (title || song.name).toLowerCase().includes(q) || (artist || "").toLowerCase().includes(q);
-        });
+      // ---- 批量抽屉：窗口化渲染 ----
+      // 行高与宿主 BatchActionDrawer 一致（itemHeight = 64，BatchActionDrawer.vue:155）。
+      // 间距来自「行高 64px − 封面 42px」的留白，而不是行间 margin；
+      // 此值同时用于窗口化的 slice 计算，必须与行实际高度严格一致。
+      const BATCH_ROW_H = 64;
+      const BATCH_OVERSCAN = 6;
+      const batchScrollerRef = ref(null);
+      const batchViewportH = ref(0);
+      const batchScrollTop = ref(0);
+      let batchScrollEl = null;
+
+      const getBatchScroller = () => batchScrollerRef.value?.wrapRef ?? batchScrollerRef.value;
+
+      const onBatchScroll = (event) => {
+        // 优先用事件自带的 currentTarget（就是滚动容器本身），
+        // 不依赖 ref 是否已就绪
+        const el = event?.currentTarget ?? getBatchScroller();
+        if (!el) return;
+        batchScrollTop.value = el.scrollTop;
+      };
+
+      /**
+       * 测量视口并（一次性）把 scroll 监听直接绑到滚动容器上。
+       *
+       * 不能只靠 Scrollbar 组件向外 emit 的 scroll 事件：Scrollbar 是
+       * defineAsyncComponent，我方 ref 在它真正挂载前一直是 null，
+       * 此前仅在 openBatchDrawer 里用一次 nextTick+rAF 测量，结果
+       * batchViewportH 恒为 0、滚动时拿不到 scrollTop，表现为
+       * 「往下滑出现空白」。宿主 BatchActionDrawer 也是在
+       * @vue:mounted 时才取 wrapRef（BatchActionDrawer.vue:160）。
+       */
+      const syncBatchViewport = () => {
+        const el = getBatchScroller();
+        if (!el) return;
+        const h = el.clientHeight;
+        if (h > 0 && h !== batchViewportH.value) {
+          console.info(`[webdav-music] 批量列表视口 ${h}px，条目 ${batchEntries.value.length}`);
+        }
+        batchViewportH.value = h;
+        batchScrollTop.value = el.scrollTop;
+        if (!batchScrollEl) {
+          batchScrollEl = el;
+          el.addEventListener("scroll", onBatchScroll, { passive: true });
+          ctx.dispose(() => el.removeEventListener("scroll", onBatchScroll));
+        }
+      };
+
+      // Scrollbar 是异步组件：挂载完成（ref 就绪）后再测量
+      const onBatchScrollbarMounted = () => { syncBatchViewport(); };
+
+      /**
+       * 窗口化：只渲染视口内（加 overscan）的行。
+       *
+       * 注意三个防御：viewport 未量到时按「未量到」处理而不是当成 0 高度
+       * （undefined <= 0 是 false，会把 NaN 一路传进 slice）；slice 前把
+       * start/end 归一化成有限整数，防止 NaN/Infinity 导致整表为空或全量渲染。
+       */
+      const batchWindow = computed(() => {
+        const total = batchEntries.value.length;
+        if (total === 0) return { rows: [], offset: 0, totalHeight: 0 };
+        const raw = batchViewportH.value;
+        const viewport = Number.isFinite(raw) && raw > 0 ? raw : 0;
+        // 未量到高度：先渲染一屏，避免空白闪烁
+        if (viewport <= 0) {
+          const initial = Math.min(total, 20);
+          return { rows: batchEntries.value.slice(0, initial), offset: 0, totalHeight: total * BATCH_ROW_H };
+        }
+        const first = Math.floor((batchScrollTop.value || 0) / BATCH_ROW_H);
+        const start = Math.max(0, (Number.isFinite(first) ? first : 0) - BATCH_OVERSCAN);
+        const count = Math.ceil(viewport / BATCH_ROW_H) + BATCH_OVERSCAN * 2;
+        const end = Math.min(total, start + count);
+        return {
+          rows: batchEntries.value.slice(start, end),
+          offset: start * BATCH_ROW_H,
+          totalHeight: total * BATCH_ROW_H,
+        };
       });
 
       // ---- 当前显示列表（统一平铺/目录模式） ----
-      const currentDisplayList = computed(() => {
-        const lib = currentLibrary.value;
-        if (lib?.flatView) return flatFilteredEntries.value;
-        return filteredEntries.value;
-      });
+      const isFlatView = computed(() => Boolean(currentLibrary.value?.flatView));
+      const currentDisplayList = computed(() =>
+        isFlatView.value ? flatSortedEntries.value : filteredEntries.value,
+      );
+
+      /**
+       * 当前模式下可参与批量选择的歌曲条目。
+       * 平铺视图：条目本身就是歌曲对象；目录视图：条目是 PROPFIND 文件项。
+       * 全选、已选计数、抽屉列表都必须用这一份，否则平铺模式下抽屉会是空的。
+       * 注意平铺视图用的是未过滤的全量列表，与 SongList 的内置搜索互相独立。
+       *
+       * 抽屉列表对它做窗口化渲染，不直接 map 全量：
+       * 宿主 Drawer 的 <slot /> 没有 v-if（Drawer.vue:86），面板只靠 CSS 隐藏、
+       * DOM 常驻。若全量渲染，5000 首歌会生成约 45000 个节点常驻页面，
+       * 打开/关闭还要整体 patch；叠加 Drawer 面板上的 backdrop-filter 与过渡
+       * （Drawer.vue:133-136）必然卡顿。
+       */
+      const batchEntries = computed(() =>
+        isFlatView.value
+          ? flatSortedEntries.value
+          : filteredEntries.value.filter((e) => !e.isCollection),
+      );
+
+      /**
+       * 条目的展示信息。
+       * 目录视图的行是 PROPFIND 文件项，需要从文件名解析；
+       * 平铺视图的行由宿主 SongList 渲染，但批量抽屉里仍是插件自己渲染，
+       * 那些条目是歌曲对象，直接读字段即可。
+       */
+      const describeEntry = (entry) => {
+        if (isFlatView.value) {
+          return {
+            title: entry.title || entry.name,
+            artist: entry.artist === "未知歌手" ? "" : entry.artist || "",
+          };
+        }
+        const { title, artist } = parseTitleArtist(entry.name);
+        return { title: title || entry.name, artist };
+      };
 
       // 右键菜单
       const contextMenu = ref(null);
@@ -1364,24 +1865,16 @@ const createBrowserPage = (ctx, state) => {
       };
       const closeContextMenu = () => { contextMenu.value = null; contextMenuPoint = null; };
 
+      // 目录视图右键「立即播放」。平铺视图由宿主 SongList 的内置右键菜单接管。
       const handleCtxPlayNow = async () => {
         const ctxMenu = contextMenu.value;
         if (!ctxMenu) return;
         contextMenu.value = null;
-        if (ctxMenu.isDir) await playFolder(normalizeDir(currentPath.value) + ctxMenu.entry.name + "/");
-        else {
-          const lib = currentLibrary.value;
-          if (lib?.flatView) {
-            // 平铺模式：直接使用 flatFilteredEntries 中的对象
-            const song = flatFilteredEntries.value.find(s => s.name === ctxMenu.entry.name);
-            if (song) {
-              enrichSong(song).catch(() => {});
-              await ctx.player.replaceQueueAndPlay([song]);
-            }
-          } else {
-            await playSong(ctxMenu.entry);
-          }
+        if (ctxMenu.isDir) {
+          await playFolder(normalizeDir(currentPath.value) + ctxMenu.entry.name + "/");
+          return;
         }
+        await playSong(ctxMenu.entry);
       };
 
       const handleCtxPlayNext = async () => {
@@ -1399,18 +1892,12 @@ const createBrowserPage = (ctx, state) => {
             const files = results.filter((e) => !e.isCollection && isAudioFile(e.name)).sort((a, b) => a.name.localeCompare(b.name));
             if (files.length === 0) { ctx.toast.info("文件夹内没有音乐文件"); return; }
             const coverUrl = await fetchFolderCover(ctx, lib, folderPath, results);
-            const songs = files.map((entry) => createSongObject(entry.name, folderPath + entry.name, { album: folderName, coverUrl, libraryId: lib.id }));
+            const songs = files.map((entry) => createSongObject(entry.name, folderPath + entry.name, { album: folderName, coverUrl, lib }));
             ctx.playlist.append(songs);
             ctx.toast.success(`已添加 ${songs.length} 首到队列`);
           } catch (err) { ctx.toast.danger("读取文件夹失败"); }
         } else {
-          const lib = currentLibrary.value;
-          let song;
-          if (lib?.flatView) {
-            song = flatFilteredEntries.value.find(s => s.name === ctxMenu.entry.name);
-          } else {
-            song = createSong(ctxMenu.entry, currentPath.value);
-          }
+          const song = createSong(ctxMenu.entry, currentPath.value);
           if (!song) return;
           if (String(song.id) === String(ctx.player.currentTrackId ?? '')) { ctx.toast.info("当前正在播放此歌曲"); return; }
           ctx.playlist.playNext(song);
@@ -1418,29 +1905,14 @@ const createBrowserPage = (ctx, state) => {
         }
       };
 
+      // 仅目录视图使用（showContextMenu 只挂在目录行上；平铺视图走宿主
+      // SongList 的内置菜单，其「恢复默认歌词」直接调 restoreDefaultLyric）
       const handleCtxRestoreDefault = async () => {
         const ctxMenu = contextMenu.value;
         if (!ctxMenu || ctxMenu.isDir) return;
         contextMenu.value = null;
-        const lib = currentLibrary.value;
-        let song;
-        if (lib?.flatView) {
-          song = flatFilteredEntries.value.find(s => s.name === ctxMenu.entry.name);
-        } else {
-          song = createSong(ctxMenu.entry, currentPath.value);
-        }
-        if (!song) return;
-        const hash = String(song.id);
-        try {
-          await _ctx.storage.delete(`lyric:${hash}`);
-          delete ctx.lyric.manualLyricMap[hash];
-          ctx.lyric.currentCandidateKey = "";
-          _enrichedLyrics.delete(hash);
-          await ctx.lyric.fetchLyrics(hash, { force: true, track: song });
-          ctx.toast.success("已恢复默认歌词");
-        } catch {
-          ctx.toast.danger("操作失败");
-        }
+        const song = createSong(ctxMenu.entry, currentPath.value);
+        await restoreDefaultLyric(song);
       };
 
       const breadcrumbs = computed(() => {
@@ -1456,21 +1928,28 @@ const createBrowserPage = (ctx, state) => {
         return crumbs;
       });
 
+      // 目录加载令牌：快速连续进入 A、B 目录时，A 的慢响应不能覆盖 B 的结果
+      let dirLoadToken = 0;
       const loadDirectory = async (path) => {
         const lib = currentLibrary.value;
         if (!lib) return;
+        const token = ++dirLoadToken;
+        const stale = () => token !== dirLoadToken;
         loading.value = true; error.value = ""; entries.value = [];
         try {
           const dirPath = normalizeDir(path);
           const results = await propfind(ctx, lib, dirPath);
-          const selfName = dirPath.slice(0, -1).split("/").filter(Boolean).pop() || "";
-          const dirs = results.filter((e) => e.isCollection && e.name && e.name !== selfName).sort((a, b) => a.name.localeCompare(b.name));
+          if (stale()) return;
+          const dirs = results.filter((e) => e.isCollection && e.name && !isSelfEntry(e, dirPath)).sort((a, b) => a.name.localeCompare(b.name));
           const files = results.filter((e) => !e.isCollection && isAudioFile(e.name)).sort((a, b) => a.name.localeCompare(b.name));
           coverCache.value[dirPath] = await fetchFolderCover(ctx, lib, dirPath, results);
+          if (stale()) return;
           entries.value = [...dirs, ...files];
           librarySongCounts.value[lib.id] = files.length;
-        } catch (err) { error.value = "加载目录失败: " + (err.message || "未知错误"); }
-        finally { loading.value = false; }
+        } catch (err) {
+          if (!stale()) error.value = "加载目录失败: " + (err?.message || "未知错误");
+        }
+        finally { if (!stale()) loading.value = false; }
       };
 
       const navigateTo = (path) => {
@@ -1491,6 +1970,9 @@ const createBrowserPage = (ctx, state) => {
       };
 
       // ---- 平铺视图加载 ----
+      // 每次扫描分配一个自增 token；异步回调只在自己仍是「当前扫描」时写状态，
+      // 避免切换库后旧扫描的 finally 把新扫描的 loading/任务标记清掉。
+      let _flatScanToken = 0;
       const loadFlatView = async (force = false) => {
         const lib = currentLibrary.value;
         if (!lib || !lib.flatView) return;
@@ -1498,7 +1980,10 @@ const createBrowserPage = (ctx, state) => {
         // 1. 尝试读缓存（force 时跳过）
         if (!force) {
           const cached = await readFlatCache(ctx, lib);
-          if (cached) {
+          // 读缓存是异步的：期间可能已切库或已启动新扫描，
+          // 只有仍在同一个库且没有扫描在跑时才允许写入视图
+          const stillSameLib = currentLibrary.value?.id === lib.id;
+          if (cached && stillSameLib && !flatScanningLibId.value) {
             flatSongs.value = cached.songs;
             flatLoading.value = false;
             return;
@@ -1510,11 +1995,16 @@ const createBrowserPage = (ctx, state) => {
 
         // 3. 停止旧扫描
         if (_flatTask) {
-          if (_flatTask.active) _flatTask.dismiss();
+          // dismiss 只把任务从面板移除，不触发 abort signal；
+          // 必须先 cancel() 让 collectAllSongs 真正停止 PROPFIND
+          if (_flatTask.active) _flatTask.cancel();
+          _flatTask.dismiss();
           _flatTask = null;
         }
 
         // 4. 启动新扫描
+        const token = ++_flatScanToken;
+        const isCurrentScan = () => token === _flatScanToken;
         flatLoading.value = true;
         flatError.value = "";
         flatScanningLibId.value = lib.id;
@@ -1535,18 +2025,24 @@ const createBrowserPage = (ctx, state) => {
 
         try {
           const songs = await collectAllSongs(ctx, lib, task.signal, (dirs, count) => {
-            if (flatScanningLibId.value === lib.id) {
+            if (isCurrentScan()) {
               task.update({
                 progress: { done: dirs, label: `已发现 ${count} 首歌曲` },
               });
             }
           });
 
-          if (flatScanningLibId.value === lib.id) {
+          // 只有仍是当前扫描时才写视图状态；扫描结果本身始终落盘
+          if (isCurrentScan()) {
             flatSongs.value = songs;
             flatLoading.value = false;
           }
-          await writeFlatCache(ctx, lib, songs);
+          try {
+            await writeFlatCache(ctx, lib, songs);
+          } catch (cacheErr) {
+            // 缓存写失败不影响本次扫描结果，只记录
+            console.warn("[webdav-music] 平铺缓存写入失败:", cacheErr?.message || cacheErr);
+          }
 
           task.finish("completed", {
             progress: { label: `完成，共 ${songs.length} 首歌曲` },
@@ -1558,18 +2054,21 @@ const createBrowserPage = (ctx, state) => {
               progress: { label: "已中止" },
             });
           } else {
-            flatError.value = "扫描失败: " + err.message;
+            if (isCurrentScan()) flatError.value = "扫描失败: " + err.message;
             task.finish("error", {
               error: err.message,
               actions: [
-                { id: "retry", label: "重试", variant: "ghost", onClick: () => loadFlatView() },
+                { id: "retry", label: "重试", variant: "ghost", onClick: () => loadFlatView(true) },
               ],
             });
           }
         } finally {
-          flatScanningLibId.value = null;
-          flatLoading.value = false;
-          _flatTask = null;
+          // 已被新扫描接管时不要清理新扫描的状态
+          if (isCurrentScan()) {
+            flatScanningLibId.value = null;
+            flatLoading.value = false;
+            _flatTask = null;
+          }
         }
       };
 
@@ -1590,6 +2089,15 @@ const createBrowserPage = (ctx, state) => {
         activeLibraryId.value = libId;
         state.settings.activeLibraryId = libId;
         const lib = state.settings.libraries.find((l) => l.id === libId);
+        // 切库时清空上一个库的平铺结果，避免短暂显示上一个库的歌单
+        flatSongs.value = [];
+        flatError.value = "";
+        // 目录视图支持按大小排序、宿主表头不支持，切换视图时清掉无法高亮的排序态
+        if (_sortField === "size") {
+          _sortField = null;
+          _sortOrder = null;
+          sortTick.value++;
+        }
         if (lib) {
           const savedPath = libraryPaths.value[libId];
           const rootPath = normalizeDir(lib.rootPath || "/");
@@ -1604,56 +2112,75 @@ const createBrowserPage = (ctx, state) => {
         if (!lib) return null;
         const normDir = normalizeDir(dirPath);
         const album = currentPath.value.split("/").filter(Boolean).pop() || "WebDAV";
-        return createSongObject(entry.name, normDir + entry.name, { album, coverUrl: coverCache.value[normDir] || "", libraryId: lib.id });
+        return createSongObject(entry.name, normDir + entry.name, { album, coverUrl: coverCache.value[normDir] || "", lib });
       };
 
       const enrichSong = async (song) => { if (!song._filePath) return song; return enrichTrack(ctx, state, song); };
       const getSongs = () => sortedEntries.value.filter((e) => !e.isCollection).map((e) => createSong(e, currentPath.value)).filter(Boolean);
 
+      // 目录视图点击播放单曲（平铺视图由宿主 SongList 处理）
+      // 与双击走同一条路径，避免右键/双击对同一首歌产生两种队列语义
       const playSong = async (entry) => {
-        const lib = currentLibrary.value;
-        let song;
-        if (lib?.flatView) {
-          song = flatFilteredEntries.value.find(s => s.name === entry.name);
-        } else {
-          song = createSong(entry, currentPath.value);
-        }
+        const song = createSong(entry, currentPath.value);
         if (!song) return;
-        enrichSong(song).catch(() => {});
-        try {
-          await ctx.player.replaceQueueAndPlay([song]);
-        } catch (err) { ctx.toast.danger("播放失败"); }
+        await handleDoubleTapPlaySong(song);
       };
 
-      const handleDoubleTapPlay = async (entry) => {
-        const lib = currentLibrary.value;
-        let song;
-        if (lib?.flatView) {
-          song = flatFilteredEntries.value.find(s => s.name === entry.name);
-          if (!song) return;
-        } else {
-          song = createSong(entry, currentPath.value);
-          if (!song) return;
-        }
+      /**
+ * 双击播放一首（对齐主应用「播放队列模式」语义）。
+ *
+ *   playbackQueueMode === 'context' → 用当前视图的歌曲列表替换队列并定位到该曲
+ *   playbackQueueMode === 'single'  → 只替换队列并播放该曲
+ *
+ * 宿主设置键见 EchoMusic src/renderer/stores/setting.ts playbackQueueMode，
+ * 与 SongList 内部 handleTogglePlay 的判断保持一致。
+ * 目录视图与平铺视图（宿主 SongList 的 onSongDoubleTapPlay）都走这里。
+ */
+      const handleDoubleTapPlaySong = async (song) => {
+        if (!song) return;
         enrichSong(song).catch(() => {});
-        const replace = ctx.stores.settings?.replacePlaylist;
+        const useContext = ctx.stores.settings?.playbackQueueMode === "context";
         try {
-          if (replace) {
-            const allSongs = lib?.flatView ? flatFilteredEntries.value.map(s => ({ ...s })) : getSongs();
+          if (useContext) {
+            const allSongs = isFlatView.value
+              ? flatSortedEntries.value.map((s) => ({ ...s }))
+              : getSongs();
             await ctx.player.replaceQueueAndPlay(allSongs, { requestedSong: song });
           } else {
-            const activeQueue = ctx.playlist.activeQueue;
-            let queueSongs = activeQueue?.songs?.length > 0 ? [...activeQueue.songs] : [];
-            if (!queueSongs.some((s) => String(s.id) === String(song.id))) queueSongs.push(song);
-            await ctx.player.replaceQueueAndPlay(queueSongs, { requestedSong: song });
+            await ctx.player.replaceQueueAndPlay([song]);
           }
         } catch (err) { ctx.toast.danger("播放失败"); }
       };
 
+      /** 目录视图双击：PROPFIND 条目 → 歌曲对象。
+       *  平铺视图的双击由 SongList 的 onSongDoubleTapPlay 直接调
+       *  handleDoubleTapPlaySong，不经这里。 */
+      const handleDoubleTapPlay = async (entry) => {
+        const song = createSong(entry, currentPath.value);
+        if (!song) return;
+        await handleDoubleTapPlaySong(song);
+      };
+
+      /** 清除手动选择的歌词并重新拉取（宿主歌词页与本插件右键菜单共用） */
+      const restoreDefaultLyric = async (song) => {
+        if (!song) return;
+        const hash = String(song.id);
+        try {
+          await ctx.storage.delete(`lyric:${hash}`);
+          delete ctx.lyric.manualLyricMap[hash];
+          ctx.lyric.currentCandidateKey = "";
+          _enrichedLyrics.delete(hash);
+          _kugouLyricSearches.delete(hash);
+          await ctx.lyric.fetchLyrics(hash, { force: true, track: song });
+          ctx.toast.success("已恢复默认歌词");
+        } catch {
+          ctx.toast.danger("操作失败");
+        }
+      };
+
       const playAll = async () => {
-        const lib = currentLibrary.value;
-        const songs = lib?.flatView
-          ? flatFilteredEntries.value.map(s => ({ ...s }))
+        const songs = isFlatView.value
+          ? flatSortedEntries.value.map((s) => ({ ...s }))
           : getSongs();
         if (songs.length === 0) return;
         enrichSong(songs[0]).catch(() => {});
@@ -1673,7 +2200,7 @@ const createBrowserPage = (ctx, state) => {
         const files = results.filter((e) => !e.isCollection && isAudioFile(e.name)).sort((a, b) => a.name.localeCompare(b.name));
         if (files.length === 0) { ctx.toast.info("文件夹内没有音乐文件"); return; }
         const coverUrl = await fetchFolderCover(ctx, lib, normDir, results);
-        const songs = files.map((entry) => createSongObject(entry.name, normDir + entry.name, { album: folderName, coverUrl, libraryId: lib.id }));
+        const songs = files.map((entry) => createSongObject(entry.name, normDir + entry.name, { album: folderName, coverUrl, lib }));
         enrichSong(songs[0]).catch(() => {});
         try {
           await ctx.player.replaceQueueAndPlay(songs);
@@ -1692,11 +2219,12 @@ const createBrowserPage = (ctx, state) => {
 
       const hasLibraries = computed(() => state.settings.libraries && state.settings.libraries.length > 0);
 
-      // 预计算歌曲序号，避免 O(n²) 的逐行 filter
+      const dirFileCount = computed(() => entries.value.filter((e) => !e.isCollection).length);
+
+      // 预计算歌曲序号，避免 O(n²) 的逐行 filter（仅目录视图的行需要）
       const songIndexMap = computed(() => {
         let n = 0;
-        const list = currentLibrary.value?.flatView ? flatFilteredEntries.value : filteredEntries.value;
-        return list.map((e) => (currentLibrary.value?.flatView ? true : e.isCollection) ? null : ++n);
+        return filteredEntries.value.map((e) => (e.isCollection ? null : ++n));
       });
 
       return () => {
@@ -1709,10 +2237,9 @@ const createBrowserPage = (ctx, state) => {
           ]);
         }
 
-        const songCount = currentLibrary.value?.flatView ? flatSongs.value.length : entries.value.filter((e) => !e.isCollection).length;
-        const displayCount = searchQuery.value.trim()
-          ? (currentLibrary.value?.flatView ? flatFilteredEntries.value.length : filteredEntries.value.filter((e) => !e.isCollection).length)
-          : songCount;
+        const songCount = isFlatView.value
+          ? flatSongs.value.length
+          : dirFileCount.value;
 
         return h("div", { class: "webdav-page" }, [
           h(PageScrollContainer, { class: "flex-1 min-h-0" }, {
@@ -1723,13 +2250,13 @@ const createBrowserPage = (ctx, state) => {
             coverUrl: "",
             coverBaseSize: 150,
             expandedHeight: 176,
-            collapsedHeight: 56,
+            collapsedHeight: STICKY_COLLAPSED_H,
           }, {
             details: () => h("div", { class: "flex flex-col gap-2" }, [
               h("div", { class: "text-[13px] font-semibold text-text-secondary" }, "连接WebDAV服务器，浏览和播放云端音乐文件。"),
               h("div", { class: "inline-flex items-center gap-1.5 text-[11px] font-semibold", style: "color: var(--color-text-secondary); opacity: 0.8;" }, [
                 h(Icon, { icon: "tabler:server", width: 12, height: 12 }),
-                h("span", {}, searchQuery.value.trim() ? `${displayCount} / ${songCount} 首歌曲` : `${songCount} 首歌曲`),
+                h("span", {}, `${songCount} 首歌曲`),
               ]),
             ]),
             actions: () => h(ActionRow, {
@@ -1758,7 +2285,12 @@ const createBrowserPage = (ctx, state) => {
           }),
 
           // === 库标签栏 + 搜索/定位（使用主应用 Tabs 组件） ===
-          h("div", { class: "sticky z-110 bg-bg-main", style: "top: 56px;" }, [
+        // 必须用宿主的 PageStickyHeader 而不是裸 position:sticky：
+        // 宿主把吸顶栏 Teleport 到独立的 .page-sticky-layer 绘制层，
+        // 同时用 clip-path 把滚动区在吸顶区域裁掉（见 PageScrollContainer）。
+        // 用裸 sticky 时两层在同一绘制层，半透明表面下滚动内容会直接穿透顶栏。
+        h(PageStickyHeader, { class: "song-list-sticky sticky z-110 bg-bg-main", stickyTop: STICKY_TOP_TABS }, {
+          default: () => [
             h("div", { class: "flex items-center justify-between px-6 h-14 border-b border-[var(--border-subtle)]" }, [
               state.settings.libraries.length > 1
                 ? h(Tabs, {
@@ -1782,17 +2314,11 @@ const createBrowserPage = (ctx, state) => {
                   })
                 : h("span", { class: "text-[15px] font-bold text-text-main" }, state.settings.libraries[0]?.name || "WebDAV"),
               h("div", { class: "flex items-center gap-2 flex-shrink-0" }, [
-                h("div", { class: "relative" }, [
-                  h(Icon, { icon: ctx.icons.iconSearch, width: 14, height: 14, class: "absolute left-2.5 top-1/2 -translate-y-1/2", style: { color: "var(--color-text-main)", opacity: "0.6", pointerEvents: "none" } }),
-                  h("input", {
-                    class: "w-52 h-9 pl-8 pr-3 rounded-lg text-text-main placeholder:text-text-main/50 outline-none text-[12px] transition-all",
-                    style: { background: "var(--color-bg-elevated)" },
-                    type: "text",
-                    placeholder: "搜索歌曲...",
-                    value: searchQuery.value,
-                    onInput: (e) => { searchQuery.value = e.target.value; },
-                  }),
-                ]),
+                h(SongSearchInput, {
+                  modelValue: searchQuery.value,
+                  "onUpdate:modelValue": (v) => { searchQuery.value = String(v ?? ""); },
+                  ariaLabel: "搜索歌曲",
+                }),
                 h(Button, {
                   variant: "unstyled",
                   size: "none",
@@ -1802,10 +2328,12 @@ const createBrowserPage = (ctx, state) => {
                 }, { default: () => h(Icon, { icon: ctx.icons.iconCurrentLocation, width: 18, height: 18 }) }),
               ]),
             ]),
-          ]),
+          ],
+        }),
 
           // === 面包屑 + 导航按钮（固定在库标签栏下方） ===
-          h("div", { class: "sticky z-110 bg-bg-main flex items-center justify-between flex-shrink-0 px-6 py-1", style: "top: 112px;" }, [
+          h(PageStickyHeader, { class: "song-list-sticky sticky z-110 bg-bg-main flex items-center justify-between flex-shrink-0 px-6 py-1", stickyTop: STICKY_TOP_BREADCRUMB }, {
+            default: () => [
             h("div", { class: "flex items-center flex-wrap gap-0.5" },
               breadcrumbs.value.map((crumb, index) => {
                 const items = [];
@@ -1829,10 +2357,29 @@ const createBrowserPage = (ctx, state) => {
                 h(Icon, { icon: ctx.icons.iconRefreshCw, width: 18, height: 18 })
               ]),
             ]),
-          ]),
+          ],
+        }),
 
           // === 列表表头（固定在面包屑下方） ===
-          h("div", { class: "webdav-list-header flex-shrink-0 sticky z-110 bg-bg-main", style: "top: 140px;" }, [
+          //
+          // 平铺视图交给宿主 SongListHeader，列宽必须与 SongList 的
+          // buildSongListGridTemplate 一致，否则表头与行会错位；
+          // 目录视图因为要混排文件夹，保留插件自绘表头。
+          isFlatView.value
+            ? h(PageStickyHeader, { class: "song-list-sticky sticky z-110 bg-bg-main", stickyTop: STICKY_TOP_LIST_HEADER }, {
+                default: () => [
+                  h(SongListHeader, {
+                    showIndex: true,
+                    showAlbum: true,
+                    showCover: true,
+                    sortField: FLAT_SORT_HEADER_FIELD[_sortField] ?? null,
+                    sortOrder: _sortOrder,
+                    onSort: (field) => handleSort(FLAT_SORT_FIELD[field]),
+                  }),
+                ],
+              })
+            : h(PageStickyHeader, { class: "song-list-sticky webdav-list-header flex-shrink-0 sticky z-110 bg-bg-main", stickyTop: STICKY_TOP_LIST_HEADER }, {
+                default: () => [
             h("div", { class: ["webdav-col-index", _sortField === 'name' ? 'is-sorted' : ''], onClick: () => handleSort('name') }, [
               "#",
               h(Icon, { class: "sort-icon", icon: _sortField === 'name' ? (_sortOrder === 'asc' ? ctx.icons.iconSortUp : ctx.icons.iconSortDown) : ctx.icons.iconChevronUpDown, width: 14, height: 14 }),
@@ -1845,33 +2392,57 @@ const createBrowserPage = (ctx, state) => {
               "大小",
               h(Icon, { class: "sort-icon", icon: _sortField === 'size' ? (_sortOrder === 'asc' ? ctx.icons.iconSortUp : ctx.icons.iconSortDown) : ctx.icons.iconChevronUpDown, width: 14, height: 14 }),
             ]),
-          ]),
+                ],
+              }),
           // === 歌曲列表内容 ===
-          h("div", { ref: listContainerRef, class: "webdav-list" },
-              loading.value || (currentLibrary.value?.flatView && flatLoading.value)
-                ? h("div", { class: "webdav-loading" },
-                    currentLibrary.value?.flatView && flatLoading.value
-                      ? "加载中，可在任务中心查看进度"
-                      : "加载中...")
-                : error.value || flatError.value
-                  ? h("div", { class: "webdav-error" }, error.value || flatError.value)
+          //
+          // 平铺视图用宿主 SongList：自带虚拟滚动（万首库不会一次性创建上万个
+          // DOM 节点）、内置右键菜单、当前播放高亮、scrollToActive 与内置搜索过滤，
+          // 这些原先都在插件里重复实现。目录视图混排文件夹，SongList 不支持，仍自绘。
+          isFlatView.value
+            ? (flatLoading.value
+                ? h("div", { class: "webdav-loading" }, "加载中，可在任务中心查看进度")
+                : flatError.value
+                  ? h("div", { class: "webdav-error" }, flatError.value)
+                  : h(SongList, {
+                      ref: flatListRef,
+                      songs: flatSortedEntries.value,
+                      // 上下文用未过滤的全量列表：右键「下一首播放/排队候播」应以整库为上下文
+                      contextSongs: flatSortedEntries.value,
+                      searchQuery: searchQuery.value,
+                      activeId: ctx.stores.player.currentTrackId,
+                      showIndex: true,
+                      showCover: true,
+                      showAlbum: true,
+                      showDuration: false,
+                      onSongDoubleTapPlay: (song) => handleDoubleTapPlaySong(song),
+                      contextMenuItems: [
+                        {
+                          id: "restore-default-lyric",
+                          label: "恢复默认歌词",
+                          onSelect: (song) => restoreDefaultLyric(song),
+                        },
+                      ],
+                    }))
+            : h("div", { ref: listContainerRef, class: "webdav-list" },
+              loading.value
+                ? h("div", { class: "webdav-loading" }, "加载中...")
+                : error.value
+                  ? h("div", { class: "webdav-error" }, error.value)
                   : currentDisplayList.value.length === 0
                     ? h("div", { class: "webdav-empty" }, [
                         h("p", { class: "webdav-empty-title" }, "此目录为空"),
                         h("p", { class: "webdav-empty-desc" }, "没有找到音乐文件"),
                       ])
                     : currentDisplayList.value.map((entry, idx) => {
-                          const isDir = currentLibrary.value?.flatView ? false : entry.isCollection;
+                          const isDir = entry.isCollection;
                           const fileIdx = isDir ? null : songIndexMap.value[idx];
-                        const filePath = currentLibrary.value?.flatView ? entry._filePath : normalizeDir(currentPath.value) + entry.name;
-                        const songId = currentLibrary.value?.flatView ? entry.id : generateSongId(filePath);
+                        const filePath = normalizeDir(currentPath.value) + entry.name;
+                        const songId = generateSongId(currentLibrary.value, filePath);
                         const isActive = !isDir && String(ctx.stores.player.currentTrackId) === String(songId);
                         const isPlaying = isActive && ctx.stores.player.isPlaying;
-                        const isSelected = !isDir && selectedKeys.value.has(entry.name);
-                        const { artist, title } = isDir ? { artist: "", title: "" }
-                          : currentLibrary.value?.flatView
-                            ? { artist: entry.artist === "未知歌手" ? "" : entry.artist, title: entry.title || entry.name }
-                            : parseTitleArtist(entry.name);
+                        const isSelected = !isDir && selectedKeys.value.has(selKey(entry));
+                        const { artist, title } = isDir ? { artist: "", title: "" } : describeEntry(entry);
                         return h("div", {
                           class: ["webdav-row group", isDir ? "webdav-row-dir" : "", isActive ? "is-active" : "", isSelected ? "is-selected" : ""],
                           onDblclick: isDir ? () => navigateTo(filePath + "/") : () => showBatchDrawer.value ? toggleSong(entry) : handleDoubleTapPlay(entry),
@@ -1883,12 +2454,12 @@ const createBrowserPage = (ctx, state) => {
                           h("div", { class: "flex justify-center" }, [
                           h("div", { class: "relative w-4 h-4" }, [
                             showBatchDrawer.value && !isDir
-                              ? h("div", {
-                                  class: ["webdav-checkbox", isSelected ? "is-checked" : ""],
-                                  onClick: (e) => { e.stopPropagation(); toggleSong(entry); },
-                                }, [
-                                  isSelected ? h("svg", { viewBox: "0 0 16 16", width: 12, height: 12, innerHTML: CHECK_SVG }) : null,
-                                ])
+                              ? h(Checkbox, {
+                                  modelValue: isSelected,
+                                  "ariaLabel": title || entry.name,
+                                  onClick: (e) => e.stopPropagation(),
+                                  "onUpdate:modelValue": () => toggleSong(entry),
+                                })
                               : !isDir ? (
                                   isActive
                                     ? [
@@ -1922,9 +2493,9 @@ const createBrowserPage = (ctx, state) => {
                           ]),  // close webdav-row-inner
                         ]);
                       }),
-                    ),
-                  ]),  // close inner div array + h("div", min-h-full)
-                }),    // close slots object + h(PageScrollContainer, ...)
+            ),          // close h("div", webdav-list)
+          ]),           // close the children array of h("div", min-h-full)
+        }),             // close slots object + h(PageScrollContainer, ...)
 
           // 右键菜单（Teleport 到 body，与主应用一致，避免 position:fixed 受父级影响）
           contextMenu.value ? [
@@ -1933,91 +2504,137 @@ const createBrowserPage = (ctx, state) => {
               h("div", { ref: contextMenuRef, class: "webdav-context-menu", style: { left: contextMenuPosition.value.x + "px", top: contextMenuPosition.value.y + "px" } }, [
                 h("div", { class: "webdav-context-item", onClick: handleCtxPlayNow }, "立即播放"),
                 h("div", { class: "webdav-context-item", onClick: handleCtxPlayNext }, "下一首播放"),
-                contextMenu.value && !contextMenu.value.isDir
+                !contextMenu.value.isDir
                   ? h("div", { class: "webdav-context-item", onClick: handleCtxRestoreDefault }, "恢复默认歌词")
                   : null,
               ]),
             ]),
           ] : null,
           // 批量操作抽屉（使用主应用 Drawer 组件）
+          //
+          // Drawer 的 <slot /> 没有 v-if（Drawer.vue:86），面板只靠 CSS 隐藏，
+          // 内容会常驻 DOM。这里显式用 v-if 控制：关闭时整个抽屉体不渲染，
+          // 顺带让 Drawer 的 backdrop-filter / 过渡不会作用在一棵大子树上。
           h(Drawer, {
             open: showBatchDrawer.value,
             "onUpdate:open": (v) => { showBatchDrawer.value = v; },
             side: "right",
-            overlayStyle: { background: "var(--surface-scrim-bg)" },
+            // 复用宿主 BatchActionDrawer 的全局面板样式（BatchActionDrawer.vue:585）
+            panelClass: "batch-drawer",
+            overlayClass: "batch-drawer-overlay",
             panelStyle: {
-              padding: "0",
-              boxShadow: "none",
-              width: "min(600px, 96vw)",
-              top: "0",
-              bottom: "0",
-              left: "auto",
-              right: "0",
-              borderRadius: "10px 0 0 10px",
-              border: "none",
-              background: "var(--color-bg-main)",
+              // 用实底色而不是 --color-bg-main：后者 = color-mix(surface-main-base,
+              // surface-main-opacity, transparent)，会跟随用户的「面板不透明度」设置，
+              // 面板透明度 < 100% 时呈半透明。--surface-main-base 是不透明实底，
+              // 且仍随深浅色主题切换（浅色 #ffffff / 深色 #29292b）。
+              background: "var(--surface-main-base)",
+              // 面板面积大，backdrop-filter 会拖慢开合动画；底色已不透明，无需模糊
+              backdropFilter: "none",
+              WebkitBackdropFilter: "none",
             },
           }, {
-            default: () => h("div", { class: "flex flex-col h-full" }, [
-              // 头部
-              h("div", { class: "batch-header" }, [
-                h("div", { class: "batch-title" }, "批量操作"),
-                h("div", { class: "batch-actions" }, [
-                  h(Button, { variant: "secondary", size: "xs", disabled: selectedSongs.value.length === 0, onClick: batchPlaySelected, class: "batch-action" }, [
-                    h(Icon, { icon: ctx.icons.iconPlay, width: 16, height: 16 }),
-                    h("span", {}, "播放"),
-                  ]),
-                  h(Button, { variant: "secondary", size: "xs", disabled: selectedSongs.value.length === 0, onClick: batchAddToQueue, class: "batch-action" }, [
-                    h(Icon, { icon: ctx.icons.iconPlus, width: 16, height: 16 }),
-                    h("span", {}, "添加到"),
-                  ]),
-                ]),
-                h(Button, { variant: "ghost", size: "xs", onClick: closeBatchDrawer, class: "batch-close", "aria-label": "关闭" }, [
-                  h(Icon, { icon: "tabler:x", width: 14, height: 14 }),
-                ]),
-              ]),
-              // 全选 + 已选数量
-              h("div", { class: "batch-selection" }, [
-                h(Button, { variant: "ghost", size: "xs", onClick: toggleSelectAll, class: "batch-select" }, [
-                  h("span", { class: "batch-select-leading" }, [
-                    h("div", { class: ["webdav-checkbox", isAllSelected.value ? "is-checked" : "", isIndeterminate.value ? "is-indeterminate" : ""] }, [
-                      isAllSelected.value ? h("svg", { viewBox: "0 0 16 16", width: 10, height: 10, innerHTML: CHECK_SVG }) : null,
-                      isIndeterminate.value && !isAllSelected.value ? h("div", { class: "webdav-checkbox-indeterminate" }) : null,
+            // Drawer 的 <slot /> 没有 v-if（Drawer.vue:86），面板只靠 CSS 隐藏、
+            // 内容常驻 DOM。这里显式守卫：关闭时不渲染抽屉体。
+            default: () => {
+              if (!showBatchDrawer.value) return null;
+              const win = batchWindow.value;
+              return h("div", { class: "flex flex-col h-full" }, [
+                h("div", { class: "wbatch-header" }, [
+                  h("div", { class: "wbatch-heading" }, [
+                    h("span", { class: "wbatch-heading-icon" }, [
+                      h(Icon, { icon: ctx.icons.iconList, width: 22, height: 22 }),
+                    ]),
+                    h("div", { class: "wbatch-heading-text" }, [
+                      h("h2", { class: "wbatch-title" }, "批量操作"),
+                      h("p", { class: "wbatch-subtitle" }, `共 ${batchEntries.value.length} 首歌曲`),
                     ]),
                   ]),
-                  h("span", {}, "全选"),
+                  h(Button, {
+                    variant: "ghost", size: "xs", class: "wbatch-close",
+                    "aria-label": "关闭", onClick: closeBatchDrawer,
+                  }, { default: () => h(Icon, { icon: "tabler:x", width: 14, height: 14 }) }),
                 ]),
-                h("div", { class: "batch-count" }, `已选 ${selectedKeys.value.size} / ${filteredEntries.value.filter((e) => !e.isCollection).length}`),
-              ]),
-              // 歌曲列表
-              h("div", { class: "batch-list" }, [
-                h(Scrollbar, { class: "flex-1 min-h-0" }, {
-                  default: () => h("div", { class: "batch-list-inner" }, [
-                    filteredEntries.value.filter((e) => !e.isCollection).map((entry) => {
-                      const isSelected = selectedKeys.value.has(entry.name);
-                      const { artist, title } = parseTitleArtist(entry.name);
-                      return h("div", {
-                        class: ["batch-row", isSelected ? "text-primary" : ""],
-                        onClick: () => toggleSong(entry),
-                      }, [
-                        h("div", { class: "batch-leading" }, [
-                          h("div", { class: ["webdav-checkbox", isSelected ? "is-checked" : ""] }, [
-                            isSelected ? h("svg", { viewBox: "0 0 16 16", width: 10, height: 10, innerHTML: CHECK_SVG }) : null,
-                          ]),
-                        ]),
-                        h("div", { class: "batch-card" }, [
-                          h("div", { class: "webdav-song-info" }, [
-                            h("span", { class: "webdav-song-title" }, title || entry.name),
-                            h("span", { class: "webdav-song-artist" }, artist || "未知歌手"),
-                          ]),
-                        ]),
-                        h("div", { class: "batch-album" }, formatSize(entry.contentLength)),
-                      ]);
+                h("div", { class: "wbatch-selection" }, [
+                  h("label", { class: "wbatch-select" }, [
+                    h(Checkbox, {
+                      modelValue: isIndeterminate.value ? "indeterminate" : isAllSelected.value,
+                      ariaLabel: "全选歌曲",
+                      "onUpdate:modelValue": toggleSelectAll,
                     }),
+                    h("span", { class: "wbatch-count" }, `${selectedKeys.value.size}/${batchEntries.value.length}`),
                   ]),
-                }),
-              ]),
-            ]),
+                ]),
+                h("div", { class: "wbatch-list" }, [
+                  h(Scrollbar, {
+                    ref: batchScrollerRef,
+                    // 异步组件挂载完成后才测量并绑定滚动监听（对齐宿主 BatchActionDrawer.vue:160）
+                    onVnodeMounted: onBatchScrollbarMounted,
+                    class: "flex-1 min-h-0",
+                    scrollbarInset: 4,
+                    onScroll: onBatchScroll,
+                  }, {
+                    default: () => h("div", { class: "wbatch-list-inner" }, [
+                      h("div", { class: "wbatch-list-wrapper", style: { height: win.totalHeight + "px" } }, [
+                        h("div", { style: { transform: `translateY(${win.offset}px)` } },
+                          win.rows.map((entry) => {
+                            const isSelected = selectedKeys.value.has(selKey(entry));
+                            const info = describeEntry(entry);
+                            return h("div", {
+                              key: entry.id || entry.name,
+                              // 显式行高：宿主 BatchActionDrawer 也按 itemHeight 内联设置，
+                              // 不设会被 SongCard 内容撑紧，行与行之间没有留白
+                              style: { height: BATCH_ROW_H + "px" },
+                              class: isSelected ? "wbatch-row is-selected" : "wbatch-row",
+                              onClick: () => toggleSong(entry),
+                            }, [
+                              h("div", { class: "wbatch-leading" }, [
+                                h(Checkbox, {
+                                  modelValue: isSelected,
+                                  ariaLabel: info.title || entry.name,
+                                  onClick: (e) => e.stopPropagation(),
+                                  "onUpdate:modelValue": () => toggleSong(entry),
+                                }),
+                              ]),
+                              // 宿主 SongCard：自动带音质/VIP 徽标，与主应用一致
+                              h("div", { class: "wbatch-card" }, [
+                                h(SongCard, {
+                                  song: entry,
+                                  variant: "list",
+                                  showCover: true,
+                                  showAlbum: false,
+                                  showDuration: false,
+                                  showMore: false,
+                                  disableLinks: true,
+                                  active: false,
+                                }),
+                              ]),
+                            ]);
+                          }),
+                        ),
+                      ]),
+                    ]),
+                  }),
+                ]),
+                h("div", { class: "wbatch-footer" }, [
+                  h("div", { class: "wbatch-actions" }, [
+                    h(Button, {
+                      variant: "soft-primary", size: "xs", class: "wbatch-action",
+                      disabled: selectedSongs.value.length === 0, onClick: batchPlaySelected,
+                    }, [
+                      h(Icon, { icon: ctx.icons.iconPlay, width: 16, height: 16 }),
+                      h("span", {}, "播放"),
+                    ]),
+                    h(Button, {
+                      variant: "soft-secondary", size: "xs", class: "wbatch-action",
+                      disabled: selectedSongs.value.length === 0, onClick: batchAddToQueue,
+                    }, [
+                      h(Icon, { icon: ctx.icons.iconPlus, width: 16, height: 16 }),
+                      h("span", {}, "添加到"),
+                    ]),
+                  ]),
+                ]),
+              ]);
+            },
           }),
         ]);
       };
@@ -2031,15 +2648,26 @@ const createBrowserPage = (ctx, state) => {
 let state = null;
 
 export async function activate(ctx) {
+  // 只记录本插件来源的未处理拒绝：
+  // 宿主已按 Blob sourceURL（echo-plugin:<id>）做全局归因并上报，
+  // 这里再兜一层，仅用于开发期定位本插件内部的悬空 Promise。
   const _unhandledHandler = (event) => {
-    console.error("[webdav-music] Unhandled rejection:", event.reason);
+    const reason = event.reason;
+    const text = reason instanceof Error ? `${reason.message}\n${reason.stack || ""}` : String(reason);
+    if (!text.includes(`echo-plugin:${ctx.id}`)) return;
+    console.error("[webdav-music] Unhandled rejection:", reason);
   };
   window.addEventListener("unhandledrejection", _unhandledHandler);
   ctx.dispose(() => window.removeEventListener("unhandledrejection", _unhandledHandler));
+  // 启动横幅：v1.1.3 起插件只保留 error/warn，导致无法从控制台确认插件是否加载。
+  // 这里打印版本号，用于确认新代码确实在运行（排查性能问题时必须先核对）。
+  console.info(`[webdav-music] v${ctx.manifest.version} 已启用 (id=${ctx.id})`);
   const saved = await ctx.storage.get(STORAGE_KEY);
   state = ctx.vue.reactive({ settings: normalizeSettings(saved) });
-  _ctx = ctx;
 
+  // WebDAV 解析需要发送 PROPFIND 等非标准方法并访问用户自定的内网地址，
+  // 浏览器 fetch（CORS + 禁止请求头）无法胜任，因此使用主进程网络能力。
+  // 未声明该能力时 webdavRequest 会自动退回 ctx.net.fetch。
   ctx.player.audioSource.register({
     id: "webdav",
     match: (context) => context.track.source === "webdav" && !!context.track._filePath,
@@ -2053,95 +2681,87 @@ export async function activate(ctx) {
       if (!lib && settings.libraries?.length > 0) lib = settings.libraries[0];
       if (!lib) return null;
       const url = buildAuthUrl(lib, filePath);
-      const quality = await detectAudioQuality(lib, filePath);
+      // 音质探测有缓存，不会对同一文件重复发起 Range 请求
+      const quality = await detectAudioQuality(ctx, lib, filePath);
       if (quality) return { url, quality };
       return url;
     },
   });
 
-  const _doEnrichCurrentTrack = () => {
-    const trackId = ctx.stores.player.currentTrackId;
-    if (!trackId) return;
-    const track = ctx.stores.player.currentTrackSnapshot;
-    if (!track || track.source !== "webdav" || !track._filePath) return;
-    const sid = String(trackId);
-    if (_pendingEnrichment.has(sid)) return;
-    const promise = enrichTrack(ctx, state, track).catch(() => {});
+  const _doEnrichCurrentTrack = (track) => {
+    const current = track || ctx.stores.player.currentTrackSnapshot;
+    if (!current || current.source !== "webdav" || !current._filePath) return;
+    const sid = String(current.id ?? ctx.stores.player.currentTrackId ?? "");
+    if (!sid || _pendingEnrichment.has(sid)) return;
+    const promise = enrichTrack(ctx, state, current).catch(() => {});
     _pendingEnrichment.set(sid, promise);
     promise.finally(() => _pendingEnrichment.delete(sid));
   };
-  ctx.vue.watch(
-    () => ctx.stores.player.currentTrackId,
-    _doEnrichCurrentTrack,
-    { immediate: true },
-  );
-  ctx.vue.watch(
-    () => ctx.stores.player.currentTrackSnapshot,
-    _doEnrichCurrentTrack,
-  );
-
-  /** 通过酷狗 API 搜索歌词（关键词 → 歌曲 → 歌词候选 → 歌词内容） */
-  const searchKugouLyricByKeyword = async (track) => {
-    if (!track?.title || !_ctx?.kugou) return null;
-    const keyword = track.artist && track.artist !== "未知歌手"
-      ? `${track.artist} ${track.title}`
-      : track.title;
-    try {
-      const searchResult = await _ctx.kugou.search.search(keyword, "song", 1, 5);
-      const lists = searchResult?.data?.lists || searchResult?.data?.list || [];
-      if (!lists.length) return null;
-      const fileHash = lists[0].FileHash;
-      if (!fileHash) return null;
-      const lyricResult = await _ctx.kugou.music.searchLyric(fileHash);
-      const candidates = lyricResult?.candidates || lyricResult?.data?.candidates || [];
-      const first = candidates[0];
-      if (!first?.id || !first?.accesskey) return null;
-      const detail = await _ctx.kugou.music.getLyric(String(first.id), String(first.accesskey));
-      const lyricText = detail?.decodeContent || detail?.content || detail?.data?.content;
-      return lyricText ? { decodeContent: lyricText, source: "酷狗" } : null;
-    } catch { return null; }
-  };
+  // 使用宿主公开的播放事件 API，而不是直接 watch 内部 store 字段；
+  // 退订与插件生命周期由宿主统一管理。
+  ctx.events.onTrackChange((track) => _doEnrichCurrentTrack(track));
+  // 补一次初始状态：应用重启后恢复播放时不会有新的曲目变化事件
+  _doEnrichCurrentTrack();
 
   ctx.lyrics.registerResolver({
     id: "webdav-embedded",
     order: 100,
     match: (context) => context.track?.source === "webdav" && !!context.track?._filePath,
+    /**
+     * 宿主对每个歌词解析器的 match / resolve 都施加 2500ms 硬超时
+     * （EchoMusic src/renderer/plugins/lyrics.ts PLUGIN_LYRIC_RESOLVER_TIMEOUT_MS），
+     * 超时结果会被直接丢弃。因此这里必须在 LYRIC_RESOLVE_BUDGET_MS 内返回，
+     * 酷狗搜索一律走后台任务，只在预算内等待已完成的缓存结果。
+     */
     resolve: async (context) => {
+      const deadline = Date.now() + LYRIC_RESOLVE_BUDGET_MS;
       const hash = context.hash;
-      // 1. 手动选择的歌词始终优先
-      if (_ctx) {
-        const manualLyric = await _ctx.storage.get(`lyric:${hash}`);
-        if (manualLyric) return { decodeContent: manualLyric, source: "手动选择" };
-      }
-      const coverLyricSource = state?.settings?.coverLyricSource || "embedded";
-      const cached = _enrichedLyrics.get(hash);
       const track = context.track;
+      const cached = _enrichedLyrics.get(hash);
+      const coverLyricSource = state?.settings?.coverLyricSource || "embedded";
 
-      // 2. 根据设置决定优先级
-      if (coverLyricSource === "kugou") {
-        // kugou 模式：优先酷狗搜索，失败回退内嵌
-        const result = await searchKugouLyricByKeyword(track);
-        if (result) return result;
-        if (cached) return { decodeContent: cached };
-      } else {
-        // embedded 模式（默认）：优先内嵌歌词，失败回退酷狗
-        if (cached) return { decodeContent: cached };
-        const pending = _pendingEnrichment.get(hash);
-        if (pending) {
-          await Promise.race([pending, new Promise((r) => setTimeout(r, 3000))]);
-          const result = _enrichedLyrics.get(hash);
-          if (result) return { decodeContent: result };
+      // kugou 模式下后台搜索优先级更高，先把搜索挂起来复用
+      const searchTask = startKugouLyricSearch(ctx, hash, track);
+
+      // 1. 手动选择的歌词始终优先（一次 KV 读取，通常 < 50ms）
+      try {
+        const manualLyric = await ctx.storage.get(`lyric:${hash}`);
+        if (manualLyric) return { decodeContent: manualLyric, source: "手动选择" };
+      } catch {}
+
+      // 2. 内嵌 / 后台搜索已完成的结果
+      if (cached) return { decodeContent: cached };
+
+      // 3. 等待 enrichTrack（内嵌标签解析）在剩余预算内产出歌词
+      const pending = _pendingEnrichment.get(hash);
+      if (pending && coverLyricSource !== "kugou") {
+        await Promise.race([pending, sleep(remainingMs(deadline))]);
+        const enriched = _enrichedLyrics.get(hash);
+        if (enriched) return { decodeContent: enriched };
+      }
+
+      // 4. 等后台酷狗搜索，但绝不越过预算：超时则返回 null 交回宿主默认链路，
+      //    后台搜索完成后会写入 _enrichedLyrics，下次解析即可命中。
+      if (searchTask) {
+        const left = remainingMs(deadline);
+        if (left > 150) {
+          const searched = await Promise.race([searchTask, sleep(left)]);
+          if (searched) return { decodeContent: searched, source: "酷狗" };
         }
-        const result = await searchKugouLyricByKeyword(track);
-        if (result) return result;
       }
       return null;
     },
   });
 
-  // 拦截 lyrics store 的 fetchLyricCandidates，对 WebDAV 歌曲使用关键词搜索
+  /**
+   * 接管歌词选择窗的候选获取：WebDAV 歌曲没有酷狗 hash，只能按「歌手 + 歌名」
+   * 搜索候选。这是在宿主 Pinia store 上打补丁（宿主未开放对应插件 API），
+   * 因此用 Symbol 标记 + 幂等还原，避免多次 activate / disable 叠加补丁。
+   */
+  const PATCH_FLAG = Symbol.for("echo-plugin:webdav-music:fetchLyricCandidates");
+  if (ctx.lyric[PATCH_FLAG]) ctx.lyric[PATCH_FLAG].restore();
   const _originalFetchCandidates = ctx.lyric.fetchLyricCandidates.bind(ctx.lyric);
-  ctx.lyric.fetchLyricCandidates = async (hash, options) => {
+  const _patchedFetchCandidates = async (hash, options) => {
     const normalizedHash = String(hash ?? "").trim();
     if (normalizedHash.startsWith("webdav_")) {
       const track = ctx.stores.player.currentTrackSnapshot;
@@ -2192,30 +2812,58 @@ export async function activate(ctx) {
     }
     return _originalFetchCandidates(hash, options);
   };
-  ctx.dispose(() => { ctx.lyric.fetchLyricCandidates = _originalFetchCandidates; });
+  ctx.lyric.fetchLyricCandidates = _patchedFetchCandidates;
+
+  /** 幂等还原：只有当 store 上仍是自己的补丁时才回写，避免覆盖其他插件的修改 */
+  const _restoreFetchCandidates = () => {
+    if (ctx.lyric.fetchLyricCandidates === _patchedFetchCandidates) {
+      ctx.lyric.fetchLyricCandidates = _originalFetchCandidates;
+    }
+    delete ctx.lyric[PATCH_FLAG];
+  };
+  ctx.lyric[PATCH_FLAG] = { restore: _restoreFetchCandidates };
+  ctx.dispose(_restoreFetchCandidates);
 
   _fallbackCoverUrlRef = ctx.vue.ref(DEFAULT_COVER_URL);
 
+  /**
+   * 跟随 cover-fallback 插件的兜底封面设置。
+   * 这是跨插件的私有约定（BroadcastChannel 频道名与 payload 结构），
+   * 一旦对方改动会静默失效，因此这里做防御式解析：任何异常都退回主应用默认封面，
+   * 不会影响 WebDAV 歌曲本身的封面与歌词。
+   */
   if (typeof BroadcastChannel === "function") {
-    _bcChannel = new BroadcastChannel("echo-plugin:cover-fallback:settings");
-    _bcChannel.onmessage = (event) => {
-      const payload = event.data;
-      if (payload && payload.type === "settings" && payload.settings) {
-        _fallbackCoverUrlRef.value = computeFallbackCoverUrl(payload.settings);
-      }
-    };
-    ctx.dispose(() => { _bcChannel?.close(); _bcChannel = null; });
+    try {
+      _bcChannel = new BroadcastChannel("echo-plugin:cover-fallback:settings");
+      _bcChannel.onmessage = (event) => {
+        try {
+          const payload = event.data;
+          if (!payload || payload.type !== "settings" || !payload.settings) return;
+          const next = computeFallbackCoverUrl(payload.settings);
+          if (typeof next === "string" && next) _fallbackCoverUrlRef.value = next;
+        } catch (err) {
+          console.warn("[webdav-music] 解析 cover-fallback 设置失败:", err);
+        }
+      };
+      ctx.dispose(() => { _bcChannel?.close(); _bcChannel = null; });
+    } catch (err) {
+      console.warn("[webdav-music] 无法订阅 cover-fallback 设置频道:", err);
+      _bcChannel = null;
+    }
   }
 
+  // 头部封面改为插件自绘的服务器图标。
+  // 选择器必须限定在 .webdav-page 内：宿主 .plugin-page-host 是所有插件页面
+  // 共用的容器，不加限定会污染其它插件的页面。
   ctx.css.inject(`
-    .plugin-page-host .sliver-header-root .cover-container {
+    .webdav-page .sliver-header-root .cover-container {
       background: linear-gradient(135deg, var(--color-primary, #31cfa1), color-mix(in srgb, var(--color-primary, #31cfa1) 50%, white)) !important;
     }
-    .plugin-page-host .sliver-header-root .cover-container img,
-    .plugin-page-host .sliver-header-root .cover-container .absolute {
+    .webdav-page .sliver-header-root .cover-container img,
+    .webdav-page .sliver-header-root .cover-container .absolute {
       display: none !important;
     }
-    .plugin-page-host .sliver-header-root .cover-container::after {
+    .webdav-page .sliver-header-root .cover-container::after {
       content: "";
       position: absolute;
       inset: 0;
@@ -2256,20 +2904,47 @@ export async function activate(ctx) {
 
   ctx.commands.register("webdav-music:searchLyric", async () => {
     const track = ctx.stores.player.currentTrackSnapshot;
-    if (!track || track.source !== "webdav") {
+    if (!track || track.source !== "webdav" || !track._filePath) {
       ctx.toast.info("当前播放的不是 WebDAV 歌曲");
       return;
     }
-    ctx.toast.info("请在歌词页点击「选择歌词」按钮搜索歌词");
+    const hash = String(track.id ?? "");
+    if (!hash) return;
+    // 预热关键词候选缓存，让歌词页「选择歌词」打开即可直接看到结果
+    try {
+      const candidates = await ctx.lyric.fetchLyricCandidates(hash, { force: true, track });
+      if (Array.isArray(candidates) && candidates.length) {
+        ctx.toast.success(`已找到 ${candidates.length} 个歌词候选`);
+      } else {
+        ctx.toast.info("没有搜索到匹配的歌词");
+      }
+    } catch {
+      ctx.toast.danger("歌词搜索失败");
+    }
   });
 
-  ctx.dispose(() => { state = null; });
+  ctx.dispose(cleanupModuleState);
 }
 
-export function deactivate(_ctx) {
+/** 统一的模块级状态清理：activate 的 ctx.dispose 与 deactivate 都走这里 */
+const cleanupModuleState = () => {
+  // 递增会话代数：让仍在飞的异步回调（enrich / kugou 搜索）知道自己已过期
+  ++_stateEpoch;
   state = null;
-  _ctx = null;
+  _fallbackCoverUrlRef = null;
   _enrichedLyrics.clear();
   _pendingEnrichment.clear();
   _songLibraryCache.clear();
+  _kugouLyricSearches.clear();
+  releaseAllObjectUrls();
+  _folderCoverUrls.clear();
+  _songCoverUrls.clear();
+  _qualityCache.clear();
+  // 排序态也一并清掉：禁用再启用应回到默认，与「清空全部模块级状态」一致
+  _sortField = null;
+  _sortOrder = null;
+};
+
+export function deactivate() {
+  cleanupModuleState();
 }

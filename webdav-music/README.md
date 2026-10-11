@@ -43,6 +43,17 @@ EchoMusicPlugins/
 | 平铺展示 | 开启后递归扫描所有子目录，集中展示全部音乐，扫描进度在任务中心显示 | 关闭 |
 | 在线匹配封面歌词 | 开启后使用酷狗搜索出的封面和歌词，关闭则优先使用歌曲内嵌的封面和歌词 | 关闭 |
 
+> 双击播放的行为跟随主应用「播放队列模式」设置：上下文模式会用当前目录 / 平铺列表替换队列，单曲模式只播放该曲。
+
+## 浏览视图
+
+| 视图 | 列表实现 | 说明 |
+|------|---------|------|
+| 平铺展示 | 宿主 `SongList` / `SongListHeader` | 虚拟滚动（万首库流畅）、宿主右键菜单（立即播放 / 下一首 / 排队候播 / 添加到 / 分享）、宿主搜索过滤、点击表头排序。可排序列为「# / 歌曲 / 专辑」 |
+| 文件夹浏览 | 插件自绘 | 需要在同一列表里混排文件夹与歌曲，宿主 `SongList` 不支持。可按「# / 歌曲 / 大小」排序 |
+
+两种视图的排序状态相互独立：目录视图的「大小」排序在切到平铺视图时会被清空（宿主表头没有大小列）。
+
 ## 支持的音频格式
 
 `mp3` `flac` `wav` `aac` `ogg` `wma` `m4a` `ape` `opus` `aiff` `alac` `dsf` `dff`
@@ -86,9 +97,116 @@ EchoMusicPlugins/
 
 ## 依赖
 
-- EchoMusic >= 2.2.7-beta.13
+- EchoMusic >= 2.3.1-beta.16
+
+## 诊断
+
+排查性能问题时，先在 DevTools Console 里核对这两条日志：
+
+| 时机 | 日志 | 用途 |
+|------|------|------|
+| 插件启用 | `[webdav-music] v1.5.0 已启用 (id=webdav-music)` | 确认新代码已在运行（插件自 v1.1.3 起只保留 error/warn，无日志不代表未加载） |
+| 打开批量面板 | `[webdav-music] 批量面板打开：条目 N，首屏渲染 M 行，视口 Hpx` | 核对窗口化是否生效：`M` 应远小于 `N`（一般 20-40 行） |
+
+若 `M` 接近 `N`，说明窗口化未生效，请附上这条日志的具体数值。
+
+## 权限说明
+
+插件在 `manifest.json` 中声明了以下 capability：
+
+| 能力 | 用途 |
+|------|------|
+| `audioSource` | 接管 WebDAV 歌曲的播放地址，动态拼接认证 URL |
+| `kugouApi` | 在线匹配封面与歌词（可在设置中关闭） |
+| `lyrics` | 注册歌词解析器，支持内嵌歌词与手动选择歌词 |
+| `unrestrictedNetwork` | WebDAV 需要 `PROPFIND` 等非标准方法并访问用户自定的内网地址，浏览器 Fetch 受 CORS 与禁止请求头限制，因此走主进程网络能力 |
+
+> **注意**
+> 出于浏览器 `<audio>` 标签无法附加请求头的限制，播放地址会把 Basic Auth 凭证内嵌在 URL 中（`https://user:pass@host/...`）。该地址会保存在播放队列与播放历史中，请勿在不受信任的共享设备上使用需要认证的库。
 
 ## 更新日志
+
+### v1.4.5
+
+**兼容性修复**
+
+- 修复歌词解析器超出宿主 2500ms 硬超时导致结果被丢弃的问题：解析器改为严格时间预算（`LYRIC_RESOLVE_BUDGET_MS = 1800`），酷狗搜索改为后台任务并复用结果，超时后由后台结果写回缓存，下次解析直接命中
+- 修复双击播放读取不存在的设置项 `settings.replacePlaylist` 导致永久走死分支：对齐宿主真实设置项 `settings.playbackQueueMode`（`context` / `single`）
+- 修复平铺展示模式下批量抽屉列表恒为空、已选计数恒为 0：批量相关逻辑统一使用 `batchEntries`
+- 修复 DSD（`dsf` / `dff`）返回非法的音质值 `super` 被宿主静默丢弃：归入 `flac`（宿主音质枚举为 `128/320/flac/high/viper_*`）
+- 修复服务端忽略 `Range` 返回 200 完整文件时整首歌曲被下载：校验 `206` / `Content-Range` 并按需裁剪
+- 修复 `detectAudioQualityFromHead` 在响应被截断时读取 FLAC STREAMINFO 越界抛 `RangeError`
+
+**正确性修复（内嵌标签解析）**
+
+- FLAC STREAMINFO 的采样率误读 MD5 区（偏移 18），时长计算全部出错；改为读取字节 10-11 + 字节 12 高 4 位的 20 bits
+- ID3v2 UTF-16（编码 1/2）的歌词与封面在跳过终止符后多前进 1 字节，中文标签的歌词乱码、内嵌封面损坏；终止符长度现在按编码区分
+- MP3 帧长公式把「码率 + 采样率 + padding」复合位当采样率除数，且缺少采样率查找表；补上 `samplesPerFrame` 与分版本采样率表
+
+**功能修复**
+
+- 修复「在线匹配封面歌词」开关失效：kugou 结果先应用后又被内嵌 patch 无条件覆盖，两种模式最终值相同
+- 修复平铺视图「歌手 / 专辑」表头排序不生效（缺对应分支，实际按歌名排）
+- 修复音质缓存对「探测过但无音质信息」的文件不生效（ogg/opus/wma 每次播放重发 256KB Range 请求）
+- 修复快速连续切换目录时旧响应覆盖新目录内容（补加载令牌）
+- 修复切换库时旧扫描未真正中止（`dismiss()` 不触发 abort，改为先 `cancel()`）
+- 修复平铺缓存写入失败被误报为扫描失败
+- 修复右键「立即播放」与双击对同一首歌产生两种队列语义
+- 修复批量选择以非唯一的 `name` 为 key（同名歌曲会共享选中态）
+- 修复禁用插件后在飞的 enrich / 酷狗搜索回调把已清空的缓存「复活」（引入会话代数守卫）
+- 修复 `webdavRequest` 未对路径做段级编码（含 `#` `?` 空格或非 ASCII 的文件名请求失败）
+
+**网络**
+
+- 新增统一请求入口 `webdavRequest()`：PROPFIND 等非标准方法改走 `ctx.net.request`（主进程 Axios），不再受浏览器 CORS 预检限制；未声明 `unrestrictedNetwork` 时自动退回 `ctx.net.fetch`
+
+**性能**
+
+- 修复批量抽屉开关卡顿：宿主 `.drawer-panel` 默认带 `backdrop-filter`（`Drawer.vue:133-134`）且开关时过渡 `opacity` 与 `transform`（`Drawer.vue:139-145`），背景模糊的代价与面板**面积**成正比而非行数；插件已用不透明底色覆盖默认背景，故在 `panelStyle` 里关闭该滤镜
+- 批量抽屉列表窗口化渲染：原先对全量条目 `.map()`，5000 首歌会生成约 45000 个节点
+- 批量抽屉关闭时不再渲染抽屉体：宿主 `Drawer` 的 `<slot />` 没有 `v-if`（`Drawer.vue:86`），面板只靠 CSS 隐藏、内容常驻 DOM
+- 排序改为装饰排序（Schwartzian transform）：原先把 `parseTitleArtist` 写在比较器里，3000 首要调用约 1.2 万次；现改为先算排序键再排（实测 15.6ms → 4.8ms），排序结果完全一致
+- 平铺视图改用宿主 `SongList`，获得虚拟滚动：原先对全部歌曲做 `.map()` 全量渲染，万首库会一次性创建上万个 DOM 节点
+- 歌曲 id 生成纳入库身份（`serverUrl + libraryId`）：原先只哈希路径，两个库里同名相对路径会得到同一个 id，导致宿主列表去重丢行、`isSameSong` 把两首歌认成一首
+- 平铺缓存结构加版本号，id 规则变更时自动作废旧缓存
+
+**稳定性**
+
+- 修复批量列表下滚出现空白：宿主 `Scrollbar` 是异步组件，原实现仅在打开时用一次 `nextTick + rAF` 测量，此时组件往往尚未挂载，导致视口高度恒为 0、滚动事件也拿不到元素；改为在 `onVnodeMounted` 时测量并把 `scroll` 监听直接绑到滚动容器（对齐宿主 `BatchActionDrawer.vue:160`）
+- 修复窗口化视口测量读取组件实例而非 DOM 元素的问题（`Scrollbar` 暴露的是 `wrapRef`），并为 `batchWindow` 增加 `Number.isFinite` 防御，避免 NaN 穿透到 `slice`
+- 修复封面 `Object URL` 持续泄漏：新增登记表，歌曲内嵌封面与目录封面在替换时回收
+- 修复平铺扫描竞态：切换库时旧扫描的 `finally` 会清掉新扫描的状态，改用扫描 token 判定
+- 修复 `deactivate` 未清理排序状态、封面转换的 5s 超时定时器泄漏
+- `ctx.dispose` / `deactivate` 的清理统一走 `cleanupModuleState()`，并补齐 Object URL、封面缓存、音质缓存、后台歌词搜索任务
+- 清理死代码与过期注释（不可达判空、恒真守卫、挂错函数的 JSDoc、未使用的引用计数字段）
+
+**宿主 API 适配**
+
+- 修复吸顶栏穿透：三个吸顶层（库标签栏、面包屑、列表表头）由裸 `position: sticky` 改为宿主 `PageStickyHeader`
+- 平铺视图的表头改用宿主 `SongListHeader`，搜索过滤交由 `SongList` 的 `searchQuery` prop；右键菜单、当前播放高亮、定位滚动改用宿主 `SongList` 内置能力
+- 批量抽屉视觉对齐宿主 `BatchActionDrawer`：面板复用宿主全局面板类（`panelClass: "batch-drawer"`），行内容改用宿主 `SongCard`（自动带音质/VIP 徽标、42px 封面、禁用跳转）；宿主相关类是 scoped 的，插件侧以 `wbatch-` 前缀镜像其样式值
+- 批量选择复选框改用宿主 `Checkbox`；搜索框改用宿主 `SongSearchInput`
+- `formatSize` 对齐宿主 `formatBytes`（补 GB/TB，小数位按量级递减）
+- 曲目变化监听改用 `ctx.events.onTrackChange`，不再直接 `watch` 宿主 store 内部字段
+- 系统媒体控制同步补齐 `output.setTrackMeta`（原先只调 `mediaControls.updateMetadata`，与宿主 `updateMediaMetadata` 的成对调用不一致）
+- 注入 CSS 的选择器由全局 `.plugin-page-host ...` 收窄到 `.webdav-page ...`，避免污染其它插件页面
+- 吸顶偏移提取为常量（`STICKY_TOP_*`），不再硬编码 `56 / 112 / 140px`
+- 接管歌词候选的 store 补丁增加 `Symbol` 标记与幂等还原，避免重复 activate 叠加
+- 全局 `unhandledrejection` 监听器收窄为只记录本插件来源的错误
+- `webdav-music:searchLyric` 命令改为真正预热歌词候选，不再只弹提示
+- 合并 `enrichFromKugouApi` 与歌词解析器的酷狗搜索逻辑，消除重复实现
+
+**文档**
+
+- 修正「依赖」版本与 `manifest.json` 不一致（`2.2.7-beta.13` → `2.3.1-beta.16`）
+- 设置面板「关于」页补齐平铺展示、权限说明与诊断日志说明
+
+**已知取舍**
+
+- `deactivate` 时统一 revoke 的 Object URL 会让播放队列里的旧封面一起失效——禁用插件本就意味着这些封面不再可用
+- `currentResolvedAudioQuality` 仍直接写入宿主 store（宿主无对应公开 API）
+- 浏览器 `<audio>` 标签无法附加请求头，播放地址会把 Basic Auth 凭证内嵌在 URL 中（见「权限说明」）
+
 
 ### v1.4.0
 
@@ -150,8 +268,6 @@ EchoMusicPlugins/
 - 使用主应用 `Badge` 组件替换手动角标
 - 使用主应用 `Scrollbar` 组件替换批量抽屉内原生滚动条
 - 批量抽屉样式完全匹配主应用 `BatchActionDrawer`
-- 修复切歌时封面空白闪烁问题：创建歌曲时立即使用兜底封面
-- 修复吸顶收起后缺少批量按钮的问题
 
 ### v1.3.0
 

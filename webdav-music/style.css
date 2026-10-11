@@ -436,194 +436,200 @@
   background: color-mix(in srgb, var(--color-text-main) 8%, transparent);
 }
 
-/* ---- Batch Drawer（与主应用 BatchActionDrawer 一致） ---- */
-
-.batch-header {
+/* ---- Batch Drawer（对齐宿主 BatchActionDrawer；类名加 wbatch- 前缀，
+        避免与宿主 BatchActionDrawer.vue 的 scoped 类名冲突） ---- */
+.wbatch-header {
   display: grid;
-  grid-template-columns: 1fr auto auto;
+  grid-template-columns: 1fr auto;
   align-items: center;
   gap: 12px;
-  padding: 16px 18px 12px 20px;
+  padding: 22px 20px 18px;
   user-select: none;
-  flex-shrink: 0;
+  -webkit-user-select: none;
 }
 
-.batch-title {
-  font-size: 16px;
-  font-weight: 700;
+.wbatch-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.wbatch-heading-icon {
+  width: 42px;
+  height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: var(--radius-card);
+  background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+  color: var(--color-primary-text);
+}
+
+.wbatch-heading-text {
+  min-width: 0;
+}
+
+.wbatch-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
   color: var(--color-text-main);
 }
 
-.batch-actions {
+.wbatch-subtitle {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.wbatch-close {
+  height: 32px;
+  width: 32px;
+  min-width: 0;
+  padding: 0;
+  color: var(--icon-main);
+}
+
+.wbatch-close:hover {
+  color: var(--color-text-main);
+}
+
+.wbatch-selection {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 20px 10px;
+  padding: 10px 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.wbatch-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--color-text-main);
+}
+
+.wbatch-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.wbatch-list {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 0 0 8px 20px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.wbatch-list-inner {
+  padding-right: 20px;
+}
+
+.wbatch-list-wrapper {
+  position: relative;
+  width: 100%;
+}
+
+.wbatch-row {
   display: flex;
   align-items: center;
   gap: 8px;
+  padding: 0 8px;
+  border-radius: var(--radius-item);
+  transition: background-color 0.15s ease;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  contain: layout style paint;
 }
 
-.batch-action {
-  display: inline-flex;
+.wbatch-row.is-selected {
+  background: var(--row-selected-bg);
+}
+
+.wbatch-row:not(.is-selected):hover {
+  background: var(--row-hover-bg);
+}
+
+.wbatch-leading {
+  width: 18px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.wbatch-card {
+  min-width: 0;
+  flex: 1;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* 宿主 BatchActionDrawer 用 :deep() 覆盖 SongCard；
+   插件 CSS 是全局注入，没有 scoped 上下文，改用后代选择器 */
+.wbatch-card .song-card {
+  background: transparent;
+  padding: 0;
+}
+
+.wbatch-card .song-actions {
+  display: none;
+}
+
+.wbatch-card .song-cover-frame {
+  width: 42px;
+  height: 42px;
+  border-radius: var(--radius-media);
+}
+
+.wbatch-footer {
+  flex-shrink: 0;
+  padding: 16px 20px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.wbatch-actions {
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  padding: 7px 12px;
-  border-radius: 10px;
+}
+
+.wbatch-action {
+  display: inline-flex;
+  flex-shrink: 0;
+  white-space: nowrap;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 8px 14px;
+  border-radius: var(--radius-control);
   font-size: 12px;
   font-weight: 600;
-  color: var(--color-text-main);
-  background: var(--control-muted-bg);
-  transition: transform 0.2s ease, background-color 0.2s ease, color 0.2s ease;
+  transition:
+    transform 0.2s ease,
+    background-color 0.2s ease,
+    color 0.2s ease;
 }
 
-.batch-action:hover {
-  transform: scale(1.02);
-  color: var(--color-primary);
-  background: var(--control-hover-bg);
-}
-
-.batch-action:disabled {
+.wbatch-action:disabled {
   opacity: 0.5;
   cursor: not-allowed;
   transform: none;
 }
 
-.batch-close {
-  height: 32px;
-  width: 32px;
-  min-width: 0;
-  padding: 0;
-  color: var(--color-text-main);
-  opacity: 0.5;
-}
-
-.batch-close:hover {
-  opacity: 1;
-}
-
-.batch-selection {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 0 20px 12px 18px;
-  font-size: 12px;
-  color: var(--color-text-secondary);
-  user-select: none;
-}
-
-.batch-select {
-  display: inline-flex;
-  align-items: center;
-  gap: 12px;
-  padding-left: 0;
-  padding-right: 12px;
-  font-weight: 600;
-  color: var(--color-text-main);
-}
-
-.batch-select-leading {
-  width: 40px;
-  flex: 0 0 40px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.batch-count {
-  font-weight: 600;
-}
-
-.batch-list {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  padding: 0 0 16px 18px;
-  user-select: none;
-}
-
-.batch-list-inner {
-  padding-right: 14px;
-}
-
-.batch-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 0;
-  border-radius: 8px;
-  transition: background-color 0.15s ease;
-  cursor: default;
-  user-select: none;
-  height: 56px;
-}
-
-.batch-row.text-primary {
-  background: var(--row-selected-bg);
-}
-
-.batch-row:hover {
-  background: var(--row-hover-bg);
-}
-
-.batch-leading {
-  width: 40px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.batch-card {
-  min-width: 0;
-  flex: 1;
-  user-select: none;
-}
-
-.batch-album {
-  width: 180px;
-  flex: 0 1 180px;
-  min-width: 0;
-  display: block;
-  font-size: 12px;
-  opacity: 0.7;
-  color: var(--color-text-secondary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  user-select: none;
-}
-
-/* ---- Checkbox（使用主应用 CSS 变量） ---- */
-.webdav-checkbox {
-  width: 14px;
-  height: 14px;
-  border-radius: 3px;
-  border: 1.5px solid var(--control-checkbox-border);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--control-checkbox-bg);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--surface-card-base) 36%, transparent);
-  transition: all 0.2s ease;
-  flex-shrink: 0;
-}
-
-.webdav-checkbox:hover {
-  border-color: var(--control-checkbox-border-hover, var(--color-primary));
-  background: color-mix(in srgb, var(--color-primary) 8%, var(--control-checkbox-bg));
-}
-
-.webdav-checkbox.is-checked,
-.webdav-checkbox.is-indeterminate {
-  border-color: var(--color-primary);
-  background: var(--color-primary);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 14%, transparent);
-  color: white;
-}
-
-.webdav-checkbox-indeterminate {
-  width: 8px;
-  height: 2px;
-  background: white;
-  border-radius: 999px;
-}
 
 /* ---- Row Selected State ---- */
 .webdav-row.is-selected {
