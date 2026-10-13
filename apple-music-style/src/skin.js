@@ -79,7 +79,9 @@ export function createSkinComponent(ctx) {
       // Side tools visibility (mirrors the host lyric page tools behaviour)
       const sideToolsHovered = ref(false)
       const hostContentEl = ref(null)
+      const sideToolsEl = ref(null)
       const commentBtnEl = ref(null)
+      const shareBtnEl = ref(null)
 
       // --- Computed state from page ---
       const state = computed(() => props.page.state.value)
@@ -93,6 +95,7 @@ export function createSkinComponent(ctx) {
       const qualityOptions = computed(() => state.value.qualityOptions || [])
       const isCloudSource = computed(() => Boolean(state.value.isCloudSource))
       const hasCloudSource = computed(() => state.value.hasCloudSource)
+      const canShare = computed(() => Boolean(state.value.canShare))
       const lyrics = computed(() => state.value.lyrics)
       const lyricLines = computed(() => lyrics.value.lines || [])
 
@@ -119,6 +122,41 @@ export function createSkinComponent(ctx) {
 
       const trackArtist = computed(() => track.value.artist || '未知歌手')
       const coverUrl = computed(() => track.value.coverUrl || track.value.cover || '')
+
+      // --- 专辑 / 歌手跳转 ---
+      // 与宿主 SongCard.vue 保持一致：详情页 id 必须是正整数，名称非空才可点击
+      const resolveNumericId = (value) => {
+        if (value === undefined || value === null) return null
+        const parsed = Number.parseInt(String(value), 10)
+        if (Number.isNaN(parsed) || parsed <= 0) return null
+        return parsed
+      }
+
+      const albumDetailId = computed(() => resolveNumericId(track.value.albumId))
+      const hasAlbumDetail = computed(() => {
+        const name = (track.value.album || track.value.albumName || '').trim()
+        return Boolean(albumDetailId.value && name)
+      })
+
+      // 优先用结构化的 artists / singers（含 id）；缺失时退回按分隔符切分纯文本，
+      // 此时切分出的名字没有 id，不可点击。
+      const artistList = computed(() => {
+        const source = Array.isArray(track.value.artists) && track.value.artists.length > 0
+          ? track.value.artists
+          : (Array.isArray(track.value.singers) && track.value.singers.length > 0
+              ? track.value.singers
+              : [])
+        if (source.length > 0) {
+          return source
+            .filter((item) => item && typeof item.name === 'string' && item.name.trim())
+            .map((item) => ({ id: item.id, name: item.name.trim() }))
+        }
+        return String(track.value.artist || '')
+          .split(/[,/、，]/)
+          .map((name) => name.trim())
+          .filter(Boolean)
+          .map((name) => ({ id: undefined, name }))
+      })
 
       const progressPct = computed(() => {
         const d = duration.value
@@ -346,6 +384,43 @@ export function createSkinComponent(ctx) {
       const playNext = () => props.page.playback.next()
       const openComments = () =>
         runGuarded('[AppleMusicStyle] 打开评论面板失败', () => props.page.panels.open('comments'))
+      // 复用宿主分享逻辑（复制分享链接并由宿主弹出结果提示）。
+      // page.share 是 action 包装的，歌词页卸载后会抛错，故走 runGuarded。
+      const shareTrack = () =>
+        runGuarded('[AppleMusicStyle] 分享歌曲失败', () => props.page.share())
+
+      // 歌词页是覆盖在 RouterView 之上的全屏层（.lyric-overlay-host，fixed inset:0
+      // z-index:1300）。只 router.push 的话详情页会被挡在遮罩后面，因此必须先关闭
+      // 歌词页再跳转。push 先发起（详情组件异步加载），随后同步关闭遮罩，
+      // 这样遮罩淡出时新页面通常已就绪，不会闪一下旧页面。
+      const navigateTo = (route) => {
+        if (disposed) return
+        const router = ctx.router
+        if (!router || typeof router.push !== 'function') {
+          console.warn('[AppleMusicStyle] 宿主未提供 router，无法跳转到详情页')
+          return
+        }
+        try {
+          const result = router.push(route)
+          if (result && typeof result.catch === 'function') {
+            result.catch((error) => console.warn('[AppleMusicStyle] 详情页跳转失败', error))
+          }
+        } catch (error) {
+          console.warn('[AppleMusicStyle] 详情页跳转失败', error)
+        }
+        runGuarded('[AppleMusicStyle] 关闭歌词页失败', () => props.page.close())
+      }
+
+      const openAlbumDetail = () => {
+        if (!hasAlbumDetail.value) return
+        navigateTo({ name: 'album-detail', params: { id: String(albumDetailId.value) } })
+      }
+
+      const openArtistDetail = (artistId) => {
+        const id = resolveNumericId(artistId)
+        if (!id) return
+        navigateTo({ name: 'artist-detail', params: { id: String(id) } })
+      }
       const toggleFavorite = () =>
         runGuarded('[AppleMusicStyle] 收藏切换失败', () => props.page.favorite.toggle())
       const setRandomMode = () => props.page.playback.setMode('random')
@@ -483,7 +558,12 @@ export function createSkinComponent(ctx) {
       }
 
       const handleSideToolsLeave = (e) => {
+        // 侧边工具被传送到 .plugin-lyrics-content 的同级，从内容区移出时
+        // 宿主容器会先触发 mouseleave；此时若移入的是工具组本身（含任意
+        // 按钮），必须保持显示，否则按钮会先消失导致无法点击。
+        if (sideToolsEl.value && sideToolsEl.value.contains(e.relatedTarget)) return
         if (commentBtnEl.value && commentBtnEl.value.contains(e.relatedTarget)) return
+        if (shareBtnEl.value && shareBtnEl.value.contains(e.relatedTarget)) return
         sideToolsHovered.value = false
       }
 
@@ -538,11 +618,56 @@ export function createSkinComponent(ctx) {
             : h('div', { class: 'amms-cover-placeholder' }, '♫'),
         ])
 
+      const renderArtistLine = () => {
+        const list = artistList.value
+        if (list.length === 0) return trackArtist.value
+        const nodes = []
+        list.forEach((artist, index) => {
+          if (index > 0) {
+            nodes.push(h('span', { key: `sep-${index}`, class: 'amms-artist-sep' }, ' / '))
+          }
+          const id = resolveNumericId(artist.id)
+          nodes.push(
+            h(
+              'span',
+              {
+                key: `artist-${index}`,
+                class: id ? 'amms-artist-link' : '',
+                title: id ? `查看歌手：${artist.name}` : undefined,
+                onClick: id
+                  ? (e) => {
+                      e.stopPropagation()
+                      openArtistDetail(id)
+                    }
+                  : undefined,
+              },
+              artist.name,
+            ),
+          )
+        })
+        return nodes
+      }
+
       const renderTrackInfo = () =>
         h('div', { class: 'amms-track-info' }, [
           h('div', { class: 'amms-track-text' }, [
-            h('div', { class: 'amms-track-title' }, trackTitle.value),
-            h('div', { class: 'amms-track-artist' }, trackArtist.value),
+            h(
+              'div',
+              {
+                class: ['amms-track-title', hasAlbumDetail.value ? 'amms-title-link' : ''],
+                title: hasAlbumDetail.value
+                  ? `查看专辑：${(track.value.album || track.value.albumName || '').trim()}`
+                  : undefined,
+                onClick: hasAlbumDetail.value
+                  ? (e) => {
+                      e.stopPropagation()
+                      openAlbumDetail()
+                    }
+                  : undefined,
+              },
+              trackTitle.value,
+            ),
+            h('div', { class: 'amms-track-artist' }, renderArtistLine()),
           ]),
           h('div', { class: 'amms-track-actions' }, [
             h(
@@ -787,12 +912,13 @@ export function createSkinComponent(ctx) {
               h('div', { ref: playerAreaRef, class: 'amms-amll-area' }),
             ]),
           ]),
-          // 评论按钮：传送到宿主工具区同级，脱离插件的 isolate 堆叠上下文
+          // 评论与分享按钮：传送到宿主工具区同级，脱离插件的 isolate 堆叠上下文
           hostContentEl.value
             ? h(Teleport, { to: hostContentEl.value.parentElement }, [
                 h(
                   'div',
                   {
+                    ref: sideToolsEl,
                     class: 'amms-side-tools',
                     style: {
                       opacity: sideToolsHovered.value ? 1 : 0,
@@ -802,30 +928,57 @@ export function createSkinComponent(ctx) {
                     onMouseleave: handleSideToolsLeave,
                   },
                   track.value
-                    ? h(
-                        'button',
-                        {
-                          ref: commentBtnEl,
-                          class: 'action-icon soft-secondary-action amms-comment-btn',
-                          'aria-label': '查看评论',
-                          title: '查看评论',
-                          onClick: openComments,
-                        },
+                    ? [
                         h(
-                          'svg',
+                          'button',
                           {
-                            viewBox: '0 0 24 24',
-                            fill: 'none',
-                            stroke: 'currentColor',
-                            'stroke-width': '2',
-                            'stroke-linecap': 'round',
-                            'stroke-linejoin': 'round',
+                            ref: commentBtnEl,
+                            class: 'action-icon soft-secondary-action amms-comment-btn',
+                            'aria-label': '查看评论',
+                            title: '查看评论',
+                            onClick: openComments,
                           },
-                          h('path', {
-                            d: 'm3 20l1.3-3.9C1.976 12.663 2.874 8.228 6.4 5.726c3.526-2.501 8.59-2.296 11.845.48c3.255 2.777 3.695 7.266 1.029 10.501C16.608 19.942 11.659 20.922 7.7 19L3 20',
-                          }),
+                          h(
+                            'svg',
+                            {
+                              viewBox: '0 0 24 24',
+                              fill: 'none',
+                              stroke: 'currentColor',
+                              'stroke-width': '2',
+                              'stroke-linecap': 'round',
+                              'stroke-linejoin': 'round',
+                            },
+                            h('path', {
+                              d: 'm3 20l1.3-3.9C1.976 12.663 2.874 8.228 6.4 5.726c3.526-2.501 8.59-2.296 11.845.48c3.255 2.777 3.695 7.266 1.029 10.501C16.608 19.942 11.659 20.922 7.7 19L3 20',
+                            }),
+                          ),
                         ),
-                      )
+                        h(
+                          'button',
+                          {
+                            ref: shareBtnEl,
+                            class: 'action-icon soft-secondary-action amms-share-btn',
+                            'aria-label': '分享',
+                            title: canShare.value ? '分享' : '当前歌曲无法分享',
+                            disabled: !canShare.value,
+                            onClick: shareTrack,
+                          },
+                          h(
+                            'svg',
+                            {
+                              viewBox: '0 0 24 24',
+                              fill: 'none',
+                              stroke: 'currentColor',
+                              'stroke-width': '2',
+                              'stroke-linecap': 'round',
+                              'stroke-linejoin': 'round',
+                            },
+                            h('path', {
+                              d: 'M3 12a3 3 0 1 0 6 0a3 3 0 1 0-6 0m12-6a3 3 0 1 0 6 0a3 3 0 1 0-6 0m0 12a3 3 0 1 0 6 0a3 3 0 1 0-6 0m-6.3-7.3l6.6-3.4m-6.6 6l6.6 3.4',
+                            }),
+                          ),
+                        ),
+                      ]
                     : null,
                 ),
               ])

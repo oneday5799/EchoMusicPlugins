@@ -21927,7 +21927,9 @@ function createSkinComponent(ctx) {
       const hoverStartTime = ref(0);
       const sideToolsHovered = ref(false);
       const hostContentEl = ref(null);
+      const sideToolsEl = ref(null);
       const commentBtnEl = ref(null);
+      const shareBtnEl = ref(null);
       const state = computed(() => props.page.state.value);
       const track = computed(() => state.value.track || {});
       const isPlaying = computed(() => state.value.isPlaying);
@@ -21939,6 +21941,7 @@ function createSkinComponent(ctx) {
       const qualityOptions = computed(() => state.value.qualityOptions || []);
       const isCloudSource = computed(() => Boolean(state.value.isCloudSource));
       const hasCloudSource = computed(() => state.value.hasCloudSource);
+      const canShare = computed(() => Boolean(state.value.canShare));
       const lyrics = computed(() => state.value.lyrics);
       const lyricLines = computed(() => lyrics.value.lines || []);
       const readTimelineMs = () => {
@@ -21962,6 +21965,24 @@ function createSkinComponent(ctx) {
       });
       const trackArtist = computed(() => track.value.artist || "\u672A\u77E5\u6B4C\u624B");
       const coverUrl = computed(() => track.value.coverUrl || track.value.cover || "");
+      const resolveNumericId = (value) => {
+        if (value === void 0 || value === null) return null;
+        const parsed = Number.parseInt(String(value), 10);
+        if (Number.isNaN(parsed) || parsed <= 0) return null;
+        return parsed;
+      };
+      const albumDetailId = computed(() => resolveNumericId(track.value.albumId));
+      const hasAlbumDetail = computed(() => {
+        const name = (track.value.album || track.value.albumName || "").trim();
+        return Boolean(albumDetailId.value && name);
+      });
+      const artistList = computed(() => {
+        const source = Array.isArray(track.value.artists) && track.value.artists.length > 0 ? track.value.artists : Array.isArray(track.value.singers) && track.value.singers.length > 0 ? track.value.singers : [];
+        if (source.length > 0) {
+          return source.filter((item) => item && typeof item.name === "string" && item.name.trim()).map((item) => ({ id: item.id, name: item.name.trim() }));
+        }
+        return String(track.value.artist || "").split(/[,/、，]/).map((name) => name.trim()).filter(Boolean).map((name) => ({ id: void 0, name }));
+      });
       const progressPct = computed(() => {
         const d3 = duration.value;
         return d3 > 0 ? clamp2(currentTime.value / d3 * 100, 0, 100) : 0;
@@ -22154,6 +22175,33 @@ function createSkinComponent(ctx) {
       const playPrev = () => props.page.playback.prev();
       const playNext = () => props.page.playback.next();
       const openComments = () => runGuarded("[AppleMusicStyle] \u6253\u5F00\u8BC4\u8BBA\u9762\u677F\u5931\u8D25", () => props.page.panels.open("comments"));
+      const shareTrack = () => runGuarded("[AppleMusicStyle] \u5206\u4EAB\u6B4C\u66F2\u5931\u8D25", () => props.page.share());
+      const navigateTo = (route) => {
+        if (disposed) return;
+        const router = ctx.router;
+        if (!router || typeof router.push !== "function") {
+          console.warn("[AppleMusicStyle] \u5BBF\u4E3B\u672A\u63D0\u4F9B router\uFF0C\u65E0\u6CD5\u8DF3\u8F6C\u5230\u8BE6\u60C5\u9875");
+          return;
+        }
+        try {
+          const result = router.push(route);
+          if (result && typeof result.catch === "function") {
+            result.catch((error) => console.warn("[AppleMusicStyle] \u8BE6\u60C5\u9875\u8DF3\u8F6C\u5931\u8D25", error));
+          }
+        } catch (error) {
+          console.warn("[AppleMusicStyle] \u8BE6\u60C5\u9875\u8DF3\u8F6C\u5931\u8D25", error);
+        }
+        runGuarded("[AppleMusicStyle] \u5173\u95ED\u6B4C\u8BCD\u9875\u5931\u8D25", () => props.page.close());
+      };
+      const openAlbumDetail = () => {
+        if (!hasAlbumDetail.value) return;
+        navigateTo({ name: "album-detail", params: { id: String(albumDetailId.value) } });
+      };
+      const openArtistDetail = (artistId) => {
+        const id = resolveNumericId(artistId);
+        if (!id) return;
+        navigateTo({ name: "artist-detail", params: { id: String(id) } });
+      };
       const toggleFavorite = () => runGuarded("[AppleMusicStyle] \u6536\u85CF\u5207\u6362\u5931\u8D25", () => props.page.favorite.toggle());
       const setRandomMode = () => props.page.playback.setMode("random");
       const setListMode = () => props.page.playback.setMode("list");
@@ -22261,7 +22309,9 @@ function createSkinComponent(ctx) {
         sideToolsHovered.value = true;
       };
       const handleSideToolsLeave = (e2) => {
+        if (sideToolsEl.value && sideToolsEl.value.contains(e2.relatedTarget)) return;
         if (commentBtnEl.value && commentBtnEl.value.contains(e2.relatedTarget)) return;
+        if (shareBtnEl.value && shareBtnEl.value.contains(e2.relatedTarget)) return;
         sideToolsHovered.value = false;
       };
       onMounted(() => {
@@ -22310,10 +22360,48 @@ function createSkinComponent(ctx) {
           alt: track.value.name || "\u4E13\u8F91\u5C01\u9762"
         }) : h2("div", { class: "amms-cover-placeholder" }, "\u266B")
       ]);
+      const renderArtistLine = () => {
+        const list = artistList.value;
+        if (list.length === 0) return trackArtist.value;
+        const nodes = [];
+        list.forEach((artist, index) => {
+          if (index > 0) {
+            nodes.push(h2("span", { key: `sep-${index}`, class: "amms-artist-sep" }, " / "));
+          }
+          const id = resolveNumericId(artist.id);
+          nodes.push(
+            h2(
+              "span",
+              {
+                key: `artist-${index}`,
+                class: id ? "amms-artist-link" : "",
+                title: id ? `\u67E5\u770B\u6B4C\u624B\uFF1A${artist.name}` : void 0,
+                onClick: id ? (e2) => {
+                  e2.stopPropagation();
+                  openArtistDetail(id);
+                } : void 0
+              },
+              artist.name
+            )
+          );
+        });
+        return nodes;
+      };
       const renderTrackInfo = () => h2("div", { class: "amms-track-info" }, [
         h2("div", { class: "amms-track-text" }, [
-          h2("div", { class: "amms-track-title" }, trackTitle.value),
-          h2("div", { class: "amms-track-artist" }, trackArtist.value)
+          h2(
+            "div",
+            {
+              class: ["amms-track-title", hasAlbumDetail.value ? "amms-title-link" : ""],
+              title: hasAlbumDetail.value ? `\u67E5\u770B\u4E13\u8F91\uFF1A${(track.value.album || track.value.albumName || "").trim()}` : void 0,
+              onClick: hasAlbumDetail.value ? (e2) => {
+                e2.stopPropagation();
+                openAlbumDetail();
+              } : void 0
+            },
+            trackTitle.value
+          ),
+          h2("div", { class: "amms-track-artist" }, renderArtistLine())
         ]),
         h2("div", { class: "amms-track-actions" }, [
           h2(
@@ -22538,11 +22626,12 @@ function createSkinComponent(ctx) {
             h2("div", { ref: playerAreaRef, class: "amms-amll-area" })
           ])
         ]),
-        // 评论按钮：传送到宿主工具区同级，脱离插件的 isolate 堆叠上下文
+        // 评论与分享按钮：传送到宿主工具区同级，脱离插件的 isolate 堆叠上下文
         hostContentEl.value ? h2(Teleport, { to: hostContentEl.value.parentElement }, [
           h2(
             "div",
             {
+              ref: sideToolsEl,
               class: "amms-side-tools",
               style: {
                 opacity: sideToolsHovered.value ? 1 : 0,
@@ -22551,30 +22640,57 @@ function createSkinComponent(ctx) {
               onMouseenter: handleSideToolsEnter,
               onMouseleave: handleSideToolsLeave
             },
-            track.value ? h2(
-              "button",
-              {
-                ref: commentBtnEl,
-                class: "action-icon soft-secondary-action amms-comment-btn",
-                "aria-label": "\u67E5\u770B\u8BC4\u8BBA",
-                title: "\u67E5\u770B\u8BC4\u8BBA",
-                onClick: openComments
-              },
+            track.value ? [
               h2(
-                "svg",
+                "button",
                 {
-                  viewBox: "0 0 24 24",
-                  fill: "none",
-                  stroke: "currentColor",
-                  "stroke-width": "2",
-                  "stroke-linecap": "round",
-                  "stroke-linejoin": "round"
+                  ref: commentBtnEl,
+                  class: "action-icon soft-secondary-action amms-comment-btn",
+                  "aria-label": "\u67E5\u770B\u8BC4\u8BBA",
+                  title: "\u67E5\u770B\u8BC4\u8BBA",
+                  onClick: openComments
                 },
-                h2("path", {
-                  d: "m3 20l1.3-3.9C1.976 12.663 2.874 8.228 6.4 5.726c3.526-2.501 8.59-2.296 11.845.48c3.255 2.777 3.695 7.266 1.029 10.501C16.608 19.942 11.659 20.922 7.7 19L3 20"
-                })
+                h2(
+                  "svg",
+                  {
+                    viewBox: "0 0 24 24",
+                    fill: "none",
+                    stroke: "currentColor",
+                    "stroke-width": "2",
+                    "stroke-linecap": "round",
+                    "stroke-linejoin": "round"
+                  },
+                  h2("path", {
+                    d: "m3 20l1.3-3.9C1.976 12.663 2.874 8.228 6.4 5.726c3.526-2.501 8.59-2.296 11.845.48c3.255 2.777 3.695 7.266 1.029 10.501C16.608 19.942 11.659 20.922 7.7 19L3 20"
+                  })
+                )
+              ),
+              h2(
+                "button",
+                {
+                  ref: shareBtnEl,
+                  class: "action-icon soft-secondary-action amms-share-btn",
+                  "aria-label": "\u5206\u4EAB",
+                  title: canShare.value ? "\u5206\u4EAB" : "\u5F53\u524D\u6B4C\u66F2\u65E0\u6CD5\u5206\u4EAB",
+                  disabled: !canShare.value,
+                  onClick: shareTrack
+                },
+                h2(
+                  "svg",
+                  {
+                    viewBox: "0 0 24 24",
+                    fill: "none",
+                    stroke: "currentColor",
+                    "stroke-width": "2",
+                    "stroke-linecap": "round",
+                    "stroke-linejoin": "round"
+                  },
+                  h2("path", {
+                    d: "M3 12a3 3 0 1 0 6 0a3 3 0 1 0-6 0m12-6a3 3 0 1 0 6 0a3 3 0 1 0-6 0m0 12a3 3 0 1 0 6 0a3 3 0 1 0-6 0m-6.3-7.3l6.6-3.4m-6.6 6l6.6 3.4"
+                  })
+                )
               )
-            ) : null
+            ] : null
           )
         ]) : null
       ]);
