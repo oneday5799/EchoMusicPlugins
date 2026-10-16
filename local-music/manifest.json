@@ -1,0 +1,18 @@
+{
+  "id": "local-music",
+  "name": "本地音乐",
+  "version": "0.1.6",
+  "description": "播放本地文件夹中的音乐。",
+  "author": "stinaCN",
+  "icon": "icon.svg",
+  "main": "index.js",
+  "capabilities": {
+    "localFiles": true,
+    "audioSource": true,
+    "lyrics": true,
+    "kugouApi": true
+  },
+  "requires": {
+    "echoMusicVersion": ">=2.3.2-beta.13"
+  }
+}

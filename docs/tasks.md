@@ -101,7 +101,7 @@ retention: "action-required"
 - `error`：手动关闭。
 - `aborted`：展示 3 秒后自动清理。
 
-任务中心会为手动保留的终态提供统一“关闭”按钮。
+任务中心会为手动保留的终态提供统一“移除记录”按钮。
 
 ### 自定义策略
 
@@ -155,6 +155,8 @@ task.update({
   progress: { percent: 60, label: "正在同步" },
 });
 ```
+
+`percent` 可省略：提供有效的 `done` 和大于零的 `total` 时，任务中心会计算百分比；数量未知的运行中任务显示不确定进度条。`label` 用于显示插件自己的进度说明。
 
 ### finish(status, patch?)
 
