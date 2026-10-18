@@ -17,3 +17,13 @@ apple-music-style/index.css
 apple-music-style/preview-datauri.txt
 apple-music-style/style.merged.css
 apple-music-style.zip
+
+# AV3A 解码器：本地开发中，整个插件及其配套脚本/测试暂不入库
+# （运行时分发载荷尤其不能入库：EchoMusic 解压整个插件源仓库时上限 80 MB，
+#   两套 ffmpeg 会顶破）
+av3a-decoder/
+.runtime-payload/
+scripts/build-av3a-runtime.mjs
+tests/_av3a-ffmpeg-check.mjs
+tests/_av3a-integration.mjs
+tests/av3a-decoder.test.mjs
