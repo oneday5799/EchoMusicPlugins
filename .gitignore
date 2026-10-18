@@ -10,6 +10,9 @@ team-pool-worker/.wrangler/
 .workbuddy/
 .workbuddy-ai/
 
+# 本地排查用工具（个人诊断脚本，不随仓库分发）
+auto-team-vip/tools/
+
 # esbuild 构建副产物（宿主只加载 manifest 声明的 style.css）
 apple-music-style/index.css
 
