@@ -624,13 +624,20 @@
   gap: 8px;
   transition: opacity 0.2s ease;
 }
+/* 尺寸跟随宿主按钮体系：--button-height 由宿主 buttons.css 在 :root 定义，
+   等于 --control-height-default，宿主调整控制高度时本插件自动同步。
+   变量经 DOM 继承生效（工具组已 Teleport 到宿主容器内），不依赖类名或
+   样式表注入顺序；旧宿主没有该变量时回落到 36px。 */
 .amms-comment-btn,
 .amms-share-btn {
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
+  flex-shrink: 0;
+  width: var(--button-height, 36px);
+  height: var(--button-height, 36px);
+  min-height: var(--button-height, 36px);
   padding: 0;
   border: 0;
   border-radius: var(--radius-control);
