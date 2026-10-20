@@ -531,6 +531,15 @@
         "library",
         "player"
       ]
+    },
+    {
+      "id": "volume-wheel",
+      "path": "",
+      "repo": "https://github.com/EchoMusic-org/volume-wheel",
+      "homepage": "https://github.com/EchoMusic-org/volume-wheel",
+      "tags": [
+        "volume"
+      ]
     }
   ]
 }
