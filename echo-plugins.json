@@ -540,6 +540,20 @@
       "tags": [
         "volume"
       ]
+    },
+    {
+      "id": "echo-smartisan-plugin",
+      "name": "Echo Smartisan",
+      "description": "将 EchoMusic 界面改为Smartisan(锤子拟物)风格",
+      "author": "天影大侠",
+      "path": "",
+      "repo": "https://github.com/SkyShadowHero/echo-smartisan-plugin",
+      "homepage": "https://github.com/SkyShadowHero/echo-smartisan-plugin",
+      "tags": [
+        "appearance",
+        "smartisan",
+        "theme"
+      ]
     }
   ]
 }
