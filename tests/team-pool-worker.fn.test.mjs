@@ -12,9 +12,9 @@ const { eq, show, report } = makeAssert();
 const core = await loadFragment(fileURLToPath(new URL("../team-pool-worker/worker.js", import.meta.url)), {
   from: 'const SCHEMA_VERSION = "3";',
   to: "// ---------- Durable Object ----------",
-  exports: ["versionGte", "clampMemberCount", "cleanStr", "sanitizeMembers"],
+  exports: ["versionGte", "clampMemberCount", "cleanStr", "sanitizeMembers", "refillTokens"],
 });
-const { versionGte, clampMemberCount, cleanStr, sanitizeMembers } = core;
+const { versionGte, clampMemberCount, cleanStr, sanitizeMembers, refillTokens } = core;
 
 // ================= versionGte =================
 show("versionGte —— 版本门禁比较");
@@ -66,17 +66,21 @@ eq("userid 超 32 截断", sanitizeMembers([{ userid: "9".repeat(50) }])[0].user
 eq("nick 超 48 截断", sanitizeMembers([{ userid: "1", nick: "字".repeat(80) }])[0].nick.length, 48);
 
 // ================= 令牌桶时序模拟 =================
-// 逐字复刻 worker.js 的 _checkRate：突发 RATE_BURST=5、持续 RATE_REFILL_PER_SEC=1。
+// 直接调用 worker.js 的 refillTokens（不再手抄算法，避免实现改动后测试继续通过）。
+// 突发 RATE_BURST=5、持续 RATE_REFILL_PER_SEC=1。
 // 目的：确认插件端单轮流程的正常/重试路径不会触发 429（时间轴一律用**毫秒**，
 // 首次版本误用秒导致结论反转）。
 show("令牌桶 —— 突发 5 / 持续 1 req/s");
 const BURST = 5, REFILL = 1, LATENCY = 150; // 每次请求往返按 150ms 估
+eq("refillTokens：满桶不溢出", refillTokens(BURST, 0, 100_000), BURST);
+eq("refillTokens：1 秒补 1 个", refillTokens(0, 0, 1000), 1);
+eq("refillTokens：0.5 秒补 0.5", refillTokens(0, 0, 500), 0.5);
 function runFlow(requests, opts = {}) {
   const { retry5xx = false, retryDelay = 500, gapBetweenAttempts = 0, startAt = 0 } = opts;
   let tokens = BURST, last = 0, t = startAt, n = 0, hits = 0;
   const marks = [];
   const send = () => {
-    tokens = Math.min(BURST, tokens + ((t - last) / 1000) * REFILL);
+    tokens = refillTokens(tokens, last, t);
     last = t; n++;
     if (tokens < 1) { hits++; marks.push(`t=${(t / 1000).toFixed(2)}s 第${n}个 → 429`); }
     else tokens -= 1;

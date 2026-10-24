@@ -17,8 +17,12 @@ const COOLDOWN_INVALID_MS = 24 * 3_600_000; // invalid 冷却（码无效无快�
 const RATE_BURST = 5;                       // 令牌桶：突发
 const RATE_REFILL_PER_SEC = 1;              // 令牌桶：持续
 const WAITING_ACTIVE_MS = 30 * 60_000;      // waiting 统计的活跃窗口
+const USER_TOUCH_MS = 10 * 60_000;          // users.last_seen_at 最短刷新间隔（条件更新，避免每快照都写）
 const CLEANUP_INTERVAL_MS = 24 * 3_600_000; // 每日清理
 const DATA_RETENTION_MS = 30 * 24 * 3_600_000;
+const TEAM_REFRESH_MS = 3_600_000;          // 队伍定期刷新间隔（staleness 仍由 FRESH_CUTOFF_MS 判定）
+const TERMINAL_LEASE_TTL_MS = 3_600_000;    // failed/expired 租约保留时长；confirmed 仍保留 30 天
+const PRUNE_INTERVAL_MS = 3_600_000;        // 终态租约清理检查周期
 const EVENTS_KEEP = 500;                    // 审计环形日志容量
 const MAX_BODY_SIZE = 4096;
 
@@ -46,6 +50,11 @@ function versionGte(a, b) {
   if (a1 !== b1) return a1 > b1;
   if (a2 !== b2) return a2 > b2;
   return a3 >= b3;
+}
+
+// 令牌桶补充（纯函数，供 _checkRate 与单测共用）
+function refillTokens(tokens, lastMs, nowMs) {
+  return Math.min(RATE_BURST, tokens + ((nowMs - lastMs) / 1000) * RATE_REFILL_PER_SEC);
 }
 
 function clampMemberCount(n) {
@@ -171,9 +180,33 @@ export class PeriodPool extends DurableObject {
       );
       CREATE INDEX IF NOT EXISTS idx_teams_captain ON teams(captain_uid);
       CREATE INDEX IF NOT EXISTS idx_teams_open    ON teams(status, snapshot_at);
+      -- 2026-10-24：租约查询索引。清扫走 (status, expires_at) 范围，
+      -- 选队/在途统计走 (code, status, expires_at)，避免全表扫描放大读行。
+      CREATE INDEX IF NOT EXISTS idx_leases_status_expiry      ON leases(status, expires_at);
+      CREATE INDEX IF NOT EXISTS idx_leases_code_status_expiry ON leases(code, status, expires_at);
     `);
+    // 清理计时锚点持久化在 meta：DO 被驱逐/重建后不会把每日清理无限顺延
+    // （若只放内存，每次唤醒都重置为 now，活跃期清理永远等不到）。
+    const now = Date.now();
+    const metaRows = sql
+      .exec(`SELECT key, value FROM meta WHERE key IN ('last_daily_at', 'last_prune_at')`)
+      .toArray();
+    const metaMap = new Map(metaRows.map((r) => [String(r.key), Number(r.value)]));
+    for (const key of ["last_daily_at", "last_prune_at"]) {
+      if (!metaMap.has(key)) {
+        metaMap.set(key, now);
+        sql.exec(
+          `INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING`,
+          key, String(now)
+        );
+      }
+    }
+    this._meta = {
+      lastDailyAt: metaMap.get("last_daily_at"),
+      lastPruneAt: metaMap.get("last_prune_at"),
+    };
     if ((await this.ctx.storage.getAlarm()) === null) {
-      await this.ctx.storage.setAlarm(Date.now() + CLEANUP_INTERVAL_MS);
+      await this._scheduleNextAlarm();
     }
   }
 
@@ -187,7 +220,7 @@ export class PeriodPool extends DurableObject {
     return this.ctx.storage.sql.exec(query, ...params);
   }
 
-  _event(kind, uid, code, detail) {
+  _event(kind, uid, code, detail, count = 1) {
     try {
       this._exec(
         `INSERT INTO events (ts, kind, uid, code, detail) VALUES (?, ?, ?, ?, ?)`,
@@ -198,15 +231,24 @@ export class PeriodPool extends DurableObject {
       // 2026-09-15 修复：events 是环形日志，实测高流量下仅覆盖约 25 分钟，
       // 使 health() 的 events_24h 统计严重失真（anomalies/auth_fail 恒为 0）。
       // 另记小时桶（行数降到 kind × 24 量级）供 24h 聚合 O(1) 扫描。
+      // count 用于"一次事件代表 N 条记录"的场景（如一次清扫回收 N 条租约）。
       const bucket = new Date().toISOString().slice(0, 13); // YYYY-MM-DDTHH（UTC，字符串比较即时间比较）
       this._exec(
-        `INSERT INTO event_hourly (kind, bucket, n) VALUES (?, ?, 1)
-         ON CONFLICT(kind, bucket) DO UPDATE SET n = n + 1`,
-        kind, bucket
+        `INSERT INTO event_hourly (kind, bucket, n) VALUES (?, ?, ?)
+         ON CONFLICT(kind, bucket) DO UPDATE SET n = n + excluded.n`,
+        kind, bucket, Math.max(1, Number(count) || 1)
       );
     } catch {
       // 审计失败不影响主流程
     }
+  }
+
+  _setMeta(key, value) {
+    this._exec(
+      `INSERT INTO meta (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      key, String(value)
+    );
   }
 
   _newToken() {
@@ -217,8 +259,9 @@ export class PeriodPool extends DurableObject {
 
   // 身份校验：uid 已存在则 token 必须精确匹配（永不重签，防劫持）；
   // 仅 snapshot（issue=true）允许为不存在的 uid 签发新 token（新用户 / 新期次空表）。
+  // 返回值附带 last_joined_code，省去 join/status 的二次查询。
   _auth(uid, token, { issue = false } = {}) {
-    const rows = this._sql(`SELECT token FROM users WHERE uid = ?`, uid);
+    const rows = this._sql(`SELECT token, last_joined_code FROM users WHERE uid = ?`, uid);
     if (rows.length === 0) {
       if (!issue) {
         return { ok: false, status: 401, error: "unauthorized", message: "身份不存在或已过期，请先上报状态" };
@@ -229,43 +272,57 @@ export class PeriodPool extends DurableObject {
         `INSERT INTO users (uid, token, last_joined_code, created_at, last_seen_at) VALUES (?, ?, '', ?, ?)`,
         uid, fresh, now, now
       );
-      return { ok: true, token: fresh };
+      return { ok: true, token: fresh, lastJoined: "" };
     }
     const stored = String(rows[0].token ?? "");
     if (!token || token !== stored) {
-      this._event("auth", uid, null, "token_mismatch");
+      // 鉴权失败事件是写放大面（join/result/status 都是先鉴权后限速，token 错误会绕过限速）。
+      // 内存 60s + meta 单行兜底（跨 DO 驱逐仍生效）；不做 events 表扫描——
+      // 无索引的 events 扫描（≤500 行）在攻击下反而比 4 行写更贵。
+      const now = Date.now();
+      const last = Number(this._authFailAt || 0);
+      let recent = now - last < 60_000;
+      if (!recent) {
+        const metaRows = this._sql(`SELECT value FROM meta WHERE key = 'last_auth_event_at'`);
+        const persisted = metaRows.length > 0 ? Number(metaRows[0].value) : 0;
+        recent = now - persisted < 60_000;
+        if (recent) this._authFailAt = persisted;
+      }
+      if (!recent) {
+        this._authFailAt = now;
+        this._setMeta("last_auth_event_at", now);
+        this._event("auth", uid, null, "token_mismatch");
+      }
       return { ok: false, status: 401, error: "unauthorized", message: "身份校验失败，本期码池功能停用（下期自动恢复）" };
     }
-    return { ok: true, token: stored };
+    return { ok: true, token: stored, lastJoined: String(rows[0].last_joined_code ?? "") };
   }
 
-  // 令牌桶限速：突发 RATE_BURST、持续 RATE_REFILL_PER_SEC，应用到全部 v2 客户端端点
+  // 令牌桶限速：突发 RATE_BURST、持续 RATE_REFILL_PER_SEC，应用到全部 v2 客户端端点。
+  // 2026-10-24：改为实例内存桶（原 rate_limit 表每请求一次读 + 一次写，200 台设备约 5.8 万写/天）。
+  // 取舍：DO 被驱逐后桶重置为突发 5，限速只是"尽力而为"，硬边界是 Cloudflare WAF。
   _checkRate(uid) {
     const now = Date.now();
-    const rows = this._sql(`SELECT tokens, updated_at FROM rate_limit WHERE uid = ?`, uid);
-    let tokens = rows.length > 0 ? Number(rows[0].tokens) : RATE_BURST;
-    const last = rows.length > 0 ? Number(rows[0].updated_at) : now;
-    tokens = Math.min(RATE_BURST, tokens + ((now - last) / 1000) * RATE_REFILL_PER_SEC);
+    if (!this._rateBuckets) this._rateBuckets = new Map();
+    const buckets = this._rateBuckets;
+    const prev = buckets.get(uid);
+    let tokens = prev ? refillTokens(prev.tokens, prev.last, now) : RATE_BURST;
     if (tokens < 1) {
-      this._exec(
-        `INSERT INTO rate_limit (uid, tokens, updated_at) VALUES (?, ?, ?)
-         ON CONFLICT(uid) DO UPDATE SET tokens = excluded.tokens, updated_at = excluded.updated_at`,
-        uid, tokens, now
-      );
-      // 限速事件每 uid 每分钟至多记一条，防止刷掉审计环形日志
-      const recent = this._sql(
-        `SELECT 1 FROM events WHERE kind = 'rate' AND uid = ? AND ts > ? LIMIT 1`,
-        uid, now - 60_000
-      );
-      if (recent.length === 0) this._event("rate", uid, null, "rate_limited");
+      // 限速事件全局 60s 至多一条，防止刷掉审计环形日志（原实现每 uid 一次 SQL 查询）
+      if (!this._rateWarnAt || now - this._rateWarnAt >= 60_000) {
+        this._rateWarnAt = now;
+        this._event("rate", uid, null, "rate_limited");
+      }
+      buckets.set(uid, { tokens, last: now });
       return false;
     }
     tokens -= 1;
-    this._exec(
-      `INSERT INTO rate_limit (uid, tokens, updated_at) VALUES (?, ?, ?)
-       ON CONFLICT(uid) DO UPDATE SET tokens = excluded.tokens, updated_at = excluded.updated_at`,
-      uid, tokens, now
-    );
+    buckets.set(uid, { tokens, last: now });
+    // 内存桶容量保护：活跃 uid 数超过 2000 时清理 10 分钟未活动的条目
+    if (buckets.size > 2000) {
+      for (const [k, v] of buckets) if (now - v.last > 600_000) buckets.delete(k);
+      if (buckets.size > 4000) buckets.clear();
+    }
     return true;
   }
 
@@ -279,7 +336,7 @@ export class PeriodPool extends DurableObject {
         now, now
       );
       const n = Number(cursor?.rowsWritten ?? 0);
-      if (n > 0) this._event("expire", null, null, "expired_leases=" + n);
+      if (n > 0) this._event("expire", null, null, "expired_leases=" + n, n);
     } catch (e) {
       // 清扫失败不影响主流程（查询侧仍以 expires_at 时间戳兜底）。
       // 2026-09-15：原为静默 catch，导致清扫失效长期不可见；改为留下可观测痕迹。
@@ -318,15 +375,20 @@ export class PeriodPool extends DurableObject {
     };
   }
 
-  // 快照 upsert 队伍：member_count 以酷狗观测值为权威，覆盖更新；
-  // 新快照代表更新的观测，清除失败冷却（"新快照立即复活"）。
+  // 快照 upsert 队伍：member_count 以酷狗观测值为权威，覆盖更新。
+  // 2026-10-24 写放大治理：
+  //   - 观测无变化时不写；仅每 TEAM_REFRESH_MS 刷新一次 snapshot_at（保活，避免被判 stale）。
+  //   - 冷却清除只认"新证据"：成员变化 / joined 快照 / 已观测到 ≥2 人。
+  //     单纯周期刷新不再复活 invalid 的 24h 冷却（原实现每次快照都 fail_until=0，冷却形同虚设）。
+  //   - full 队不会再有新成员，无变化时连周期刷新也跳过。
   // members（成员名单观测值）仅在快照携带时覆盖，缺省保留旧值（部分响应可能不带 member_list）。
-  _upsertTeam({ code, captain, memberCount, members, source }, now) {
+  _upsertTeam({ code, captain, memberCount, members, source, isJoined }, now) {
     const mc = clampMemberCount(memberCount);
     const status = mc >= TEAM_CAPACITY ? "full" : "open";
     const roster = sanitizeMembers(members);
     const rows = this._sql(
-      `SELECT captain_uid, member_count, status FROM teams WHERE code = ?`, code
+      `SELECT captain_uid, member_count, status, members_json, snapshot_at, fail_until FROM teams WHERE code = ?`,
+      code
     );
     if (rows.length === 0) {
       this._exec(
@@ -342,20 +404,31 @@ export class PeriodPool extends DurableObject {
       // 照实覆盖（酷狗仍是真相源），记 events 供排查伪造/故障
       this._event("error", source, code, `member_count_decrease ${prevMc}->${mc}`);
     }
-    const newCaptain = captain || String(rows[0].captain_uid ?? "");
-    if (roster) {
-      this._exec(
-        `UPDATE teams SET captain_uid = ?, member_count = ?, members_json = ?, status = ?, snapshot_at = ?, fail_until = 0, updated_at = ?
-         WHERE code = ?`,
-        newCaptain, mc, JSON.stringify(roster), status, now, now, code
-      );
-    } else {
-      this._exec(
-        `UPDATE teams SET captain_uid = ?, member_count = ?, status = ?, snapshot_at = ?, fail_until = 0, updated_at = ?
-         WHERE code = ?`,
-        newCaptain, mc, status, now, now, code
-      );
+    const prevCaptain = String(rows[0].captain_uid ?? "");
+    const newCaptain = captain || prevCaptain;
+    const prevRoster = String(rows[0].members_json ?? "[]");
+    const rosterJson = roster ? JSON.stringify(roster) : null;
+    const rosterChanged = rosterJson !== null && rosterJson !== prevRoster;
+    const changed =
+      mc !== prevMc || status !== String(rows[0].status) || newCaptain !== prevCaptain || rosterChanged;
+    const failUntil = Number(rows[0].fail_until) || 0;
+    const clearCooldown = failUntil > 0 && (changed || isJoined || mc >= 2);
+    const due = now - Number(rows[0].snapshot_at) >= TEAM_REFRESH_MS;
+    // full 队无变化时不再做周期性保活刷新（不参与匹配，stale 与否无意义）
+    if (!changed && !clearCooldown && !(due && status !== "full")) return;
+
+    if (!changed && !due) {
+      // 只清冷却，不动观测值与 snapshot_at（不把"没有新观测"伪装成新快照）
+      this._exec(`UPDATE teams SET fail_until = 0, updated_at = ? WHERE code = ?`, now, code);
+      return;
     }
+    this._exec(
+      `UPDATE teams SET captain_uid = ?, member_count = ?, members_json = ?, status = ?,
+              snapshot_at = ?, fail_until = ?, updated_at = ?
+       WHERE code = ?`,
+      newCaptain, mc, rosterJson !== null ? rosterJson : prevRoster, status,
+      now, changed || clearCooldown ? 0 : failUntil, now, code
+    );
   }
 
   // ---------- v2 API ----------
@@ -374,11 +447,14 @@ export class PeriodPool extends DurableObject {
     if (!auth.ok) return auth;
 
     const now = Date.now();
-    this._sweepExpired(); // 懒清扫与其他 v2 端点对齐（过期租约的 expire 审计与状态归档及时性）
-    this._exec(`UPDATE users SET last_seen_at = ? WHERE uid = ?`, now, uid);
-
+    // 2026-10-24：请求热路径不再做全表清扫。原实现每个快照都扫全表 leases（200 台设备约
+    // 6000 行租约时，单次快照约 6300 行读，占读额度 90%+）。过期状态由 alarm/health/admin
+    // 回收；所有业务查询本身都以 expires_at 判定，不依赖归档状态。
     const created = body?.created && body.created.code ? body.created : null;
     const joined = body?.joined && body.joined.code ? body.joined : null;
+    // joined_checked：客户端是否真的拿到了 my_join_team_list。
+    // 老客户端不传 → false：绝不清空 last_joined_code（酷狗不支持退队，误清会造成重复分配）。
+    const joinedChecked = body?.joined_checked === true;
 
     if (created) {
       this._upsertTeam(
@@ -388,6 +464,7 @@ export class PeriodPool extends DurableObject {
           memberCount: created.member_count,
           members: created.members,
           source: uid,
+          isJoined: true,
         },
         now
       );
@@ -402,10 +479,16 @@ export class PeriodPool extends DurableObject {
           memberCount: joined.member_count,
           members: joined.members,
           source: uid,
+          isJoined: true,
         },
         now
       );
-      this._exec(`UPDATE users SET last_joined_code = ? WHERE uid = ?`, code, uid);
+      // 合并条件更新：状态无变化时 0 写，有变化时最多 1 行
+      this._exec(
+        `UPDATE users SET last_seen_at = ?, last_joined_code = ?
+         WHERE uid = ? AND (last_seen_at < ? OR last_joined_code <> ?)`,
+        now, code, uid, now - USER_TOUCH_MS, code
+      );
       // 迟到成功确认：pending/success/expired 租约与快照 joined 相符 → confirmed（账目修正）
       const cursor = this._exec(
         `UPDATE leases SET status = 'confirmed', resolved_at = ?
@@ -415,16 +498,25 @@ export class PeriodPool extends DurableObject {
       if (Number(cursor?.rowsWritten ?? 0) > 0) {
         this._event("snapshot", uid, code, "lease_confirmed_late");
       }
+    } else if (joinedChecked) {
+      this._exec(
+        `UPDATE users SET last_seen_at = ?, last_joined_code = ''
+         WHERE uid = ? AND (last_seen_at < ? OR last_joined_code <> '')`,
+        now, uid, now - USER_TOUCH_MS
+      );
     } else {
-      this._exec(`UPDATE users SET last_joined_code = '' WHERE uid = ?`, uid);
+      // 老客户端 / 字段缺失：只刷新活跃时间，不清 last_joined_code
+      this._exec(
+        `UPDATE users SET last_seen_at = ? WHERE uid = ? AND last_seen_at < ?`,
+        now, uid, now - USER_TOUCH_MS
+      );
     }
 
-    this._event(
-      "snapshot", uid,
-      created?.code ? cleanStr(created.code, 64) : null,
-      `created_mc=${created ? clampMemberCount(created.member_count) : 0};joined_mc=${joined ? clampMemberCount(joined.member_count) : 0}`
-    );
-    return { ok: true, token: auth.token, pool: this._poolStats() };
+    // 2026-10-24：不再为每次快照写审计事件（每次 4 行写，且 health 并不消费 snapshot 事件）。
+    const result = { ok: true, token: auth.token };
+    // pool 统计需要扫 teams/users，改为 opt-in（运维脚本传 stats:true），插件热路径不传。
+    if (body?.stats === true) result.pool = this._poolStats();
+    return result;
   }
 
   // POST /v2/join —— 申请分配（幂等；快满优先 + FIFO）
@@ -440,15 +532,25 @@ export class PeriodPool extends DurableObject {
     }
 
     const now = Date.now();
-    this._sweepExpired();
+    // 2026-10-24：热路径不做全表清扫；过期租约由 expires_at 条件与 alarm 兜底。
+    // last_joined_code 由 _auth 一并返回，省一次 SELECT。
 
     // 快照观测优先于在途租约（2026-09-12 顺序对调）：最近快照已加入 → already_joined
     // （附该队码，供客户端校正本地状态）。避免 120s 租约残留窗口内返回旧租约、
     // 覆盖"已加入"这一快照事实。
-    const userRows = this._sql(`SELECT last_joined_code FROM users WHERE uid = ?`, uid);
-    const lastJoined = userRows.length > 0 ? String(userRows[0].last_joined_code ?? "") : "";
+    const lastJoined = String(auth.lastJoined ?? "");
     if (lastJoined) {
-      return { ok: true, code: lastJoined, reason: "already_joined" };
+      // 队伍行可能已被站长删除或每日清理。老客户端不会清空 last_joined_code，
+      // 若继续返回 already_joined 会永久卡在"已加入"；此处校验队伍存在性，
+      // 不存在则清除并走正常选队（酷狗侧仍会以 143010/143005 兜底）。
+      const teamExists = this._sql(`SELECT 1 AS x FROM teams WHERE code = ? LIMIT 1`, lastJoined);
+      if (teamExists.length > 0) {
+        return { ok: true, code: lastJoined, reason: "already_joined" };
+      }
+      this._exec(
+        `UPDATE users SET last_joined_code = '' WHERE uid = ? AND last_joined_code = ?`,
+        uid, lastJoined
+      );
     }
 
     // 客户端本轮流程内已失败的队（exclude_codes）：仅本次选队生效，不落库。
@@ -553,15 +655,26 @@ export class PeriodPool extends DurableObject {
     }
 
     const now = Date.now();
-    this._sweepExpired();
-
-    const rows = this._sql(`SELECT id, code, status FROM leases WHERE id = ? AND uid = ?`, leaseId, uid);
+    // 2026-10-24：热路径不做全表清扫。但必须显式判定过期——否则迟到的 success/failed
+    // 会把一条已过期（名额早已释放、甚至已分配给他人）的租约重新激活或触发误冷却。
+    const rows = this._sql(
+      `SELECT id, code, status, expires_at FROM leases WHERE id = ? AND uid = ?`,
+      leaseId, uid
+    );
     if (rows.length === 0) {
       return { ok: false, status: 404, error: "lease_not_found", message: "租约不存在" };
     }
     const lease = rows[0];
     if (String(lease.status) !== "pending") {
       return { ok: true }; // 重复回报幂等忽略
+    }
+    if (Number(lease.expires_at) <= now) {
+      // 过期租约归档为 expired（条件更新，避免覆盖并发确认）；结果幂等忽略。
+      this._exec(
+        `UPDATE leases SET status = 'expired', resolved_at = ? WHERE id = ? AND status = 'pending'`,
+        now, leaseId
+      );
+      return { ok: true };
     }
     const code = String(lease.code);
 
@@ -625,7 +738,7 @@ export class PeriodPool extends DurableObject {
     }
 
     const now = Date.now();
-    this._sweepExpired();
+    // 2026-10-24：热路径不做全表清扫；last_joined_code 由 _auth 一并返回。
 
     const createdRows = this._sql(
       `SELECT code, member_count, status, snapshot_at FROM teams WHERE captain_uid = ? ORDER BY created_at DESC LIMIT 1`,
@@ -640,8 +753,7 @@ export class PeriodPool extends DurableObject {
       myTeam = { code: String(r.code), member_count: Number(r.member_count), status: st };
     }
 
-    const userRows = this._sql(`SELECT last_joined_code FROM users WHERE uid = ?`, uid);
-    const lastJoined = userRows.length > 0 ? String(userRows[0].last_joined_code ?? "") : "";
+    const lastJoined = String(auth.lastJoined ?? "");
     let joinedTeam = null;
     if (lastJoined) {
       const r = this._sql(`SELECT member_count FROM teams WHERE code = ?`, lastJoined);
@@ -668,48 +780,66 @@ export class PeriodPool extends DurableObject {
     return { ok: true, my_team: myTeam, joined_team: joinedTeam, active_lease: activeLease, pool: this._poolStats() };
   }
 
+  // 聚合摘要：health 与 adminData 共用（adminData 原实现又调一次 health()，造成重复计数）。
+  // 2026-10-24：teams / users / leases / events_24h 各合并为一次扫描，
+  // 原实现是 4 + 5 + 2 + 4 = 15 条 COUNT，逐条扫表。
+  _summary(now = Date.now()) {
+    const fresh = now - FRESH_CUTOFF_MS;
+    const teamRow = this._sql(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN status = 'open' AND snapshot_at > ? AND fail_until < ? THEN 1 ELSE 0 END) AS open,
+              SUM(CASE WHEN status = 'full' THEN 1 ELSE 0 END) AS full,
+              SUM(CASE WHEN status = 'open' AND snapshot_at <= ? THEN 1 ELSE 0 END) AS stale,
+              SUM(CASE WHEN fail_until >= ? THEN 1 ELSE 0 END) AS cooldown
+       FROM teams`,
+      fresh, now, fresh, now
+    )[0] || {};
+    const leaseCounts = { pending: 0, success: 0, confirmed: 0, failed: 0, expired: 0 };
+    for (const r of this._sql(`SELECT status, COUNT(*) AS c FROM leases GROUP BY status`)) {
+      const st = String(r.status);
+      if (Object.prototype.hasOwnProperty.call(leaseCounts, st)) leaseCounts[st] = Number(r.c ?? 0);
+    }
+    const userRow = this._sql(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN last_joined_code = '' AND last_seen_at > ? THEN 1 ELSE 0 END) AS waiting
+       FROM users`,
+      now - WAITING_ACTIVE_MS
+    )[0] || {};
+    // 2026-09-15 修复：events_24h 此前扫环形日志（仅保留最近 EVENTS_KEEP 条），
+    // 高流量下窗口远短于 24h，统计严重偏低甚至恒 0。改读小时桶（一次分组扫描）。
+    const since = new Date(now - 24 * 3_600_000).toISOString().slice(0, 13);
+    const hourly = new Map(
+      this._sql(`SELECT kind, SUM(n) AS c FROM event_hourly WHERE bucket >= ? GROUP BY kind`, since)
+        .map((r) => [String(r.kind), Number(r.c ?? 0)])
+    );
+    return {
+      teams: {
+        total: Number(teamRow.total ?? 0),
+        open: Number(teamRow.open ?? 0),
+        full: Number(teamRow.full ?? 0),
+        stale: Number(teamRow.stale ?? 0),
+        cooldown: Number(teamRow.cooldown ?? 0),
+      },
+      leases: leaseCounts,
+      users: {
+        total: Number(userRow.total ?? 0),
+        waiting: Number(userRow.waiting ?? 0),
+      },
+      events_24h: {
+        auth_fail: hourly.get("auth") ?? 0,
+        rate_limited: hourly.get("rate") ?? 0,
+        expired_leases: hourly.get("expire") ?? 0,
+        anomalies: hourly.get("error") ?? 0,
+      },
+    };
+  }
+
   // POST /v2/health —— 运维观测（可选）：仅聚合，不含 uid/code 明细
   async health() {
     await this._ready;
     const now = Date.now();
     this._sweepExpired();
-    const fresh = now - FRESH_CUTOFF_MS;
-    const one = (q, ...p) => Number(this._sql(q, ...p)[0]?.c ?? 0);
-    const leaseBy = (st) => one(`SELECT COUNT(*) AS c FROM leases WHERE status = ?`, st);
-    // 2026-09-15 修复：events_24h 此前扫环形日志（仅保留最近 EVENTS_KEEP 条），
-    // 高流量下窗口远短于 24h，统计严重偏低甚至恒 0。改读小时桶。
-    const since = new Date(now - 24 * 3_600_000).toISOString().slice(0, 13);
-    const cnt24 = (kind) =>
-      Number(this._sql(
-        `SELECT COALESCE(SUM(n), 0) AS c FROM event_hourly WHERE kind = ? AND bucket >= ?`,
-        kind, since
-      )[0]?.c ?? 0);
-    return {
-      ok: true,
-      teams: {
-        open: one(`SELECT COUNT(*) AS c FROM teams WHERE status = 'open' AND snapshot_at > ? AND fail_until < ?`, fresh, now),
-        full: one(`SELECT COUNT(*) AS c FROM teams WHERE status = 'full'`),
-        stale: one(`SELECT COUNT(*) AS c FROM teams WHERE status = 'open' AND snapshot_at <= ?`, fresh),
-        cooldown: one(`SELECT COUNT(*) AS c FROM teams WHERE fail_until >= ?`, now),
-      },
-      leases: {
-        pending: leaseBy("pending"),
-        success: leaseBy("success"),
-        confirmed: leaseBy("confirmed"),
-        failed: leaseBy("failed"),
-        expired: leaseBy("expired"),
-      },
-      users: {
-        total: one(`SELECT COUNT(*) AS c FROM users`),
-        waiting: one(`SELECT COUNT(*) AS c FROM users WHERE last_joined_code = '' AND last_seen_at > ?`, now - WAITING_ACTIVE_MS),
-      },
-      events_24h: {
-        auth_fail: cnt24("auth"),
-        rate_limited: cnt24("rate"),
-        expired_leases: cnt24("expire"),
-        anomalies: cnt24("error"),
-      },
-    };
+    return { ok: true, ...this._summary(now) };
   }
 
   // POST /v2/admin/data —— 站长全量观测（可选）：X-Admin-Token 门禁，只读明细。
@@ -720,8 +850,10 @@ export class PeriodPool extends DurableObject {
     this._sweepExpired();
     const fresh = now - FRESH_CUTOFF_MS;
     const iso = (t) => (Number(t) > 0 ? new Date(Number(t)).toISOString() : null);
+    // 一次聚合，供 totals 与 summary 共用（原实现：3 条 COUNT + 再调一次 health()）
+    const summary = this._summary(now);
 
-    const teamsTotal = Number(this._sql(`SELECT COUNT(*) AS c FROM teams`)[0]?.c ?? 0);
+    const teamsTotal = summary.teams.total;
     const teams = this._sql(
       `SELECT t.code, t.captain_uid, t.member_count, t.members_json, t.status, t.snapshot_at, t.fail_until, t.created_at,
               (SELECT COUNT(*) FROM leases l
@@ -749,7 +881,7 @@ export class PeriodPool extends DurableObject {
       };
     });
 
-    const usersTotal = Number(this._sql(`SELECT COUNT(*) AS c FROM users`)[0]?.c ?? 0);
+    const usersTotal = summary.users.total;
     const users = this._sql(
       `SELECT uid, last_joined_code, created_at, last_seen_at FROM users ORDER BY last_seen_at DESC LIMIT 500`
     ).map((r) => ({
@@ -759,7 +891,7 @@ export class PeriodPool extends DurableObject {
       last_seen_at_iso: iso(r.last_seen_at),
     }));
 
-    const leasesTotal = Number(this._sql(`SELECT COUNT(*) AS c FROM leases`)[0]?.c ?? 0);
+    const leasesTotal = Object.values(summary.leases).reduce((a, b) => a + b, 0);
     const leases = this._sql(
       `SELECT id, uid, code, status, assigned_at, expires_at, resolved_at FROM leases ORDER BY assigned_at DESC LIMIT 200`
     ).map((r) => ({
@@ -781,9 +913,6 @@ export class PeriodPool extends DurableObject {
       code: r.code ? String(r.code) : null,
       detail: r.detail ? String(r.detail) : null,
     }));
-
-    const summary = await this.health();
-    delete summary.ok;
 
     return {
       ok: true,
@@ -835,11 +964,16 @@ export class PeriodPool extends DurableObject {
     if (action === "delete_team") {
       const leases = this._exec(`DELETE FROM leases WHERE code = ?`, target);
       const teams = this._exec(`DELETE FROM teams WHERE code = ?`, target);
+      // 老客户端不会通过快照清空 last_joined_code；删队时一并清掉，避免它们永久卡在 already_joined
+      const cleared = this._exec(
+        `UPDATE users SET last_joined_code = '' WHERE last_joined_code = ?`, target
+      );
       const nT = Number(teams?.rowsWritten ?? 0);
       const nL = Number(leases?.rowsWritten ?? 0);
-      this._event("admin_delete", null, nT > 0 ? target : null, "team;leases=" + nL);
+      const nC = Number(cleared?.rowsWritten ?? 0);
+      this._event("admin_delete", null, nT > 0 ? target : null, "team;leases=" + nL + ";users=" + nC);
       return {
-        ok: true, action, target, deleted_teams: nT, deleted_leases: nL,
+        ok: true, action, target, deleted_teams: nT, deleted_leases: nL, cleared_users: nC,
         note: nT === 0 ? "队伍不存在（可能已删除）" : "已删除；相关用户可重新申请分配",
       };
     }
@@ -861,26 +995,47 @@ export class PeriodPool extends DurableObject {
 
   async alarm() {
     try {
+      const now = Date.now();
       this._sweepExpired();
-      const cutoff = Date.now() - DATA_RETENTION_MS;
-      this._exec(`DELETE FROM teams WHERE snapshot_at < ?`, cutoff);
-      this._exec(`DELETE FROM users WHERE last_seen_at < ?`, cutoff);
-      this._exec(`DELETE FROM leases WHERE assigned_at < ?`, cutoff);
-      this._exec(`DELETE FROM events WHERE ts < ?`, cutoff);
-      this._exec(`DELETE FROM event_hourly WHERE bucket < ?`,
-        new Date(cutoff).toISOString().slice(0, 13));
-      this._exec(`DELETE FROM rate_limit WHERE updated_at < ?`, Date.now() - 3_600_000);
-      // 判空 deleteAll 以全部业务表为准（meta 不计，随 deleteAll 一并清除，下次访问重新初始化）
-      const count = (t) => Number(this._sql(`SELECT COUNT(*) AS c FROM ${t}`)[0]?.c ?? 0);
-      const total =
-        count("users") + count("teams") + count("leases") + count("events") +
-        count("event_hourly") + count("rate_limit");
-      if (total === 0) {
-        await this.ctx.storage.deleteAll();
-        // deleteAll 后同内存实例的构造器不会重跑，立即重建表结构与 alarm，
-        // 避免残留实例收到请求时因缺表而 500（_init 幂等）
-        await this._init();
-        return;
+
+      // 终态租约清理（每小时一次）：**只删 failed/expired**。
+      // confirmed 必须保留——join 的 NOT EXISTS 依赖它防止同一用户被重复分配同一队。
+      // 用 expires_at 而非 resolved_at 做范围条件，直接命中 (status, expires_at) 索引。
+      if (now - (this._meta?.lastPruneAt || 0) >= PRUNE_INTERVAL_MS) {
+        this._exec(
+          `DELETE FROM leases WHERE status IN ('failed', 'expired') AND expires_at < ?`,
+          now - TERMINAL_LEASE_TTL_MS
+        );
+        // 清理成功后才推进时间戳：中途失败时下一次 alarm 自动重试（DELETE 幂等）
+        this._setMeta("last_prune_at", now);
+        this._meta.lastPruneAt = now;
+      }
+
+      // 每日清理（24h 一次）。原实现每次 alarm 都跑（活跃期每 2~10 分钟一次），
+      // 6 条 DELETE + 6 条 COUNT 全表扫描是继 sweep 之后最大的读放大来源。
+      if (now - (this._meta?.lastDailyAt || 0) >= CLEANUP_INTERVAL_MS) {
+        const cutoff = now - DATA_RETENTION_MS;
+        this._exec(`DELETE FROM teams WHERE snapshot_at < ?`, cutoff);
+        this._exec(`DELETE FROM users WHERE last_seen_at < ?`, cutoff);
+        this._exec(`DELETE FROM leases WHERE assigned_at < ?`, cutoff);
+        this._exec(`DELETE FROM events WHERE ts < ?`, cutoff);
+        this._exec(`DELETE FROM event_hourly WHERE bucket < ?`,
+          new Date(cutoff).toISOString().slice(0, 13));
+        this._exec(`DELETE FROM rate_limit WHERE updated_at < ?`, now - 3_600_000);
+        // 判空 deleteAll 以全部业务表为准（meta 不计，随 deleteAll 一并清除，下次访问重新初始化）
+        const count = (t) => Number(this._sql(`SELECT COUNT(*) AS c FROM ${t}`)[0]?.c ?? 0);
+        const total =
+          count("users") + count("teams") + count("leases") + count("events") +
+          count("event_hourly") + count("rate_limit");
+        if (total === 0) {
+          await this.ctx.storage.deleteAll();
+          // deleteAll 后同内存实例的构造器不会重跑，立即重建表结构与 alarm，
+          // 避免残留实例收到请求时因缺表而 500（_init 幂等）
+          await this._init();
+          return;
+        }
+        this._setMeta("last_daily_at", now);
+        this._meta.lastDailyAt = now;
       }
       await this._scheduleNextAlarm();
     } catch (e) {
@@ -894,16 +1049,23 @@ export class PeriodPool extends DurableObject {
   }
 
   async _scheduleNextAlarm() {
+    const now = Date.now();
     const rows = this._sql(
-      `SELECT MIN(expires_at) AS next FROM leases WHERE status IN ('pending', 'success')`
+      `SELECT MIN(expires_at) AS next FROM leases
+       WHERE status IN ('pending', 'success') AND expires_at > ?`,
+      now
     );
-    const nextLease = rows.length > 0 ? Number(rows[0].next ?? 0) : 0;
-    const daily = Date.now() + CLEANUP_INTERVAL_MS;
-    const next = nextLease > Date.now() ? Math.min(nextLease, daily) : daily;
-    // 与现有 alarm 取 min：覆盖式 setAlarm 会把更早租约的到期回收推迟到更晚
-    // （正确性由懒清扫+时间戳判定兜底，此处保证 alarm 回收与 expire 审计的及时性）
+    const nextLease = rows.length > 0 && rows[0].next != null ? Number(rows[0].next) : 0;
+    // 锚定到上次**成功**清理时间：若用 now + 24h，租约 alarm（2~10 分钟一次）会不断
+    // 把每日清理往后推，空闲后可能晚二十多个小时才执行。
+    const nextDaily = (this._meta?.lastDailyAt || now) + CLEANUP_INTERVAL_MS;
+    const nextPrune = (this._meta?.lastPruneAt || now) + PRUNE_INTERVAL_MS;
+    let next = Math.min(nextDaily, nextPrune);
+    if (nextLease > 0) next = Math.min(next, nextLease);
+    if (next <= now) next = now + 1_000;
     const existing = await this.ctx.storage.getAlarm();
-    await this.ctx.storage.setAlarm(existing != null ? Math.min(existing, next) : next);
+    // 只在更早时才 setAlarm：setAlarm 本身算 1 行写，原实现即使 existing 更早也重复写
+    if (existing == null || next < existing) await this.ctx.storage.setAlarm(next);
   }
 }
 

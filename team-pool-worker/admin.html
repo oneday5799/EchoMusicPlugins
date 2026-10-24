@@ -237,9 +237,16 @@ $("btnAdm").addEventListener("click", async () => {
 });
 
 let autoTimer = null;
+// 2026-10-24：30s 自动刷新会把 DO 读行放大到 ~860 万/天（超过免费 500 万）。
+// 改为 5 分钟，且页面不可见时跳过（浏览器后台标签页不消耗额度）。
+const AUTO_REFRESH_MS = 5 * 60_000;
 $("auto").addEventListener("change", () => {
   clearInterval(autoTimer);
-  if ($("auto").checked) autoTimer = setInterval(() => query("data"), 30_000);
+  if ($("auto").checked) {
+    autoTimer = setInterval(() => {
+      if (!document.hidden) query("data");
+    }, AUTO_REFRESH_MS);
+  }
 });
 
 function esc(s) {

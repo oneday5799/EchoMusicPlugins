@@ -2,7 +2,9 @@ name = "echo-team-pool"
 main = "worker.js"
 compatibility_date = "2026-09-04"
 compatibility_flags = ["nodejs_compat"]
-workers_dev = true
+# 2026-10-24：关闭 workers.dev 入口。它是唯一完全绕开 oneday.vip WAF / 限流 / 地域规则的
+# 公开入口（插件只使用自定义域），留着只会给扫描器多一个不受限的写入通道。
+workers_dev = false
 preview_urls = false
 
 routes = [

@@ -17,6 +17,9 @@
   S6 F3 口径一致性：_inflightCount / 选队 avail / adminData inflight 三处同口径
   S7 F5 回归：环形日志会丢历史，小时桶不丢
   S8 追加式 DDL 幂等（且不 bump SCHEMA_VERSION）
+  S9 终态租约清理：只删 failed/expired（confirmed 必须保留）
+  S10 查询计划：sweep / 选队命中新索引，不再全表扫描 leases
+  S11 already_joined 的队伍行必须存在（删队后不得永久卡死）
 """
 
 import os
@@ -77,10 +80,13 @@ DDL_APPEND = sql_around("CREATE TABLE IF NOT EXISTS event_hourly")
 SQL_CANDIDATES = fill(sql_after("const candidates = this._sql("))
 SQL_INFLIGHT = sql_after("_inflightCount(code, excludeLeaseId) {")
 SQL_ADMIN_INFLIGHT = sql_after("const teams = this._sql(")
-SQL_CNT24 = sql_after("const cnt24 = (kind) =>")
-SQL_EVENT_HOURLY = sql_around("INSERT INTO event_hourly (kind, bucket, n) VALUES (?, ?, 1)")
+SQL_HOURLY_24 = sql_after("const hourly = new Map(")
+SQL_EVENT_HOURLY = sql_around("INSERT INTO event_hourly (kind, bucket, n)")
 SQL_SWEEP = sql_after("_sweepExpired() {")
 SQL_ALARM_HOURLY_PURGE = sql_around("DELETE FROM event_hourly WHERE bucket < ?")
+SQL_TERMINAL_PRUNE = sql_around("DELETE FROM leases WHERE status IN ('failed', 'expired')")
+SQL_TEAM_EXISTS = sql_after("const teamExists = this._sql(")
+SQL_CLEAR_JOINED = sql_around("UPDATE users SET last_joined_code = '' WHERE uid = ? AND last_joined_code = ?")
 
 # 修复前的旧口径（仅作为回归基线，用于证明"改前确实会出问题"）
 SQL_CANDIDATES_OLD = SQL_CANDIDATES.replace(
@@ -136,6 +142,11 @@ def add_lease(db, lid, uid, code, status, expires_at, assigned_at=None):
            VALUES (?, ?, ?, ?, ?, ?, NULL)""",
         (lid, uid, code, status, assigned_at if assigned_at is not None else NOW, expires_at),
     )
+
+
+def cnt24(db, kind, since):
+    """按 kind 从小时桶聚合（复刻 _summary 的分组查询）。"""
+    return dict(db.execute(SQL_HOURLY_24, (since,)).fetchall()).get(kind, 0)
 
 
 def candidates(db, uid, exclude=None, now=None):
@@ -314,17 +325,18 @@ for i in range(2403):
                  (NOW - 2403 + i,))
     db14.execute("DELETE FROM events WHERE id <= (SELECT MAX(id) FROM events) - ?", (EVENTS_KEEP,))
     bucket = "2026-09-15T00"
-    db14.execute(SQL_EVENT_HOURLY, ("auth", bucket))
+    db14.execute(SQL_EVENT_HOURLY, ("auth", bucket, 1))
 eq("环形表只剩 500 条", db14.execute("SELECT COUNT(*) FROM events").fetchone()[0], 500)
-eq("小时桶完整累计 2403 次", db14.execute(
-    SQL_CNT24, ("auth", "2026-09-15T00")).fetchone()[0], 2403)
+eq("小时桶完整累计 2403 次", cnt24(db14, "auth", "2026-09-15T00"), 2403)
 eq("修复前口径：环形表统计仅 500（严重失真）", db14.execute(
     "SELECT COUNT(*) AS c FROM events WHERE kind = 'auth' AND ts > ?", (NOW - 24 * 3_600_000,)).fetchone()[0], 500)
-eq("小时桶按 kind 区分", db14.execute(SQL_CNT24, ("error", "2026-09-15T00")).fetchone()[0], 0)
-eq("小时桶窗口过滤生效（更晚的 bucket 不计入）", db14.execute(
-    SQL_CNT24, ("auth", "2026-09-15T01")).fetchone()[0], 0)
+eq("小时桶按 kind 区分", cnt24(db14, "error", "2026-09-15T00"), 0)
+eq("小时桶窗口过滤生效（更晚的 bucket 不计入）", cnt24(db14, "auth", "2026-09-15T01"), 0)
+# count 参数：一次清扫回收 N 条租约应记为 N（health.expired_leases 不再把"事件次数"当"租约条数"）
+db14.execute(SQL_EVENT_HOURLY, ("expire", "2026-09-15T00", 7))
+eq("小时桶支持 count 参数（一次事件记 N 条）", cnt24(db14, "expire", "2026-09-15T00"), 7)
 db14.execute(SQL_ALARM_HOURLY_PURGE, ("2026-09-16T00",))
-eq("alarm 清理过期桶后为 0", db14.execute(SQL_CNT24, ("auth", "2026-09-15T00")).fetchone()[0], 0)
+eq("alarm 清理过期桶后为 0", cnt24(db14, "auth", "2026-09-15T00"), 0)
 
 
 # ================= S8 追加式 DDL 幂等 =================
@@ -342,6 +354,8 @@ eq("业务表齐全", {"meta", "users", "teams", "leases", "events", "rate_limit
 idx = {r[0] for r in db15.execute(
     "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'").fetchall()}
 eq("新增索引已建立", {"idx_teams_captain", "idx_teams_open"} <= idx, True)
+eq("租约清扫/选队索引已建立",
+   {"idx_leases_status_expiry", "idx_leases_code_status_expiry"} <= idx, True)
 # event_hourly 必须在版本重建的 DROP 列表里（否则未来 bump 版本后会残留旧计数）
 eq("event_hourly 已纳入版本重建 DROP 列表", '"event_hourly"' in SRC or "'event_hourly'" in SRC, True)
 drop_line = re.search(r"for \(const t of \[(.*?)\]\)", SRC, re.S).group(1)
@@ -355,6 +369,63 @@ eq("SCHEMA_VERSION 仍为 3（未被 bump）", m_ver.group(1) if m_ver else None
 # 新增表必须走追加式 DDL 块，而不是混进版本重建的 DDL_MAIN（混进去等于要求 bump）
 eq("event_hourly 不在版本重建 DDL_MAIN 内（确认走追加式）",
    "event_hourly" in DDL_MAIN, False)
+
+
+# ================= S9 终态租约清理：只删 failed/expired =================
+show("S9 终态租约清理（failed/expired 超 1h；confirmed 必须保留）")
+db16 = new_db()
+add_lease(db16, "F1", "U1", "T", "failed", NOW - 2 * 3_600_000)
+add_lease(db16, "E1", "U2", "T", "expired", NOW - 2 * 3_600_000)
+add_lease(db16, "C1", "U3", "T", "confirmed", NOW - 2 * 3_600_000)
+add_lease(db16, "P1", "U4", "T", "pending", NOW - 2 * 3_600_000)
+add_lease(db16, "F2", "U5", "T", "failed", NOW - 60_000)  # 未超 1h，保留给迟到结果
+db16.execute(SQL_TERMINAL_PRUNE, (NOW - 3_600_000,))
+left = {r[0] for r in db16.execute("SELECT id FROM leases").fetchall()}
+eq("只删除超过 1h 的 failed/expired", left, {"C1", "P1", "F2"})
+eq("confirmed 不会被清理（join 的 NOT EXISTS 依赖它防重复分配）", "C1" in left, True)
+
+
+# ================= S10 查询计划：关键查询命中新索引 =================
+show("S10 查询计划（sweep / 选队不得全表扫描 leases）")
+db17 = new_db()
+
+
+def plan_of(sql, params=()):
+    return " | ".join(str(r[3]) for r in db17.execute("EXPLAIN QUERY PLAN " + sql, params).fetchall())
+
+
+sweep_plan = plan_of(SQL_SWEEP, (NOW, NOW))
+eq("sweep 命中 idx_leases_status_expiry", "idx_leases_status_expiry" in sweep_plan, True)
+cand_sql = fill(sql_after("const candidates = this._sql("))
+cand_plan = plan_of(cand_sql, (NOW, NOW - 6 * 3_600_000, NOW, "U1", NOW, "U1", NOW))
+eq("选队在途子查询命中 idx_leases_code_status_expiry",
+   "idx_leases_code_status_expiry" in cand_plan, True)
+eq("选队不再全表扫描 leases", "SCAN l " in cand_plan or "SCAN leases" in cand_plan, False)
+
+
+# ================= S11 already_joined 的队伍行必须存在 =================
+show("S11 last_joined_code 指向的队伍已删除时，不得永久 already_joined")
+db18 = new_db()
+db18.execute(
+    "INSERT INTO users (uid, token, last_joined_code, created_at, last_seen_at) VALUES ('U1','T','GONE',?,?)",
+    (NOW, NOW),
+)
+eq("队伍不存在 → 校验查询无结果（走清空 + 重新选队）",
+   db18.execute(SQL_TEAM_EXISTS, ("GONE",)).fetchall(), [])
+db18.execute(SQL_CLEAR_JOINED, ("U1", "GONE"))
+eq("清空后 last_joined_code 为空", db18.execute(
+    "SELECT last_joined_code FROM users WHERE uid='U1'").fetchone()[0], "")
+add_team(db18, "ALIVE", 2)
+eq("队伍存在 → 校验查询命中（返回 already_joined）",
+   len(db18.execute(SQL_TEAM_EXISTS, ("ALIVE",)).fetchall()), 1)
+# 老客户端不传 joined_checked：快照分支不得清空 last_joined_code
+db18.execute("UPDATE users SET last_joined_code = 'ALIVE' WHERE uid='U1'")
+db18.execute(
+    "UPDATE users SET last_seen_at = ? WHERE uid = ? AND last_seen_at < ?",
+    (NOW, "U1", NOW - 10 * 60_000),
+)
+eq("老客户端快照不清空 last_joined_code", db18.execute(
+    "SELECT last_joined_code FROM users WHERE uid='U1'").fetchone()[0], "ALIVE")
 
 # ================= 结果 =================
 print("\n================ 结果 ================")
