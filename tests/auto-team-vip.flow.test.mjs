@@ -23,12 +23,14 @@ export const __t = {
     lastRunAt = 0; lastSnapshotAt = 0; lastFullAt = 0; lastInactiveProbeAt = 0;
     errorSeq = 0; versionMismatchReported = false; deviceBoundToastShown = false;
     poolBackoff.step = 0; poolBackoff.nextAttemptAt = 0; pool429Until = 0;
-    disabledPeriods = new Set(); runChain = null; PLUGIN_VERSION = "1.2.2";
+    poolEmptyBackoff.step = 0; poolEmptyBackoff.nextAttemptAt = 0;
+    disabledPeriods = new Set(); runChain = null; PLUGIN_VERSION = "1.2.5";
     autoTeamRef = { value: true };   // 默认按"自动组队已开启"跑，手动模式由 setAutoTeam(false) 覆盖
   },
   get uiState() { return uiState; },
   get poolBackoff() { return poolBackoff; },
   get pool429Until() { return pool429Until; },
+  get poolEmptyBackoff() { return poolEmptyBackoff; },
   get disabledPeriods() { return disabledPeriods; },
   get lastSnapshotAt() { return lastSnapshotAt; },
   setSleep(fn) { sleep = fn; },
@@ -63,6 +65,9 @@ const TI_JOINED = { data: {
 const TI_JOINED_C9 = { data: {
   my_create_team_list: [{ team_code: "MYC", member_list: [{ userid: "U1", role: 1 }] }],
   my_join_team_list: [{ team_code: "C9", captain: "CAP", member_list: [{ userid: "CAP", role: 1 }, { userid: "U1", role: 2 }, { userid: "X", role: 2 }] }] } };
+const TI_JOIN_EMPTY = { data: {
+  my_create_team_list: [{ team_code: "MYC", member_list: [{ userid: "U1", role: 1 }] }],
+  my_join_team_list: [] } };
 const J_OK = { status: 1, error_code: 0 };
 const J_FULL = { status: 0, error_code: 143004, error_msg: "队伍已满员" };
 const J_DEV = { status: 0, error_code: 143005, error_msg: "每台设备只能加入一个队伍~~" };
@@ -247,23 +252,19 @@ console.log("== T14 期次切换 ==");
   eq("T14 快照时 joined 已被清空", joinedAtSnapshot, false);
   eq("T14 期次已更新", h.store.lastPeriodId, "288"); }
 
-// ================= T15 F1 客户端侧意图：结果回报投递失败时仍正确累计 exclude_codes =================
-console.log("== T15 结果回报丢失 → 客户端 exclude_codes 累计（服务端修复见 sql 测试）==");
+// ================= T15 结果回报 5xx → 立即停止重试并进入退避 =================
+console.log("== T15 结果回报 5xx（2026-10-24 起不再继续撞池子）==");
 { const h = setup({ myinfo: [TI_CREATED1], join: [J_FULL],
-    poolJoin: () => ({ status: 200, data: { ok: true, lease_id: "L1", code: "C1" } }),  // 模拟服务端幂等分支原样返回同一码
+    poolJoin: () => ({ status: 200, data: { ok: true, lease_id: "L1", code: "C1" } }),
     result: { status: 500, data: { ok: false, error: "internal_error" } } });             // 结果回报 5xx
   reset(); await run(h);
-  const joins = payloads(h, "/v2/join");
-  eq("T15 尝试 3 次", joins.length, 3);
-  eq("T15 客户端每次请求的避开码（意图正确）", joins.map((p) => p.exclude_codes), [[], ["C1"], ["C1"]]);
-  eq("T15 但服务端未采纳 → 实际反复加入同一队码", h.kugou.filter((x) => x.url === "/team/join").map((x) => x.params.team_code), ["C1", "C1", "C1"]);
-  eq("T15 结果回报请求数（3 次回报 × 每次 5xx 补射 1 次 = 6）", h.pool.filter((p) => p.path === "/v2/join/result").length, 6);
-  eq("T15 最终错误码", ui().lastError.code, "join_exhausted");
-  eq("T15 未就回报失败打扰用户（5xx 静默是刻意设计：入队可能已成功）", h.toasts.filter((t) => t.includes("回报") || t.includes("结果")).length, 0);
-  // 3 次回报 × 每次 1 条 warn（注意：poolRequest 内部对 5xx 的补射不会各自再 warn）
-  eq("T15 但留下了可观测痕迹（console.warn 有 3 条）", warns.filter((w) => w.includes("结果回报失败")).length, 3);
-  console.log("  → 客户端 exclude_codes 正确（[]→[C1]→[C1]），但服务端幂等分支原样返回同一码 → 重试全落在同一坏队（F1）");
-  console.log("  → 服务端侧修复已由 tests/team-pool-worker.sql.test.py 覆盖"); }
+  eq("T15 只尝试 1 次（结果回报 5xx → 退避，不再重试）", payloads(h, "/v2/join").length, 1);
+  eq("T15 结果回报请求数（1 次回报 + 5xx 补射 1 次）",
+     h.pool.filter((p) => p.path === "/v2/join/result").length, 2);
+  eq("T15 错误码为退避", ui().lastError.code, "pool_backoff");
+  eq("T15 已开启故障退避", __t.poolBackoff.nextAttemptAt > 0, true);
+  eq("T15 留下可观测痕迹", warns.filter((w) => w.includes("结果回报失败")).length, 1);
+  console.log("  → 服务端幂等分支的 exclude_codes 修复仍由 tests/team-pool-worker.sql.test.py 覆盖"); }
 
 // ================= T16 F2：结果回报 401 → 落库停用 + 立即终止 =================
 console.log("== T16 F2 结果回报 401（修复前会静默、并多绕一轮）==");
@@ -330,6 +331,54 @@ console.log("== T21 F7 期次切换裁剪 poolAuthDisabled ==");
   await run(h);
   eq("T21 只保留当前期次", Object.keys(h.store.poolAuthDisabled), ["288:U1"]);
   eq("T21 内存 Set 同步", [...__t.disabledPeriods], ["288:U1"]); }
+
+// ================= T22 结果回报 5xx → VERIFY 快照仍强制发送 =================
+console.log("== T22 入队成功后结果回报 5xx，VERIFY 快照必须照发 ==");
+{ const h = setup({ myinfo: [TI_CREATED1, TI_JOINED],
+    result: { status: 500, data: { ok: false, error: "internal_error" } } });
+  reset(); await run(h);
+  eq("T22 已入队", ui().joined, true);
+  eq("T22 发出 2 次快照（初始 + VERIFY）",
+     paths(h).filter((p) => p === "/v2/snapshot").length, 2);
+  eq("T22 最后一个请求是 VERIFY 快照", paths(h)[paths(h).length - 1], "/v2/snapshot");
+  eq("T22 VERIFY 携带 joined_checked", payloads(h, "/v2/snapshot")[1].joined_checked, true);
+  eq("T22 无错误残留", ui().lastError, null); }
+
+// ================= T23 404 lease_not_found 不触发退避 =================
+console.log("== T23 迟到结果（租约已被服务端清理）不惩罚、不退避 ==");
+{ const h = setup({ myinfo: [TI_CREATED1], join: [J_FULL],
+    poolJoin: (n) => ({ status: 200, data: { ok: true, lease_id: "L" + n, code: "C" + n } }),
+    result: { status: 404, data: { ok: false, error: "lease_not_found" } } });
+  reset(); await run(h);
+  eq("T23 不开启故障退避", __t.poolBackoff.nextAttemptAt, 0);
+  eq("T23 继续重试 3 次", payloads(h, "/v2/join").length, 3);
+  eq("T23 最终 join_exhausted", ui().lastError.code, "join_exhausted"); }
+
+// ================= T24 池空退避 =================
+console.log("== T24 池空退避（20/30/60 分钟）==");
+{ const h = setup({ myinfo: [TI_CREATED1], poolJoin: { status: 200, data: { ok: true, code: null, reason: "pool_empty" } } });
+  reset(); await run(h);
+  eq("T24 池空后退避已开启", __t.poolEmptyBackoff.nextAttemptAt > Date.now(), true);
+  eq("T24 首档 step=1", __t.poolEmptyBackoff.step, 1);
+  // 手动/强制流程不受池空退避限制；领到码后立即清零
+  const h2 = setup({ myinfo: [TI_CREATED1, TI_JOINED] });
+  await runFullFlow(h2.c, "manual", { force: true });
+  eq("T24 force 仍会发起 join", paths(h2).includes("/v2/join"), true);
+  eq("T24 领到码后清空池空退避", __t.poolEmptyBackoff.nextAttemptAt, 0); }
+
+// ================= T25 joined_checked 协议 =================
+console.log("== T25 joined_checked：字段缺失 vs 明确空列表 ==");
+{ const h = setup({ myinfo: [TI_CREATED1] });
+  reset(); await run(h);
+  eq("T25 缺少 my_join_team_list → false（老客户端不清 last_joined）",
+     payloads(h, "/v2/snapshot")[0].joined_checked, false); }
+{ const h = setup({ myinfo: [TI_JOIN_EMPTY] });
+  reset(); await run(h);
+  eq("T25 明确空数组 → true（允许服务端清空 last_joined）",
+     payloads(h, "/v2/snapshot")[0].joined_checked, true); }
+{ const h = setup({ myinfo: [TI_JOINED] });
+  reset(); await run(h);
+  eq("T25 已加入 → true", payloads(h, "/v2/snapshot")[0].joined_checked, true); }
 
 console.warn = origWarn;
 report();

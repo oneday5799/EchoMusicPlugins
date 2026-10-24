@@ -1,4 +1,4 @@
-// auto-team-vip v1.2.2 —— v2 快照/租约协议
+// auto-team-vip v1.2.5 —— v2 快照/租约协议
 // 架构设计：docs/auto-team-vip-redesign.md（§4 §7）
 //
 // 职责边界：
@@ -17,8 +17,10 @@ const RETRY_MAX = 3;                  // 当轮 join 重试上限（含首次）
 const RETRY_DELAY_MS = 2000;          // 重试间隔
 const MIN_RUN_INTERVAL_MS = 10_000;   // 触发合并窗口
 const HEARTBEAT_TICK_MS = 60_000;     // 心跳巡检周期
-const SNAPSHOT_INTERVAL_MS = 5 * 60_000;    // 保活快照间隔
+const SNAPSHOT_INTERVAL_MS = 5 * 60_000;    // 面板打开时的保活快照间隔
+const JOINED_SNAPSHOT_INTERVAL_MS = 30 * 60_000; // 已入队且面板关闭时的保活快照间隔（额度优化）
 const FULLFLOW_INTERVAL_MS = 10 * 60_000;   // 等待新码的完整流程间隔
+const POOL_EMPTY_BACKOFF_STEPS_MS = [20, 30, 60].map((m) => m * 60_000); // 池空退避（避免每 10 分钟空撞）
 const INACTIVE_PROBE_INTERVAL_MS = 30 * 60_000; // 期次未开启时的低频探测（下一期自动开始）
 const POOL_BACKOFF_STEPS_MS = [5, 15, 30].map((m) => m * 60_000); // 码池不可用退避
 const POOL_RATE_LIMIT_BACKOFF_MS = 60_000; // 码池限速（429）短退避：令牌桶持续 1r/s，很快恢复，不适用指数退避
@@ -114,6 +116,24 @@ function poolAvailable() {
   return Date.now() >= poolBackoff.nextAttemptAt && Date.now() >= pool429Until;
 }
 
+// 池空退避（2026-10-24）：池里暂时没有可用队伍时，不再每 10 分钟重复 snapshot+join。
+// 手动刷新 / 启动 / 登录触发的完整流程不受限制；成功领到码立即清零。
+const poolEmptyBackoff = { step: 0, nextAttemptAt: 0 };
+
+function poolEmptyBackoffStart() {
+  // 已在退避窗口内（手动刷新等 force 流程）不重复加档
+  if (poolEmptyBackoff.nextAttemptAt > Date.now()) return;
+  const idx = Math.min(poolEmptyBackoff.step, POOL_EMPTY_BACKOFF_STEPS_MS.length - 1);
+  poolEmptyBackoff.nextAttemptAt = Date.now() + POOL_EMPTY_BACKOFF_STEPS_MS[idx];
+  poolEmptyBackoff.step = Math.min(poolEmptyBackoff.step + 1, POOL_EMPTY_BACKOFF_STEPS_MS.length - 1);
+  dlog("[池空退避]", Math.round((poolEmptyBackoff.nextAttemptAt - Date.now()) / 1000) + "s");
+}
+
+function poolEmptyBackoffClear() {
+  poolEmptyBackoff.step = 0;
+  poolEmptyBackoff.nextAttemptAt = 0;
+}
+
 // 退避/限速剩余毫秒（取两者较晚者），用于面板与复制详情说明"还要等多久"。
 function poolBackoffRemainingMs() {
   return Math.max(poolBackoff.nextAttemptAt, pool429Until) - Date.now();
@@ -126,7 +146,8 @@ function poolBackoffRemainingMs() {
 // 刻意不包含：
 //   pool_unauthorized —— 401 走 disablePool() 按期次永久停用，不开退避，
 //                        后续在 isPoolDisabled 处即返回，永到不了本分支；
-//   pool_bad_response / pool_empty —— 直接 return，不开退避；
+//   pool_bad_response —— 直接 return，不开退避；
+//   pool_empty —— 走独立的池空退避（poolEmptyBackoff），不是故障退避；
 //   pool_backoff —— 它本身就是回显，不是根因。
 // 误把不相干的错误（如 create_team_failed、酷狗 join 失败）挂成根因，
 // 会让用户照着错误的方向排查。
@@ -397,8 +418,11 @@ function normalizeTeamInfo(body) {
     };
   };
   const createList = Array.isArray(d?.my_create_team_list) ? d.my_create_team_list : [];
-  const joinList = Array.isArray(d?.my_join_team_list) ? d.my_join_team_list : [];
-  return { created: toTeam(createList[0]), joined: toTeam(joinList[0]), raw: d };
+  const joinListRaw = d?.my_join_team_list;
+  const joinList = Array.isArray(joinListRaw) ? joinListRaw : [];
+  // joinedChecked：区分"明确拿到空列表"与"字段缺失/响应异常"。
+  // 服务端只在 true 时清空 last_joined_code（酷狗不支持退队，误清会造成重复分配）。
+  return { created: toTeam(createList[0]), joined: toTeam(joinList[0]), joinedChecked: Array.isArray(joinListRaw), raw: d };
 }
 
 // 错误分类（2026-09-12 修订）：仅显式证据才归类为队伍终态（full/already_joined/invalid），
@@ -740,6 +764,9 @@ async function poolResult(c, periodId, uid, leaseId, result, errorKind) {
 async function reportLeaseResult(c, periodId, uid, leaseId, result, errorKind) {
   const r = await poolResult(c, periodId, uid, leaseId, result, errorKind);
   if (r.ok) return "ok";
+  // 租约已被服务端终态清理（超过 1 小时的迟到结果）：不是故障，不惩罚、不退避。
+  // 服务端只会对 lease 不存在返回该错误（{ok:false,error:"lease_not_found"}）。
+  if (r.status === 404 && r.data?.error === "lease_not_found") return "ok";
   if (r.status === 401) {
     await disablePool(c, periodId, uid);
     if (uiState) uiState.poolDisabled = true;
@@ -762,14 +789,17 @@ async function reportLeaseResult(c, periodId, uid, leaseId, result, errorKind) {
 }
 
 // 上报快照；返回 "ok" | "disabled" | "down"
-async function doSnapshot(c, periodId, uid, teamInfo) {
+// opts.confirm：入队成功后的 VERIFY 快照强制发送一次——即使结果回报失败刚开启了退避。
+//   否则"用户实际已入队"这一事实无法上报，success 租约 10 分钟后过期、名额被释放，
+//   心跳降到 30 分钟后这个窗口会明显放大。
+async function doSnapshot(c, periodId, uid, teamInfo, opts = {}) {
   if (await isPoolDisabled(c, periodId, uid)) {
     if (uiState) uiState.poolDisabled = true;
     return "disabled";
   }
   // 退避窗口内同样要让用户看见：否则首次失败后，后续每轮心跳都是静默 no-op，
   // 面板全绿却永远不组队（2026-09-30 线上反馈）。
-  if (!poolAvailable()) {
+  if (!opts.confirm && !poolAvailable()) {
     if (uiState) uiState.poolDown = true;
     const waitSec = Math.max(1, Math.ceil(poolBackoffRemainingMs() / 1000));
     // 保留根因：此处本轮并未发请求，上一轮失败携带的现场诊断才是唯一线索。
@@ -812,6 +842,8 @@ async function doSnapshot(c, periodId, uid, teamInfo) {
           members: teamInfo.joined.members,
         }
       : null,
+    // 只有明确拿到 my_join_team_list（数组）时才允许服务端清空 last_joined_code
+    joined_checked: teamInfo.joinedChecked === true,
   };
 
   const r = await poolRequest(c, "/v2/snapshot", payload);
@@ -897,6 +929,7 @@ async function runFullFlow(c, reason, opts = {}) {
     if (lastPeriodId && lastPeriodId !== periodId) {
       // 期次切换：清空本地缓存的码与 joined 状态（token 为账号级，由新期次 DO 重签覆盖）
       dlog("[期次切换]", lastPeriodId, "->", periodId);
+      poolEmptyBackoffClear(); // 新期次重新开始，不继承上一期的池空退避
       if (uiState) {
         uiState.myCode = "";
         uiState.myMemberCount = 0;
@@ -988,6 +1021,13 @@ async function runFullFlow(c, reason, opts = {}) {
     const excludedCodes = new Set(); // 本轮流程内失败过的队（network 除外），重试时请求服务端避开
     const attempts = []; // 本轮各次尝试的失败摘要（含酷狗原始错误码/文案/HTTP 状态），全部失败后随 join_exhausted 进复制详情，供用户反馈
     for (let attempt = 1; attempt <= RETRY_MAX; attempt++) {
+      // 结果回报失败已开启退避时，不再继续撞码池（避免故障期放大请求与写行）
+      if (!poolAvailable()) {
+        const waitSec = Math.max(1, Math.ceil(poolBackoffRemainingMs() / 1000));
+        setLastError(`码池暂时不可用，约 ${Math.ceil(waitSec / 60)} 分钟后自动重试`, "pool_backoff",
+          { periodId, uid, waitSeconds: waitSec, backoffStep: poolBackoff.step });
+        return;
+      }
       const joinRes = await poolJoin(c, periodId, uid, [...excludedCodes]);
       if (!joinRes.ok) {
         if (joinRes.status === 401) {
@@ -1032,6 +1072,7 @@ async function runFullFlow(c, reason, opts = {}) {
         return;
       }
       if (d.reason === "pool_empty" || !d.code) {
+        poolEmptyBackoffStart(); // 池空退避：避免每 10 分钟重复 snapshot+join
         setLastError("暂无可加入的队伍，可手动组队或耐心等待", "pool_empty", { periodId, uid });
         return;
       }
@@ -1045,6 +1086,7 @@ async function runFullFlow(c, reason, opts = {}) {
 
       const leaseId = String(d.lease_id || "");
       const code = String(d.code);
+      poolEmptyBackoffClear(); // 领到码 = 池子已恢复，清空池空退避
       const joinKugou = await joinTeam(c, code);
       if (!joinKugou.ok) {
         // 酷狗请求本身失败（网络/未登录）：与队伍状态无关，不参与服务端纠偏
@@ -1057,10 +1099,12 @@ async function runFullFlow(c, reason, opts = {}) {
       const parsed = parseJoinResponse(joinKugou);
       if (parsed.httpOk && parsed.bizOk) {
         await reportLeaseResult(c, periodId, uid, leaseId, "success", "");
-        // ⑧ VERIFY + SNAPSHOT：把成队后的真实人数报给码池
+        // ⑧ VERIFY + SNAPSHOT：把成队后的真实人数报给码池。
+        // confirm=true：结果回报即使刚失败触发退避，也要强制发一次——
+        // 否则 success 租约 10 分钟后过期、名额被释放，可能又分配给其他人。
         const verify = await getMyTeamInfo(c, periodId);
         if (verify.ok) applyTeamInfoToState(verify);
-        await doSnapshot(c, periodId, uid, verify.ok ? verify : myInfo);
+        await doSnapshot(c, periodId, uid, verify.ok ? verify : myInfo, { confirm: true });
         clearIfNoNewError(); // 入队成功＝问题已解决
         return;
       }
@@ -1499,12 +1543,18 @@ export async function activate(_ctx) {
       }
       return;
     }
-    const completed = uiState.joined && uiState.myMemberCount >= uiState.targetMembers;
-    if (autoOn && !completed && now - lastFullAt >= FULLFLOW_INTERVAL_MS) {
+    // 已入队（无论自己创建还是加入他人）＝终态：只需低频保活快照。
+    // 原实现用 myMemberCount（"我创建的队伍"人数）判断完成，加入别人队伍时恒为 false，
+    // 导致每 10 分钟仍跑完整流程，30 分钟快照分支几乎永不生效。
+    const joined = Boolean(uiState.joined);
+    // 面板打开时保持 5 分钟刷新（用户在看）；关闭时已入队降为 30 分钟。
+    const snapshotInterval = panelOpen ? SNAPSHOT_INTERVAL_MS : JOINED_SNAPSHOT_INTERVAL_MS;
+    if (autoOn && !joined && now - lastFullAt >= FULLFLOW_INTERVAL_MS &&
+        now >= poolEmptyBackoff.nextAttemptAt) {
       lastFullAt = now;
       lastSnapshotAt = now;
       requestRun(_ctx, "heartbeat_full");
-    } else if (now - lastSnapshotAt >= SNAPSHOT_INTERVAL_MS) {
+    } else if (now - lastSnapshotAt >= snapshotInterval) {
       lastSnapshotAt = now;
       requestRun(_ctx, "heartbeat_snapshot", { snapshotOnly: true });
     }
