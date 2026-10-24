@@ -3,7 +3,7 @@
 自动参加概念版官方活动「组队瓜分酷狗概念版畅听VIP」并组队，插件入口在软件顶部⭐️。
 
 - 插件名：自动组队领VIP
-- 版本：1.2.4（v2 快照/租约协议）
+- 版本：1.2.5（v2 快照/租约协议）
 - 作者：Oneday5799
 - 依赖：EchoMusic `>=2.3.2-beta.2`（需已内置组队接口）
 - 架构设计文档：[`docs/auto-team-vip-redesign.md`](../docs/auto-team-vip-redesign.md)
@@ -43,8 +43,9 @@
 - **名额计算在服务端**：`可用名额 = 2 - (快照人数 - 1) - 在途租约数`，插件不再上报"剩余名额"
 - **租约自愈**：领码后崩溃/断网 → 120s 自动回收；成功但快照缺失 → 10min 后释放；任何路径无永久泄漏
 - **匹配策略**：快满优先（尽快产出完整队伍）+ FIFO；full/invalid 失败直接纠偏队伍状态或冷却；transient（客户端侧抖动）不冷却，仅当轮流程内避让
-- **心跳**：面板打开或自动开关开启时，每 5min 保活快照（关闭自动组队时该步退化为"仅查询酷狗"）；本期未完成时每 10min 完整流程等新码；期次未开启时每 30min 低频探测，下一期自动开始；获取期次信息失败按常规间隔自动重试
-  - 心跳里的"本期完成"判定为 `已加入 && 我创建队伍人数 >= 目标人数`，只影响快照间隔（5min/10min）的选择；因 DECIDE 步骤已提前返回，不会导致重复入队
+- **心跳**：面板打开时每 5min 保活快照（用户在看）；面板关闭且**已入队**时降为每 30min；未入队时每 10min 完整流程等新码（池空时退避 20→30→60min）；期次未开启时每 30min 低频探测，下一期自动开始；获取期次信息失败按常规间隔自动重试
+  - "已入队"判定用 `uiState.joined`（我加入的队伍），不再用"我创建队伍人数"——加入他人队伍时后者恒为 1 人，会让 30min 快照分支永不生效
+  - 入队成功后的 VERIFY 快照**强制发送一次**：即使结果回报刚失败触发退避，也要把真实人数报上去，避免 success 租约 10min 后过期、名额被释放
 - **身份防伪**：首次快照由服务端签发 token（按酷狗 userid 绑定），永不重签；伪造 uid 得到 401
 - **多设备**：token 与设备绑定（首次快照时签发）。同一账号在多台设备同时使用时，仅最先上报快照的一台可使用码池功能，其余收到 401 提示（防劫持设计取舍，下期先到先得）
 - **隐私**：客户端只能看到自己的队伍与租约 + 匿名聚合统计（v1 的全量队伍码端点已删除）；成员名单/昵称/奖励仅随快照存储于码池，站长经 `X-Admin-Token` 调用 `/v2/health`（聚合）与 `/v2/admin/data`（全量明细，含成员观测名单与每人 `vip_desc` 奖励）查看
@@ -64,10 +65,13 @@
 
 1. `wrangler secret put ADMIN_TOKEN` 配置管理端点门禁密钥
 2. `wrangler deploy` 部署 Worker（v2 直接切换：部署后 v1 端点 404、v1.1.x 客户端码池功能 403）
+   > ⚠️ 若当前已超出免费额度，**首次创建索引的 DDL 也会失败**（`_init` 抛错 → 所有请求 500）。
+   > 请在 UTC 00:00（北京时间 08:00）额度重置后再部署，或临时升级 Paid。索引是追加式 DDL，不会清空数据。
+   > 本次新增 `leases(status, expires_at)`、`leases(code, status, expires_at)`；`workers_dev` 已关闭。
 3. 验证 `POST /v2/health`（携带 `X-Admin-Token` 与 `X-Plugin-Version` 头）返回聚合计数
 4. 确认**没有**跳过规则会误伤插件流量（见下"跳过规则与限流的顺序"）
 5. 配置限流规则（**建议执行，非功能必需**；见下"限流规则配置"）——兜住"任意合法 `period_id` 批量创建 DO"的放大风险
-6. 插件 1.2.4 发版（与步骤 2 紧凑衔接，避免长时间功能空窗）
+6. 插件 1.2.5 发版（与步骤 2 紧凑衔接，避免长时间功能空窗）
 7. 浏览器打开 [`admin.html`](../team-pool-worker/admin.html) 看板核对数据面
 
 ### 限流规则配置（步骤 5 展开）
@@ -96,14 +100,17 @@
 | Rule name | `v2-pool-rate-limit` |
 | Field / Operator / Value | `Path` → `starts with` → `/v2/` |
 | With the same characteristics | `IP` |
-| When rate exceeds | Requests = **30**，Period = **10 seconds** |
+| When rate exceeds | Requests = **20**，Period = **10 seconds** |
 | Then take action | **Block**（⚠️ 不要选 Managed Challenge / JS Challenge） |
 | Response type / code / body | `Custom JSON` / `429` / `{"ok":false,"error":"rate_limited","message":"请求过于频繁，请稍后再试"}` |
 | Duration | **10 seconds** |
 
-**阈值取 30 的理由**：Worker 自身令牌桶是"突发 5 + 每秒 1"（按 uid），单账号任意 10 秒内最多被接受 **15 次**；
-插件单设备最坏突发（完整流程 ×3 次重试，含 2s 间隔，叠加 5xx 补射）约 14 次。取 30 ≈ 2 倍余量，
-同时把滥用压到 180 次/分钟/IP。用户多为单设备单 IP 时可收紧到 20。
+**阈值取 20 的理由**：Worker 自身令牌桶是"突发 5 + 每秒 1"（按 uid，实例内存），单账号任意 10 秒内最多被接受 **15 次**；
+插件单设备最坏突发（完整流程 ×3 次重试，含 2s 间隔，叠加 5xx 补射）约 14 次。取 20 ≈ 1.4 倍余量，
+同时把滥用压到 120 次/分钟/IP。
+
+> **WAF 是硬边界，内存限速只是尽力而为**：DO 可能在两次心跳之间被驱逐，内存令牌桶会重置为突发 5。
+> 因此不要把限速当成额度保护；真正的额度保护是 WAF + 下面的容量控制。
 
 **动作必须选 Block（返回 429），不能选 Challenge**：插件是桌面客户端（Electron），**解不了验证码**；
 Challenge 会返回 HTML 挑战页，插件拿不到 JSON 会退化成"一直失败"。而插件对 429 有专门处理
@@ -131,7 +138,7 @@ Worker 在调用 `getByName()` **之前**就校验 `period_id`，所以**不带 
 seq 1 100 | xargs -P 20 -I{} curl -s -o NUL -w "%{http_code}\n" -X POST \
   https://echo-team-pool.oneday.vip/v2/status \
   -H "Content-Type: application/json" \
-  -H "X-Plugin-Version: 1.2.4" \
+  -H "X-Plugin-Version: 1.2.5" \
   -d '{}' | sort | uniq -c
 ```
 
@@ -146,7 +153,44 @@ seq 1 100 | xargs -P 20 -I{} curl -s -o NUL -w "%{http_code}\n" -X POST \
 若第 5 个左右就大面积 429，说明出口 IP 是共享的（公司/校园网/NAT），换网络再测或适当调大阈值。
 之后可在控制台 **Security Events** 查看限流命中记录。
 
-**上线后建议盯两个数**：Workers 请求数（免费版 10 万/天，UTC 00:00 重置）、Durable Objects 存储用量（免费版账户总额 5 GB）。
+### 免费额度与容量（务必看）
+
+Cloudflare **Workers Free** 的 Durable Objects（SQLite 后端）每日硬上限：
+
+| 指标 | 免费额度 | 重置时间 |
+|------|----------|----------|
+| DO **rows read** | **5,000,000 / 天** | UTC 00:00（北京时间 08:00） |
+| DO **rows written** | **100,000 / 天** | 同上 |
+| Workers 请求数 | 100,000 / 天 | 同上 |
+
+计费口径（容易踩坑）：
+
+- **全表扫描按扫描行数计**。`SELECT COUNT(*) FROM leases` 在 6000 行租约时算 6000 行读。
+- `UPDATE` / `DELETE` 按命中行数计写；`setAlarm()` 算 1 行写；**被索引的列更新会额外 +1 行写**。
+- 一次 `INSERT` 到有 2 个索引的表 ≈ 3 行写；`events` 的环形日志一次审计 ≈ 4 行写（插入 + 删除 + 小时桶 + 索引）。
+
+**2026-10 的额度故障**就是读放大：旧实现每个快照都 `_sweepExpired()` 全表扫 `leases`，200 台设备 × 288 次/天
+× 约 6000 行 ≈ 3.4 亿行读/天。现已改为：
+
+- 请求热路径**不再清扫**，只由 `alarm` / `health` / `admin` 回收过期租约
+- `alarm` 的每日清理与终态租约清理改为**按时间门控**（原每次 alarm 都跑，活跃期每 2~10 分钟一次）
+- 快照不再写审计事件、`users` 改为条件更新、队伍改为"有变化才写 + 每小时保活一次"
+- 管理看板自动刷新 30s → **5 分钟**，且页面不可见时跳过
+
+容量估算（旧客户端 5min 心跳）：单设备每天约 **288 次快照**，免费 10 万请求/天大约只能支撑
+**250~300 台**（还要留给 join/result）。插件 1.2.5 把已入队心跳降到 30min 后，请求侧可支撑 1000+ 台。
+读行在优化后约 **1~3M/天**（200 台），写行约 **2~3 万/天**。
+
+> 若图表显示 `2B 读 / 5 天` 与 `5M/天` 矛盾，先确认图表选的是 **Durable Objects → PeriodPool**
+> 而不是账户汇总/D1，以及这几天账户是否处于 Paid 计划。
+
+### workers.dev 入口已关闭
+
+`wrangler.toml` 中 `workers_dev = false`。workers.dev 是**唯一完全绕开 `oneday.vip` WAF / 限流 / 地域规则**
+的入口，而插件只用自定义域；留着只会给扫描器多一个不受限的写入通道。部署后可用
+`wrangler tail` 或 Workers analytics 按 hostname 确认没有非 `echo-team-pool.oneday.vip` 的流量。
+
+**上线后建议盯四个数**：DO **Rows read**、DO **Rows written**、Workers 请求数、Durable Objects 存储用量。
 
 ### WAF 质询（务必配置，否则插件无法组队）
 
@@ -211,7 +255,7 @@ Managed Challenge / Bot Fight Mode。自定义域 `echo-team-pool.oneday.vip` �
 确认方法：拿响应里的 **Ray ID** 去 **Security → Events** 搜索，直接看是哪个产品拦的。
 
 > **已确认可用**：2026-09-30 关闭 BFM 后实测 4 个 `/v2/*` 端点均直达 Worker
-> （`snapshot` 返回 200 + 池子聚合数据）。修复后请以本节配置为准。
+> （`snapshot` 返回 200；池子聚合需请求体带 `"stats":true`，插件热路径不传）。修复后请以本节配置为准。
 
 ### 码池地址
 
@@ -226,6 +270,8 @@ Managed Challenge / Bot Fight Mode。自定义域 `echo-team-pool.oneday.vip` �
 说明是 workers.dev 域名被针对，不是 DNS 故障。
 
 因此**没有旁路可用**，`oneday.vip` 是唯一入口，质询只能在 Cloudflare 侧解决。
+`wrangler.toml` 现已设 `workers_dev = false`：既然它在中国大陆不可用、插件也只用自定义域，
+保留它只会多出一个绕开 zone 级 WAF/限流的公开入口（2026-10-24）。
 若将来确需兜底域，必须是**国内可直连**的域名（不能是 workers.dev），
 且需先实测其 DNS 解析与连通性，**不要凭格式猜地址**——2026-09-30 曾因写入编造的
 workers.dev 占位地址，返回 `1042 workers_dev_script_not_found`，

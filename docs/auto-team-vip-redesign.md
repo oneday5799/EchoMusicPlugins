@@ -4,6 +4,7 @@
 > 复核修订：token 永不重签、租约过期以时间戳判定、失败冷却改列存储、限速令牌桶、租约 TTL 120s、status 改 POST
 > 二次复核补充：join 失败当轮立即重试（≤3 次）、失败即纠偏（full 置满员 / invalid 24h 冷却）、runFullFlow 全捕获、uid=酷狗 userid、alarm 清理覆盖全部表
 > 三次复核修订（2026-09-12）：错误分类拆 transient（invalid 仅认显式证据）、join 增 exclude_codes 当轮避让、member_count 单调性审计补全、join 检查顺序快照优先
+> 额度治理修订（2026-10-24，v1.2.5）：请求热路径去全表清扫、alarm 清理按时间门控、租约终态清理与索引、快照写放大治理（pool opt-in / 不写 snapshot 事件 / 条件 UPDATE / 队伍 1h 保活）、内存限速、`joined_checked` 协议、心跳 30min、`workers_dev=false`
 > 范围：`auto-team-vip/`（插件端）+ `team-pool-worker/`（码池服务器）
 > 版本目标：插件 v1.2.0 / Worker API v2
 
@@ -174,20 +175,22 @@ full 状态在期内**正常不会回退**（无退队接口），full 队伍的
   "token": "…",                          // 首次可为空，服务端签发（§6.6）
   "created": { "code": "ABC123", "member_count": 2, "captain": "589524259",
                "members": [ { "userid": "589524259", "nick": "一天", "role": 1, "reward": "获得7天VIP" } ] }, // 可为 null
-  "joined":  { "code": "XYZ789", "member_count": 3, "captain": "357328413", "members": [ /* 同上 */ ] }  // 可为 null
+  "joined":  { "code": "XYZ789", "member_count": 3, "captain": "357328413", "members": [ /* 同上 */ ] }, // 可为 null
+  "joined_checked": true                 // 客户端确实拿到了 my_join_team_list（数组）；老客户端不传
 }
-// 响应
+// 响应（pool 为 opt-in：请求带 "stats": true 才返回，避免热路径扫 teams/users）
 { "ok": true, "token": "…", "pool": { "open_teams": 12, "waiting": 5 } }
 ```
 
 `waiting`：最近 30 分钟活跃且 `users.last_joined_code` 为空的用户数（待分配人数，见 §6.2）。
 
 服务端处理：
-1. 校验/签发 token（已存在 uid **永不重签**，见 §6.6）；更新 `users.last_seen_at`。
+1. 校验/签发 token（已存在 uid **永不重签**，见 §6.6）；`users.last_seen_at` 与 `last_joined_code` 用**条件更新**（无变化时 0 写）。
 2. Upsert `created` 队（captain_uid = uid）与 `joined` 队（captain 取上报值，外部码 captain 可为空串）→ 更新 `member_count`、`members_json`（成员观测名单，快照携带时覆盖、缺省保留旧值）、`snapshot_at`、status。`joined` 至多 1 支（已确认 `my_join_team_list` 上限为 1）；若异常上报多支，取第一支并记 events。
-3. 更新 `users.last_joined_code`（joined 非空 → 该 code；否则清空）。
+   - **写放大治理（2026-10-24）**：观测无变化时只每 `TEAM_REFRESH_MS`（1h）刷新一次 `snapshot_at`；full 队无变化时连保活刷新也跳过。冷却只在"成员变化 / joined 快照 / 已观测 ≥2 人"时清除，单纯保活刷新不再复活 invalid 的 24h 冷却。
+3. 更新 `users.last_joined_code`（joined 非空 → 该 code；`joined_checked=true` 且 joined 为空 → 清空；**老客户端不传或字段缺失 → 不清空**，酷狗不支持退队）。
 4. 若该 uid 存在 `pending`/`success`/`expired` 租约且 `joined.code` 与其 code 相符 → 统一转 `confirmed`（"迟到成功"仅作账目修正与审计一致性；名额真值由 `member_count` 保证，见 §5.2）。
-5. 返回轻量聚合统计（供 UI 展示）。
+5. 返回 token；`pool` 聚合仅在请求带 `stats: true` 时计算并返回（运维脚本用），插件热路径不传。
 
 #### `POST /v2/join` —— 申请分配
 
@@ -302,7 +305,15 @@ CREATE TABLE IF NOT EXISTS events (          -- 环形审计日志（保留最�
 
 - `pending` / `success` 占用名额；`confirmed` / `failed` / `expired` 不占用。
 - **过期判定以 `expires_at` 与当前时间比较为准**：alarm 只是"到期后执行回收"的执行者；所有查询（幂等检查、名额计算）必须同时校验时间戳，不能只看 status 字段——否则 alarm 延迟期间会把已过期租约误判为在途（少算名额、幂等返回死租约）。
-- 回收由 **DO alarm 驱动**：alarm 时间 = min(最近的 pending/success `expires_at`, 每日清理点)。alarm 触发时执行过期回收 + 每日清理（users/teams/leases/events **全部表**的 30 天旧数据、rate_limit 过期行；判空 `deleteAll` 同样以全部表为准，v1 逻辑只认 codes/rate_limit，重写时勿遗漏），并按需设置下一次 alarm。
+- **请求热路径不做清扫**（2026-10-24 额度治理）：`snapshot` / `join` / `join/result` / `status` 不再调用 `_sweepExpired()`。原实现每个快照都全表扫 `leases`，200 台设备、6000 行租约时单次约 6300 行读，占读额度 90%+。
+  - `joinResult` 对迟到结果**显式判断** `expires_at <= now`：过期 pending 归档为 expired 后幂等忽略，绝不重新激活或触发队伍冷却。
+  - 清扫只保留在 `alarm` / `health` / `adminData` / `adminDelete`。
+- 回收由 **DO alarm 驱动**：alarm 时间 = min(最近未过期 pending/success `expires_at`, 每日清理点, 终态清理点)。
+  - **每日清理（24h）与终态租约清理（1h）都按 `meta.last_daily_at` / `meta.last_prune_at` 门控**，不再每次 alarm 都跑（活跃期 alarm 每 2~10 分钟一次，6 条 DELETE + 6 条 COUNT 的全表扫描是继 sweep 之后最大的读放大来源）。
+  - 时间戳**在清理成功之后**才写入：中途失败时下一次 alarm 自动重试（DELETE 幂等）。调度锚定到上次成功清理时间（`last_*_at + interval`），否则租约 alarm 会不断把每日清理往后推。
+  - 终态清理**只删 failed/expired**（`expires_at < now - 1h`），**confirmed 必须保留**——`join` 的 `NOT EXISTS` 依赖它防止同一用户被重复分配同一队。
+  - 每日清理覆盖 users/teams/leases/events **全部表**的 30 天旧数据、rate_limit 过期行；判空 `deleteAll` 同样以全部表为准（v1 逻辑只认 codes/rate_limit，重写时勿遗漏）。
+  - 索引：`leases(status, expires_at)` 供清扫与 alarm MIN 使用；`leases(code, status, expires_at)` 供选队/在途统计使用。两者均走**追加式 DDL**，不 bump `SCHEMA_VERSION`。
 
 ### 6.4 匹配算法（快满优先 + FIFO）
 
@@ -354,7 +365,8 @@ LIMIT 1;
 ### 6.7 部署与迁移
 
 - **Schema 迁移**：`_init()` 读取 `meta.schema_version`；v2 首次部署检测到 v1 表结构（存在 `codes` 表）时 `DROP` 重建——每期活动数据独立，无需保留。`compatibility_date`、DO 绑定、自定义域名路由不变。
-- **WAF 403 问题**（v1 已知）：为 `echo-team-pool.oneday.vip` 配置 WAF 跳过规则（匹配路径 `/v2/*` 或 `X-Plugin-Version` 头）；同时在 wrangler.toml 启用 `workers_dev` 域名作为兜底，插件端 403 时提示切换。
+- **WAF 403 问题**（v1 已知）：为 `echo-team-pool.oneday.vip` 配置 WAF 跳过规则（匹配路径 `/v2/*` 或 `X-Plugin-Version` 头）。
+  - **不要**再用 `workers_dev` 作为兜底（2026-10-24 起 `workers_dev = false`）：它是唯一完全绕开 zone 级 WAF / 限流 / 地域规则的公开入口，而 workers.dev 在中国大陆被 DNS 污染，插件实际只用自定义域。需要兜底时应另绑一个国内可直连的自定义域。
 - `MIN_CLIENT_VERSION` 提至 `1.2.0`（与新插件版本同步），README 版本口径一并修正。
 - **部署节奏**：Worker 先部署即令所有 v1.1.x 客户端码池功能 403（提示更新）——Worker 部署与插件发版应紧凑衔接，避免长时间功能空窗。
 
@@ -363,7 +375,7 @@ LIMIT 1;
 - `POST /v2/health`：请求头 `X-Admin-Token` 与 Worker secret 比对，请求体 `{ "period_id": "…" }`。返回该期 DO 的聚合指标——开放/满员/过期/冷却队伍数、租约各状态数、用户数、24h 异常事件计数。仅聚合、不含 uid/code 明细。供运维监控与容量观察，非客户端功能依赖。
 - `POST /v2/admin/data`：同门禁（`X-Admin-Token`，校验失败返回 404 不暴露端点存在性），站长只读全量明细——当前期全部队伍（code、队长 uid、人数、open/full/stale 状态、最近快照/冷却截止时间、在途租约数）、用户列表（uid、最近加入码、活跃时间；**不含 token**）、最近 200 条租约、最近 100 条审计事件、聚合 summary。
 - 成员名单/昵称/奖励（`members_json`，含每人 `vip_desc`）自 v2.1 起随快照存储，**仅站长端点 `/v2/admin/data` 可见**，普通客户端的 `/v2/status` 仍只返回自身数据；请求需携带 `X-Plugin-Version` 头（版本门禁在前）。
-- 查看方式：(a) **本地看板** `team-pool-worker/admin.html`——浏览器直接打开，填入 API 地址 / 期次 ID / Admin Token 即可查看全量数据与成员明细，支持 30s 自动刷新；两个管理端点已开放 CORS 与 OPTIONS 预检（仍受 Token 门禁）；(b) **命令行**：`curl -X POST <worker>/v2/admin/data -H "X-Admin-Token: <密钥>" -H "X-Plugin-Version: 1.2.0" -H "Content-Type: application/json" -d '{"period_id":"<期次>"}'`。
+- 查看方式：(a) **本地看板** `team-pool-worker/admin.html`——浏览器直接打开，填入 API 地址 / 期次 ID / Admin Token 即可查看全量数据与成员明细，自动刷新 **5 分钟**（页面不可见时跳过；30s 会把 DO 读行放大到约 860 万/天，超过免费额度）；两个管理端点已开放 CORS 与 OPTIONS 预检（仍受 Token 门禁）；(b) **命令行**：`curl -X POST <worker>/v2/admin/data -H "X-Admin-Token: <密钥>" -H "X-Plugin-Version: 1.2.5" -H "Content-Type: application/json" -d '{"period_id":"<期次>"}'`。
 
 ---
 
@@ -399,7 +411,11 @@ async function runFullFlow(reason) {
 | 登录 | token watcher + 2s | 完整流程 |
 | 开关切换 | 用户操作 | 开→完整流程；关→仅停止心跳（快照照发一次以同步状态） |
 | 手动刷新 | 面板按钮（3s 节流） | 完整流程 |
-| **心跳** | 面板打开或自动开关开启时，每 5 min | 仅 SNAPSHOT（保活快照 + 拉聚合统计）；本期未完成时每 10 min 触发完整流程（等待池子出新码） |
+| **心跳** | 面板打开时每 5 min；面板关闭且已入队时每 30 min | 仅 SNAPSHOT（保活）；**未入队**时每 10 min 触发完整流程（等新码），池空时退避 20→30→60 min |
+
+- **"已入队"判定用 `uiState.joined`**（我加入的队伍，含加入他人队伍），不用"我创建队伍人数"——后者在加入他人队伍时恒为 1，会让 30min 快照分支永不生效。
+- **入队成功后的 VERIFY 快照强制发送**（`doSnapshot(..., { confirm: true })`）：即使结果回报刚失败触发退避，也要把真实人数报上去，避免 success 租约 10min 后过期、名额被释放。
+- **重试循环尊重退避**：结果回报失败已开启退避时，不再继续 `poolJoin`（避免故障期放大请求与写行）；`lease_not_found`（超过 1h 的迟到结果）视为成功，不惩罚、不退避。
 
 - **期次切换**：本地存 `lastPeriodId`，发现变化即清空本地缓存的码与 joined 状态（token 为账号级，不清）。
 - **期次未激活**（`period.status ≠ 0`）：UI 显示"本期未开启"，**不建队、不请求码池**（修复 P7）。
@@ -416,22 +432,25 @@ const snapshot = {
                       members: myTeam.members } : null,
   joined:  joinedTeam ? { code: joinedTeam.code, member_count: joinedTeam.memberCount,
                           captain: joinedTeam.captain ?? "", members: joinedTeam.members } : null,
+  joined_checked: joinedChecked,   // 客户端确实拿到 my_join_team_list（数组）时才为 true
 };
 ```
 
 - `member_count` 一律取 `member_list.length`（酷狗权威），不再用 `calcRemaining` 本地推断后上报"剩余名额"——名额计算移到服务端（§5.2）。
-- 响应携带的 `pool` 聚合与 `token`（首次）入库/入 UI。
+- 响应携带 `token`（首次）入库；`pool` 聚合改为 opt-in（`stats: true`），插件热路径不请求，避免每次快照扫 teams/users。
 
 ### 7.4 分配与执行
 
 - `POST /v2/join`：
-  - `code: null, reason: "pool_empty"` → 提示"暂无可加入的队伍"，进入等待心跳循环。
+  - `code: null, reason: "pool_empty"` → 提示"暂无可加入的队伍"，进入 20→30→60min 池空退避（手动刷新/启动/登录不受限，领到码立即清零）。
   - `reason: "already_joined"` → 用返回的 code 校正本地状态，不执行酷狗 join。
   - 拿到 `lease_id + code` → `POST /team/join`（沿用 v1 的验证码处理与错误分类）→ `POST /v2/join/result`（success/failed + error_kind）→ VERIFY 复查 → 再次 SNAPSHOT。
   - 失败重试（≤3 次）携带 `exclude_codes` 避开本轮已失败的队；错误分类默认 `transient`（客户端侧抖动，不冷却），`invalid` 仅认显式证据（§6.4）。
   - join 错误响应结构（2026-09-12 实测）：业务失败走 HTTP 502，错误字段在顶层、`data` 为空串，如 `{"error_msg":"队伍不存在","data":"","status":0,"error_code":143001}`；成功为 HTTP 200 + `status:1` + `error_code:0`（`data` 亦为空串，队伍详情需再查 `my/info`）。
   - 酷狗 join 数值错误码（实测）：`143004`=队伍已满员、`143010`=你已经是队伍成员、`143001`=队伍不存在；`classifyJoinError` 数值码优先判定，文案关键词兜底（"满/full"、"已加入/是队伍成员/已参/joined"、"不存在/无效/已解散/组队码错误"），默认 `transient`。
 - **降级与退避**：码池不可达/5xx 时指数退避（5/15/30 分钟）；限速 429 单独短退避 60s（令牌桶持续 1 req/s，很快恢复，不适用指数退避）；期间酷狗侧建队照常进行；恢复后由心跳自动补报快照。
+  - **限速是实例内存令牌桶**（2026-10-24）：DO 被驱逐后会重置为突发 5，故它是"尽力而为"，硬边界是 Cloudflare WAF。原 `rate_limit` 表实现每请求一次读 + 一次写，200 台设备约 5.8 万写/天。
+  - **auth 失败事件**做 60s 节流（内存 + `meta.last_auth_event_at` 单行兜底），避免 token 错误的请求绕过限速刷写 `events`。
 - **401 处理**：提示"身份校验失败，本期码池功能停用（下期自动恢复）"并停止请求码池；停用按**「期次:账号」粒度**记录（`poolAuthDisabled` 键 = `periodId:uid`），同设备其他账号不受影响；**不得清除 token 重试**——服务端对已存在 uid 永不重签（防劫持，§6.6）。token 仅在用户主动清除插件数据/重装时丢失，属可接受的小概率事件。
 - **手动流程**：手动输入码加入成功 → 触发一次 SNAPSHOT，该码自动入池（外部码有位即可被分配，用户已拍板）；复制自己的码分享给他人 → 对方（无论是否插件用户）加入后，下次快照自动反映人数。
 - **入队即终态**：酷狗不支持退队，`joined` 非空后插件不再发起任何 `/v2/join`（服务端亦会以 `already_joined` 拦截兜底），仅保留心跳快照；本期内的 UI 状态固定为"已加入 <code>"。
@@ -476,7 +495,7 @@ const snapshot = {
 | 序 | 提交 | 内容 |
 |----|------|------|
 | 1 | `docs(auto-team-vip): v2 架构设计方案` | 本文档 |
-| 2 | `feat(team-pool-worker): v2 快照/租约/匹配模型` | worker.js 重写（DO schema、§6 API、alarm 回收）、wrangler.toml（MIN_CLIENT_VERSION=1.2.0、workers_dev 兜底） |
+| 2 | `feat(team-pool-worker): v2 快照/租约/匹配模型` | worker.js 重写（DO schema、§6 API、alarm 回收）、wrangler.toml（MIN_CLIENT_VERSION=1.2.0；workers_dev 兜底已于 2026-10-24 关闭） |
 | 3 | `feat(auto-team-vip): v2 状态机与快照协议` | index.js 重写（§7）、manifest 1.2.0、README 重写 |
 
 实施顺序：Worker 先行部署（旧版客户端只读 403，无兼容负担）→ 插件发版。
@@ -532,8 +551,25 @@ const snapshot = {
 
 1. **alarm 及时性**（§6.3）：`_scheduleNextAlarm` 改为与现有 alarm 取 min——此前覆盖式 setAlarm 在连续分配多笔租约时会把更早租约的到期回收推迟到更晚（正确性由懒清扫+时间戳判定兜底、无名额泄漏，仅回收与 expire 审计不及时）。
 2. **snapshot 懒清扫一致性**（§6.3）：snapshot 入口补 `_sweepExpired()`，与 join/result/status/health/adminData 对齐。
+   > 2026-10-24 已撤销：热路径清扫是额度故障的主因（单次快照扫全表 leases），现仅在 alarm/health/admin 执行，`joinResult` 改为显式判定 `expires_at`。
 3. **429 短退避**（§7.4）：限速响应（429）与网络故障退避分离——令牌桶持续 1 req/s，固定 60s 短退避即可恢复，不再套用 5/15/30min 指数退避。
 4. **/v2/status 标注预留**（§6.1）：当前插件端未调用（快照已覆盖保活与聚合需求），作为协议预留保留。
 5. **README 部署 checklist**（§6.7）：补上线顺序（ADMIN_TOKEN secret → deploy → /v2/health 验证 → WAF 跳过规则确认 → 插件 1.2.0 紧凑发版）。
 
 无遗留开放问题，可按 §10 提交计划实施。
+
+**额度治理修订（2026-10-24，插件 v1.2.5）：**
+
+Cloudflare Workers Free 的 DO SQLite 每日硬上限为 **500 万行读 / 10 万行写**（UTC 00:00 重置）。线上读行被放大到 2B 级，根因与处置：
+
+1. **请求热路径去清扫**：`snapshot`/`join`/`joinResult`/`status` 不再调 `_sweepExpired()`。原每个快照扫全表 leases（200 台设备、6000 行租约时单次约 6300 行读）。`joinResult` 显式判断 `expires_at <= now`，迟到结果归档为 expired 后幂等忽略，不重新激活、不误冷却。
+2. **alarm 门控**：每日清理（24h）与终态租约清理（1h）按 `meta.last_daily_at` / `meta.last_prune_at` 门控；时间戳在清理成功后才写；调度锚定 `last_*_at + interval`，避免被租约 alarm 无限推迟。终态清理只删 failed/expired（`expires_at < now - 1h`），confirmed 保留（`NOT EXISTS` 防重复分配依赖它）。
+3. **索引**：`leases(status, expires_at)`、`leases(code, status, expires_at)`，追加式 DDL，不 bump `SCHEMA_VERSION`。
+4. **快照写放大治理**：`pool` 改 opt-in（`stats:true`）；不再写 snapshot 审计事件；`users.last_seen_at`/`last_joined_code` 合并为条件 UPDATE；队伍"有变化才写 + 每小时保活一次"，full 队无变化不刷新；冷却只在成员变化/joined/观测≥2 人时清除。
+5. **限速内存化**：`_checkRate` 改实例内存令牌桶（原 `rate_limit` 表每请求 1 读 + 1 写，200 台约 5.8 万写/天）；DO 驱逐会重置，WAF 才是硬边界。auth 失败事件 60s 节流。
+6. **插件心跳**：已入队（`uiState.joined`）且面板关闭时 30min 一次快照；面板打开仍 5min；池空退避 20→30→60min；入队成功的 VERIFY 快照强制发送；`lease_not_found` 不退避。
+7. **`joined_checked` 协议**：插件仅在确实拿到 `my_join_team_list` 数组时传 true；服务端只在该字段为 true 时清空 `last_joined_code`。老客户端不传 → 不清空（酷狗不支持退队，误清会造成重复分配）。
+8. **`workers_dev = false`**：关闭绕开 zone 级 WAF/限流的公开入口；自定义域不受影响。
+9. **管理看板**：自动刷新 30s → 5min，页面不可见时跳过。
+
+预期（200 台旧客户端）：读 400M/天 → 1~3M/天；写 60 万/天 → 2~3 万/天。旧客户端请求数仍是瓶颈（约 250~300 台），插件 1.2.5 后可达 1000+ 台。
