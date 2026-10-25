@@ -102,8 +102,22 @@
 | With the same characteristics | `IP` |
 | When rate exceeds | Requests = **20**，Period = **10 seconds** |
 | Then take action | **Block**（⚠️ 不要选 Managed Challenge / JS Challenge） |
-| Response type / code / body | `Custom JSON` / `429` / `{"ok":false,"error":"rate_limited","message":"请求过于频繁，请稍后再试"}` |
+| Response type / code / body | **免费版留空**（自定义响应是 Pro+ 才有的功能）。留空时 Cloudflare 返回默认 429，插件照样识别（见下） |
 | Duration | **10 seconds** |
+
+> **免费版两处硬限制**（官方「Rate limiting rules · Availability」表）：
+> 1. **表达式里不能用 `matches`（正则）** —— 会报 `not entitled: the use of operator Matches is not allowed`。
+>    字段也只能选 **Path / Verified Bot**。
+>    在表达式编辑器里手写时注意：`starts_with` 是**函数**不是运算符，必须写成函数调用，否则报
+>    `expected ComparisonOp`：
+>    ```txt
+>    starts_with(http.request.uri.path, "/v2/")
+>    ```
+>    （用 Expression Builder 的下拉选 `URI Path` → `starts with` → `/v2/`，控制台会自动转成这个形式。）
+> 2. **自定义响应（JSON 429 body）与自定义计数表达式都是 Business+ 功能** —— 免费版会报权限错误。
+>    把 **Use custom counting expression** 开关保持关闭（默认计数表达式 = 规则表达式，正合适）；
+>    响应体留空，Cloudflare 返回默认 429。
+>    插件只依赖 `status === 429`（`poolRateLimited()` + 60s 退避），不读响应体，所以默认响应没有影响。
 
 **阈值取 20 的理由**：Worker 自身令牌桶是"突发 5 + 每秒 1"（按 uid，实例内存），单账号任意 10 秒内最多被接受 **15 次**；
 插件单设备最坏突发（完整流程 ×3 次重试，含 2s 间隔，叠加 5xx 补射）约 14 次。取 20 ≈ 1.4 倍余量，
@@ -142,7 +156,7 @@ seq 1 100 | xargs -P 20 -I{} curl -s -o NUL -w "%{http_code}\n" -X POST \
   -d '{}' | sort | uniq -c
 ```
 
-期望输出形如：约 30 个 `400` + 70 个 `429`（并发下具体数字会有浮动，关键是**两者都出现**）。
+期望输出形如：约 20 个 `400` + 80 个 `429`（阈值 20；并发下具体数字会有浮动，关键是**两者都出现**）。
 
 > 两个坑，都已踩过：
 > 1. **必须并发**。串行 `for` 循环里每次 `curl` 要几百毫秒，30 次可能超过 10 秒导致计数窗口中途重置，
